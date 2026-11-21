@@ -1,10 +1,10 @@
 # Chatbox Windows 桌面版
 
-Chatbox 0.1.2 使用 AstrBot OpenAPI 收发文字和图片。每个服务配置可以保留多个会话，桌面端和 Android 各自保存本机历史。
+Chatbox 0.1.3 使用 AstrBot OpenAPI 收发文字和图片。每个服务配置可以保留多个会话，桌面端和 Android 各自保存本机历史。
 
 ## 安装与构建
 
-正式安装包随 [GitHub Release](https://github.com/Polarzen/chatbox/releases) 分发。同一版本的 `SHA256SUMS.txt` 和 `WINDOWS_V1_ACCEPTANCE.md` 对应发布的 MSI。下载、校验后运行 `Chatbox-0.1.2.msi`。从 0.1.1 升级请先阅读下方升级说明。
+正式安装包随 [GitHub Release](https://github.com/Polarzen/chatbox/releases) 分发。同一版本的 `SHA256SUMS.txt` 和 `WINDOWS_V1_ACCEPTANCE.md` 对应发布的 MSI。下载、校验后运行 `Chatbox-0.1.3.msi`。已有 0.1.2 时，退出客户端并将 0.1.3 安装到原目录即可升级。从 0.1.1 升级请先阅读下方说明。
 
 开发构建可在 [Windows 验证工作流](https://github.com/Polarzen/chatbox/actions/workflows/desktop-windows.yml) 的成功运行中下载，产物名为 `Chatbox-Windows-MSI`，保留 7 天。
 
@@ -13,7 +13,7 @@ Chatbox 0.1.2 使用 AstrBot OpenAPI 收发文字和图片。每个服务配置�
     .\gradlew.bat -p desktop test desktopSmoke
     .\gradlew.bat -p desktop packageMsi
 
-安装包生成于 `desktop/build/compose/binaries/main/msi/Chatbox-0.1.2.msi`。从源码启动可运行 `.\gradlew.bat -p desktop run`。
+安装包生成于 `desktop/build/compose/binaries/main/msi/Chatbox-0.1.3.msi`。从源码启动可运行 `.\gradlew.bat -p desktop run`。
 
 ## 连接和发送
 
@@ -31,7 +31,7 @@ Launcher 和 HTTPS 配置的 Key 通过验证后，使用当前 Windows 用户�
 
 ## 从 0.1.1 升级
 
-0.1.1 的卸载程序可能递归清理整个安装目录。0.1.2 的 MSI 已移除自身的递归清理动作，但升级仍会调用已安装的旧版卸载程序。检测到旧清理设置时，新安装包会阻止升级。若安装目录与源码、下载文件或其他数据共用，请保留现有安装，避免直接卸载旧版。管理员需先备份共享目录，将旧清理目标重定向到独立空目录，并核实它不是重解析点（包括符号链接和目录联接），再按安装器提示继续升级。
+0.1.1 的卸载程序可能递归清理整个安装目录。从 0.1.2 起，新 MSI 已移除自身的递归清理动作，但升级仍会调用已安装的旧版卸载程序。检测到 0.1.1 的旧清理设置时，新安装包会阻止升级。若安装目录与源码、下载文件或其他数据共用，请保留现有安装，避免直接卸载旧版。管理员需先备份共享目录，将旧清理目标重定向到独立空目录，并核实它不是重解析点（包括符号链接和目录联接），再按安装器提示继续升级。
 
 ## 0.1.2 开发阶段实测
 

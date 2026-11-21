@@ -24,13 +24,14 @@ dependencies {
     implementation("org.json:json:20240303")
     testImplementation("junit:junit:4.13.2")
 }
+val windowsPackageVersion = "0.1.3"
 compose.desktop {
     application {
         mainClass = "dev.polarzen.chatbox.DesktopMainKt"
         nativeDistributions {
             targetFormats(TargetFormat.Msi)
             packageName = "Chatbox"
-            packageVersion = "0.1.2"
+            packageVersion = windowsPackageVersion
             modules("java.prefs", "jdk.crypto.ec")
             windows { upgradeUuid = "204b3f78-64ec-4071-9a66-a535773540eb" }
         }
@@ -43,7 +44,7 @@ val desktopSmoke by tasks.registering(JavaExec::class) {
     args("--smoke-test")
 }
 
-val packagedMsi = layout.buildDirectory.file("compose/binaries/main/msi/Chatbox-0.1.2.msi")
+val packagedMsi = layout.buildDirectory.file("compose/binaries/main/msi/Chatbox-${windowsPackageVersion}.msi")
 tasks.configureEach {
     if (name == "packageMsi") {
         inputs.file(layout.projectDirectory.file("patch-windows-msi.ps1"))
@@ -55,7 +56,7 @@ tasks.configureEach {
                     "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
                     "-ExecutionPolicy", "Bypass", "-File",
                     layout.projectDirectory.file("patch-windows-msi.ps1").asFile.absolutePath,
-                    "-MsiPath", msiFile.absolutePath
+                    "-MsiPath", msiFile.absolutePath, "-ExpectedVersion", windowsPackageVersion
                 )
             }
         }

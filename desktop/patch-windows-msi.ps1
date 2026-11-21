@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$MsiPath,
 
-    [string]$ExpectedVersion = '0.1.2'
+    [string]$ExpectedVersion = '0.1.3'
 )
 
 $ErrorActionPreference = 'Stop'
