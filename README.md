@@ -1,8 +1,10 @@
 # Chatbox · 小鲸鱼
 
-Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 OneBot。Windows 和 Android 各自保存本机历史。[Windows 0.1.3 安装、连接与升级说明](desktop/README.md)
+Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 OneBot。Windows 和 Android 各自保存本机历史。[Windows 安装、连接与升级说明](desktop/README.md)
 
-从本私有仓库的 Release 下载 Windows 安装包和 `SHA256SUMS.txt`。在 PowerShell 中运行 `Get-FileHash .\Chatbox-0.1.3.msi -Algorithm SHA256`，与校验文件核对后运行 MSI。实机结果和已知限制见同一版本的 `WINDOWS_V1_ACCEPTANCE.md`。已有 0.1.1 的用户请先阅读升级说明。[Windows 正式版本](https://github.com/Polarzen/chatbox/releases)
+目前可继续使用本机已验证的 0.1.2。0.1.3 候选包已通过 CI，待从该 MSI 完成实机升级和收发验收。[0.1.3 候选包（私有草稿）](https://github.com/Polarzen/chatbox/releases/tag/untagged-060cc942ef447df3e47f) · [验收记录](docs/WINDOWS_V1_ACCEPTANCE.md)
+
+正式发布后，从版本页面下载 MSI 与 `SHA256SUMS.txt`。用 PowerShell 运行 `Get-FileHash .\Chatbox-0.1.3.msi -Algorithm SHA256`，核对后安装。已有 0.1.1 的用户请先阅读旧卸载器的升级说明。[正式版本入口](https://github.com/Polarzen/chatbox/releases) · [从 0.1.1 升级](desktop/README.md#从-011-升级)
 
 以下为 Kotlin + Jetpack Compose 实现的 Android 首版原型，仍待真实手机与服务端联合验收。
 

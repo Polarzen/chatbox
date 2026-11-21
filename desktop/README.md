@@ -4,7 +4,7 @@ Chatbox 0.1.3 使用 AstrBot OpenAPI 收发文字和图片。每个服务配置�
 
 ## 安装与构建
 
-正式安装包随 [GitHub Release](https://github.com/Polarzen/chatbox/releases) 分发。同一版本的 `SHA256SUMS.txt` 和 `WINDOWS_V1_ACCEPTANCE.md` 对应发布的 MSI。下载、校验后运行 `Chatbox-0.1.3.msi`。已有 0.1.2 时，退出客户端并将 0.1.3 安装到原目录即可升级。从 0.1.1 升级请先阅读下方说明。
+0.1.3 仍是候选草稿，实际 Windows 提权升级待验。进度见 [Windows 0.1.3 安装验收记录](../docs/WINDOWS_V1_ACCEPTANCE.md)。正式版本发布后，从 [GitHub 正式版本索引](https://github.com/Polarzen/chatbox/releases) 下载 MSI 与 `SHA256SUMS.txt`，核对后运行 `Chatbox-0.1.3.msi`。已有 0.1.2 时，退出客户端并将 0.1.3 安装到原目录即可升级。从 0.1.1 升级请先阅读下方说明。
 
 开发构建可在 [Windows 验证工作流](https://github.com/Polarzen/chatbox/actions/workflows/desktop-windows.yml) 的成功运行中下载，产物名为 `Chatbox-Windows-MSI`，保留 7 天。
 
