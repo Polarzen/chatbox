@@ -1,33 +1,30 @@
-# Chatbox
+# Chatbox · 小鲸鱼
 
-Chatbox 是一个独立的个人 AI 助手聊天客户端。项目目标是让用户在自己的应用里直接与「小鲸鱼」对话，无需登录 QQ，也无需通过 NapCat 或 OneBot 转发消息。助手后端继续采用 AstrBot。
+Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 OneBot。Windows 和 Android 各自保存本机历史。[Windows 0.1.3 安装、连接与升级说明](desktop/README.md)
 
-**项目状态：规划中。** 目前没有可安装的 APK，也没有已验证的安装或部署流程。
+从本私有仓库的 Release 下载 Windows 安装包和 `SHA256SUMS.txt`。在 PowerShell 中运行 `Get-FileHash .\Chatbox-0.1.3.msi -Algorithm SHA256`，与校验文件核对后运行 MSI。实机结果和已知限制见同一版本的 `WINDOWS_V1_ACCEPTANCE.md`。已有 0.1.1 的用户请先阅读升级说明。[Windows 正式版本](https://github.com/Polarzen/chatbox/releases)
 
-## 架构
+以下为 Kotlin + Jetpack Compose 实现的 Android 首版原型，仍待真实手机与服务端联合验收。
 
-聊天客户端 → 专用聊天接口 → AstrBot
+## Android 客户端范围
 
-- **客户端**：负责会话列表、消息收发、历史记录展示与连接状态。
-- **聊天接口**：先确认现有 AstrBot 接口能否复用；必要时增加轻量服务端适配，负责鉴权和会话映射。
-- **AstrBot**：继续处理模型调用、人格及可复用的记忆和工具能力。原本依赖 QQ 身份或消息流程的功能，需要单独评估迁移方式。
+- 中文单会话界面，逐步显示文字回复；同一服务地址复用同一会话 ID。
+- 手机本地保存聊天记录，关闭应用后可继续。暂不拉取服务端历史，也不会自动迁移 QQ 历史。
+- 连接故障会提示，且不会自动重发。手动重发需要确认，因为上一条消息可能已到达服务器。
+- 使用 AstrBot 官方 OpenAPI `POST /api/v1/chat`，按 v4.29.4 上游结构处理文字 SSE，跳过工具内部及推理事件。语音、通知、多个会话和 Codex 审批留待后续。
 
-客户端需要能够连接到运行 AstrBot 的服务。脱离 QQ 并不意味着可以离线调用模型。
+## Android 构建与配置
 
-## 首版计划
+使用 JDK 17 或 21、Android SDK Platform 35、Build Tools 35.0.0。运行：
 
-1. 用独立客户端发送文字消息并收到 AstrBot 回复。
-2. 支持打开历史会话并继续聊天。
-3. 连接失败时明确提示并允许重试。
+    ./gradlew testDebugUnitTest assembleDebug
 
-首版验收目标：不启动 QQ 或 NapCat，完成一轮真实对话；关闭客户端后重新打开，能回到原会话继续聊。语音、通知、Codex 任务与审批接入留待后续评估。
+Windows 下用 `gradlew.bat`。如果构建通过，调试包位于 `app/build/outputs/apk/debug/app-debug.apk`。
 
-## 待定事项
+1. 在 AstrBot WebUI 的 OpenAPI 设置中创建仅含聊天权限的 Key，不授予管理员权限。
+2. 打开 Chatbox，输入手机可访问且证书受信任的 HTTPS 服务地址和 Key。Key 只保留在当前界面内存，关闭重开后需重输。模型密钥仍留在服务端。
+3. 发送一条文字并确认实时回复。关闭并重新打开应用、重输 Key，再验证是否能继续原会话。应单独验收「小鲸鱼」人格是否随服务器当前配置生效，不预设 QQ 人格或插件规则会自动适用。
 
-- 前端：优先评估 Kotlin + Jetpack Compose 原生安卓 APK；如需与 Windows 网页共用界面，再比较 Vue + Capacitor。技术路线尚未确定。
-- 接口与部署：校验当前 AstrBot 版本提供的接口、鉴权方式及手机访问服务的方式。
-- 会话与迁移：确定应用内用户标识、历史记录的保存位置，以及是否迁移已有 QQ 会话或记忆。
+聊天记录存于手机应用私有空间，未另行加密，并禁用 Android 备份。不要提交真实聊天记录、令牌或含隐私的日志；不建议为了测试直接暴露 AstrBot 管理面板。
 
-## 隐私与凭据
-
-模型密钥留在服务端，不写入 APK 或仓库；客户端只使用聊天接口所需的权限。不要把真实聊天记录、令牌或含隐私的日志提交到仓库。
+[官方 HTTP API](https://docs.astrbot.app/dev/openapi.html) · [v4.29.4 服务端事件实现](https://github.com/AstrBotDevs/AstrBot/blob/v4.29.4/astrbot/dashboard/services/chat_service.py)

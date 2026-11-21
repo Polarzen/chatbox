@@ -1,0 +1,96 @@
+name: Chatbox Windows verification
+on:
+  push:
+    branches: ['feat/desktop-mvp', 'main']
+    paths:
+      - 'desktop/**'
+      - 'app/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - 'gradle/**'
+      - 'gradlew*'
+      - '.github/workflows/desktop-windows.yml'
+  pull_request:
+    branches: ['main']
+    paths:
+      - 'desktop/**'
+      - 'app/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - 'gradle/**'
+      - 'gradlew*'
+      - '.github/workflows/desktop-windows.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Verify WiX and run tests, smoke checks and MSI packaging
+        shell: pwsh
+        run: |
+          if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
+            $wix = Get-ChildItem -Path "${env:ProgramFiles(x86)}\WiX Toolset v3*" -Directory |
+              Sort-Object Name -Descending | Select-Object -First 1
+            if (-not $wix) { throw "WiX Toolset v3 not found on runner." }
+            $env:PATH = "$($wix.FullName)\bin;$env:PATH"
+          }
+          Get-Command candle.exe,light.exe -ErrorAction Stop
+          .\gradlew.bat -p desktop --no-daemon test desktopSmoke createDistributable packageMsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Extract the MSI and smoke-test its Windows executable
+        shell: pwsh
+        run: |
+          $packages = @(Get-ChildItem "desktop\build\compose\binaries\main\msi\*.msi" -File)
+          if ($packages.Count -ne 1) { throw "Expected exactly one MSI package." }
+          $unpacked = Join-Path $env:RUNNER_TEMP "chatbox-msi-extract"
+          $log = Join-Path $env:RUNNER_TEMP "chatbox-msi-extract.log"
+          $msi = Start-Process -FilePath msiexec.exe -ArgumentList "/a `"$($packages[0].FullName)`" /qn TARGETDIR=`"$unpacked`" /L*v `"$log`"" -Wait -PassThru
+          if ($msi.ExitCode -ne 0) {
+            if (Test-Path $log) { Get-Content $log -Tail 100 }
+            throw "MSI extraction failed: $($msi.ExitCode)"
+          }
+          $executables = @(Get-ChildItem $unpacked -Recurse -File -Filter "Chatbox.exe")
+          if ($executables.Count -ne 1) { throw "Expected exactly one packaged Chatbox.exe." }
+          $exe = $executables[0]
+          $marker = Join-Path $env:RUNNER_TEMP "chatbox-smoke-marker.txt"
+          if (Test-Path $marker) { Remove-Item $marker }
+          $process = Start-Process -FilePath $exe.FullName -ArgumentList "--smoke-test `"$marker`"" -PassThru
+          if (-not $process.WaitForExit(30000)) { $process.Kill(); throw "Packaged app did not finish its smoke check." }
+          if ($process.ExitCode -ne 0) { throw "Packaged smoke check failed: $($process.ExitCode)" }
+          if (-not (Test-Path $marker) -or (Get-Content -Raw $marker) -ne "chatbox-smoke-ok") { throw "Packaged smoke marker was not written." }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Chatbox-Windows-MSI
+          path: desktop/build/compose/binaries/main/msi/*.msi
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Chatbox-Windows-Test-Report
+          path: desktop/build/reports/tests/test/
+          retention-days: 7
+          if-no-files-found: ignore
+  android-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Run Android unit tests and debug build
+        run: bash ./gradlew --no-daemon testDebugUnitTest assembleDebug
