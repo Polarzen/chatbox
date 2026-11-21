@@ -4,7 +4,9 @@ Chatbox 0.1.2 使用 AstrBot OpenAPI 收发文字和图片。每个服务配置�
 
 ## 安装与构建
 
-在 [Windows 验证工作流](https://github.com/Polarzen/chatbox/actions/workflows/desktop-windows.yml) 中打开对应提交的成功运行，下载 `Chatbox-Windows-MSI`，解压后运行 `Chatbox-0.1.2.msi`。CI 安装包保留 7 天。从 0.1.1 升级请先阅读下方升级说明。
+正式安装包随 [GitHub Release](https://github.com/Polarzen/chatbox/releases) 分发。同一版本的 `SHA256SUMS.txt` 和 `WINDOWS_V1_ACCEPTANCE.md` 对应发布的 MSI。下载、校验后运行 `Chatbox-0.1.2.msi`。从 0.1.1 升级请先阅读下方升级说明。
+
+开发构建可在 [Windows 验证工作流](https://github.com/Polarzen/chatbox/actions/workflows/desktop-windows.yml) 的成功运行中下载，产物名为 `Chatbox-Windows-MSI`，保留 7 天。
 
 如需自行构建，在 Windows 安装 JDK 17 和 WiX Toolset 3.x，然后在仓库根目录运行下列命令。
 
@@ -31,11 +33,13 @@ Launcher 和 HTTPS 配置的 Key 通过验证后，使用当前 Windows 用户�
 
 0.1.1 的卸载程序可能递归清理整个安装目录。0.1.2 的 MSI 已移除自身的递归清理动作，但升级仍会调用已安装的旧版卸载程序。检测到旧清理设置时，新安装包会阻止升级。若安装目录与源码、下载文件或其他数据共用，请保留现有安装，避免直接卸载旧版。管理员需先备份共享目录，将旧清理目标重定向到独立空目录，并核实它不是重解析点（包括符号链接和目录联接），再按安装器提示继续升级。
 
-## 0.1.2 验收记录
+## 0.1.2 开发阶段实测
 
 安装版恢复了 4 个旧会话、8 条记录。完全退出再打开后，使用已保存的 Key 继续收发。通过 Launcher 正常重启实例，端口从 `18759` 变为 `20493`，后续回复仍带有原服务端会话 UUID。
 
-AstrBot 在同一会话分别记录了纯 PNG 的 `image` 组件，以及 JPEG 图文消息的 `plain` 和 `image` 组件。两份服务端附件均可读取，SHA-256 与原图一致，客户端重开后能辨认两条记录。普通文本请求遇到上游模型超时，另用 AstrBot 内置只读命令 `/sid` 验证了实际收发。模型识图能力尚未验证。
+AstrBot 在同一会话分别记录了纯 PNG 的 `image` 组件，以及 JPEG 图文消息的 `plain` 和 `image` 组件。两份服务端附件均可读取，SHA-256 与原图一致。早期普通文本请求曾经超时，当时用内置命令 `/sid` 验证了收发。
+
+后续在同一份本地安装包上完成了三轮普通模型对话，重开并从 `20493` 重连到 `21056` 后仍能答出上文的船名和余票。两张未在文字中透露答案的图片均得到正确回答。纯 PNG 为红色圆形、149，JPEG 图文为蓝色三角形、882。重开后仍可看到图片记录和回答。正式安装包的实测结果见 Release 随包报告。
 
 15 项桌面测试和启动冒烟检查通过。本地安装验收使用的 MSI 的 SHA-256 为 `AE12A3F653E279B7007544C40AA51CB3A6F88EA4BD37858C072F33C2F849D292`。CI 单独构建安装包。
 

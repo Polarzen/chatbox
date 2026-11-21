@@ -2,6 +2,8 @@
 
 Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 OneBot。Windows 和 Android 各自保存本机历史。[Windows 0.1.2 安装、连接与升级说明](desktop/README.md)
 
+Windows 正式安装包和对应的校验文件、实机验收报告通过本私有仓库的 [GitHub Releases](https://github.com/Polarzen/chatbox/releases) 提供。下载对应版本的 MSI，可在 PowerShell 中运行 `Get-FileHash .\Chatbox-0.1.2.msi -Algorithm SHA256`，与同一版本的 `SHA256SUMS.txt` 核对。已有 0.1.1 的用户请先阅读升级说明。
+
 以下为 Kotlin + Jetpack Compose 实现的 Android 首版原型，仍待真实手机与服务端联合验收。
 
 ## Android 客户端范围
