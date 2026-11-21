@@ -1,15 +1,17 @@
 # Chatbox · 小鲸鱼
 
-独立的个人 AI 助手安卓客户端。无需 QQ、NapCat 或 OneBot，后端仍采用 AstrBot。当前为首版源码原型，未完成真实手机和真实服务器验收。原生界面采用 Kotlin + Jetpack Compose。
+Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 OneBot。Windows 和 Android 各自保存本机历史。[Windows 0.1.2 安装、连接与升级说明](desktop/README.md)
 
-## 首版范围
+以下为 Kotlin + Jetpack Compose 实现的 Android 首版原型，仍待真实手机与服务端联合验收。
+
+## Android 客户端范围
 
 - 中文单会话界面，逐步显示文字回复；同一服务地址复用同一会话 ID。
 - 手机本地保存聊天记录，关闭应用后可继续。暂不拉取服务端历史，也不会自动迁移 QQ 历史。
 - 连接故障会提示，且不会自动重发。手动重发需要确认，因为上一条消息可能已到达服务器。
 - 使用 AstrBot 官方 OpenAPI `POST /api/v1/chat`，按 v4.29.4 上游结构处理文字 SSE，跳过工具内部及推理事件。语音、通知、多个会话和 Codex 审批留待后续。
 
-## 构建与配置
+## Android 构建与配置
 
 使用 JDK 17 或 21、Android SDK Platform 35、Build Tools 35.0.0。运行：
 

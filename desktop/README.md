@@ -1,23 +1,42 @@
 # Chatbox Windows 桌面版
 
-本项目在 AstrBot 之上提供独立的 Compose Desktop 聊天界面，无需 QQ、NapCat 或 OneBot。首版只支持文字、同一地址的单会话续聊和本机历史；同时只运行一个桌面实例，以免并发改写本地历史。Android 与桌面端共享官方 AstrBot SSE 网络实现，不同步本机历史。
+Chatbox 0.1.2 使用 AstrBot OpenAPI 收发文字和图片。每个服务配置可以保留多个会话，桌面端和 Android 各自保存本机历史。
 
-## 构建
+## 安装与构建
 
-在仓库根目录用 JDK 17，Windows PowerShell 运行：
+在 [Windows 验证工作流](https://github.com/Polarzen/chatbox/actions/workflows/desktop-windows.yml) 中打开对应提交的成功运行，下载 `Chatbox-Windows-MSI`，解压后运行 `Chatbox-0.1.2.msi`。CI 安装包保留 7 天。从 0.1.1 升级请先阅读下方升级说明。
+
+如需自行构建，在 Windows 安装 JDK 17 和 WiX Toolset 3.x，然后在仓库根目录运行下列命令。
 
     .\gradlew.bat -p desktop test desktopSmoke
-    .\gradlew.bat -p desktop run
     .\gradlew.bat -p desktop packageMsi
 
-打 MSI 还需要 WiX Toolset 3.x。产物在 `desktop/build/compose/binaries/main/msi/`。Linux 源码验证可运行 `./gradlew -p desktop test desktopSmoke`；Windows 安装包需要 Windows 环境构建。
+安装包生成于 `desktop/build/compose/binaries/main/msi/Chatbox-0.1.2.msi`。从源码启动可运行 `.\gradlew.bat -p desktop run`。
 
-## 连接与首测
+## 连接和发送
 
-请输入电脑可访问、证书受信任的 AstrBot HTTPS 地址和仅授予聊天权限的 OpenAPI 密钥。若 AstrBot 与 Chatbox 运行在同一台 Windows 电脑，可使用 `http://127.0.0.1:23980`（按实际端口填写）。仅允许主机字面值 `127.0.0.1` 使用 HTTP，不接受 `localhost`、IPv6、局域网 IP 或域名；也不跟随重定向或使用代理。HTTP 请求不会加密，所以此例外仅适用于本机；其他连接仍需 HTTPS。Android 仍只支持 HTTPS。密钥只留在进程内存；每次启动重输。历史保存至 Windows 的 `%LOCALAPPDATA%\Chatbox\history.json`，无额外加密。请勿提交真实记录、凭据或私人日志。
+从「配置」选择正在运行的 AstrBot Launcher 实例，或填写自行部署服务的 HTTPS 地址。手动 HTTP 地址仅支持本机 `127.0.0.1`。在密码框填写 AstrBot OpenAPI Key 并点「连接 / 验证」。收发文字需要 `chat` 权限，发送 PNG 或 JPEG 还需要 `file` 权限。选图后可直接发送，也可填写图片说明。
 
-先验证文字回复，再重启应用、重新输入密钥，确认历史可读且同一服务端会话能继续。网络中断可能发生在服务已收件之后，应用不自动重发。QQ 人格或插件规则是否适用于独立会话，需要用自己的 AstrBot 实例确认。
+Chatbox 按实例 UUID 找回上次选择的 Launcher 实例，确认当前回环地址后使用已保存的凭据重连。旧版按完整 URL 查找本地历史，地址大小写或端口变化可能使旧对话从界面消失。新版向 `/api/v1/chat/sessions` 核对原用户名和会话 UUID，匹配的旧会话可继续聊天，其余旧记录保留供离线打开。可在「会话」中切换对话，点「新会话」创建对话。
 
-测试使用生成的本地 HTTPS 证书与本机 HTTP 回环模拟 SSE，不连接真实 AstrBot；Windows CI 对打包应用执行历史与 SSE 自检，不代表真机界面交互或真实 AstrBot 已验收。
+如果上传因权限不足被拒绝，消息会显示缺少的权限，更新 Key 后可点「重试这条」。如果回复中断，服务端可能已经收件。退出时仍在等待回复的消息会在重开后标为「上次回复未确认」。Chatbox 保留记录，由用户确认是否重发。
 
-[官方 AstrBot OpenAPI](https://docs.astrbot.app/dev/openapi.html)
+## 本机数据与密钥
+
+聊天记录保存在 `%LOCALAPPDATA%\Chatbox\history.json`，历史与备份均为明文。迁移旧版历史前，Chatbox 会在同一目录保留 `history.json.pre-migration.bak`。若同名备份已存在且内容不同，另存为 `history.json.<UUID>.pre-migration.bak`。
+
+Launcher 和 HTTPS 配置的 Key 通过验证后，使用当前 Windows 用户的 DPAPI 加密保存在 `%LOCALAPPDATA%\Chatbox\credentials`。在同一配置的密码框输入新 Key 并验证即可更换，点「清除」可删除保存的 Key。无法核实实例身份的手动本机 HTTP 地址仅在当前窗口使用输入的 Key。
+
+## 从 0.1.1 升级
+
+0.1.1 的卸载程序可能递归清理整个安装目录。0.1.2 的 MSI 已移除自身的递归清理动作，但升级仍会调用已安装的旧版卸载程序。检测到旧清理设置时，新安装包会阻止升级。若安装目录与源码、下载文件或其他数据共用，请保留现有安装，避免直接卸载旧版。管理员需先备份共享目录，将旧清理目标重定向到独立空目录，并核实它不是重解析点（包括符号链接和目录联接），再按安装器提示继续升级。
+
+## 0.1.2 验收记录
+
+安装版恢复了 4 个旧会话、8 条记录。完全退出再打开后，使用已保存的 Key 继续收发。通过 Launcher 正常重启实例，端口从 `18759` 变为 `20493`，后续回复仍带有原服务端会话 UUID。
+
+AstrBot 在同一会话分别记录了纯 PNG 的 `image` 组件，以及 JPEG 图文消息的 `plain` 和 `image` 组件。两份服务端附件均可读取，SHA-256 与原图一致，客户端重开后能辨认两条记录。普通文本请求遇到上游模型超时，另用 AstrBot 内置只读命令 `/sid` 验证了实际收发。模型识图能力尚未验证。
+
+15 项桌面测试和启动冒烟检查通过。本地安装验收使用的 MSI 的 SHA-256 为 `AE12A3F653E279B7007544C40AA51CB3A6F88EA4BD37858C072F33C2F849D292`。CI 单独构建安装包。
+
+[官方 AstrBot OpenAPI 文档](https://docs.astrbot.app/dev/openapi.html)

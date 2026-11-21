@@ -1,4 +1,5 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
     kotlin("jvm") version "2.0.21"
@@ -6,12 +7,17 @@ plugins {
     id("org.jetbrains.compose") version "1.7.3"
 }
 
+providers.gradleProperty("chatboxBuildDir").orNull?.let {
+    layout.buildDirectory.set(file(it))
+}
+
 kotlin {
     compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
-    sourceSets.main {
-        kotlin.srcDir("../app/src/main/java")
-        kotlin.include("**/DesktopMain.kt", "**/Sse.kt", "**/AstrBot.kt")
-    }
+}
+tasks.named<KotlinCompile>("compileKotlin") {
+    source(fileTree("../app/src/main/java") {
+        include("**/Sse.kt", "**/AstrBot.kt")
+    })
 }
 dependencies {
     implementation(compose.desktop.currentOs)
@@ -24,7 +30,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi)
             packageName = "Chatbox"
-            packageVersion = "0.1.1"
+            packageVersion = "0.1.2"
             modules("java.prefs", "jdk.crypto.ec")
             windows { upgradeUuid = "204b3f78-64ec-4071-9a66-a535773540eb" }
         }
@@ -35,4 +41,23 @@ val desktopSmoke by tasks.registering(JavaExec::class) {
     classpath = sourceSets.main.get().runtimeClasspath
     mainClass.set("dev.polarzen.chatbox.DesktopMainKt")
     args("--smoke-test")
+}
+
+val packagedMsi = layout.buildDirectory.file("compose/binaries/main/msi/Chatbox-0.1.2.msi")
+tasks.configureEach {
+    if (name == "packageMsi") {
+        inputs.file(layout.projectDirectory.file("patch-windows-msi.ps1"))
+        doLast {
+            val msiFile = packagedMsi.get().asFile
+            if (!msiFile.isFile) error("Expected packageMsi output at ${msiFile.absolutePath}")
+            project.exec {
+                commandLine(
+                    "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+                    "-ExecutionPolicy", "Bypass", "-File",
+                    layout.projectDirectory.file("patch-windows-msi.ps1").asFile.absolutePath,
+                    "-MsiPath", msiFile.absolutePath
+                )
+            }
+        }
+    }
 }
