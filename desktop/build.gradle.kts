@@ -24,7 +24,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi)
             packageName = "Chatbox"
-            packageVersion = "0.1.0"
+            packageVersion = "0.1.1"
             modules("java.prefs", "jdk.crypto.ec")
             windows { upgradeUuid = "204b3f78-64ec-4071-9a66-a535773540eb" }
         }

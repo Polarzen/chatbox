@@ -93,7 +93,7 @@ class DesktopTest {
             val before = DesktopStore(file)
             val initial = before.read(address)
             val displays = mutableListOf<String>()
-            sendToAstrBot(address, "fixture-token", before.username, initial.session, "测试", displays::add)
+            sendToAstrBot(address, "fixture-token", before.username, initial.session, "测试", onText = displays::add)
             assertTrue(displays.contains("你"))
             assertEquals("你好", displays.last())
             val (method, auth, body) = checkNotNull(seen.poll())

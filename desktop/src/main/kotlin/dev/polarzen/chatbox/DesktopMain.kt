@@ -113,8 +113,8 @@ fun main(args: Array<String>) {
         val server = base.trim().trimEnd('/')
         val token = key.trim()
         if (query.isEmpty() || busy) return
-        if (runCatching { endpoint(server) }.isFailure || token.isEmpty() || token.any { it.isWhitespace() }) {
-            note = "请填写有效的 HTTPS 服务地址和聊天 API 密钥。"
+        if (runCatching { endpoint(server, allowLoopbackHttp = true) }.isFailure || token.isEmpty() || token.any { it.isWhitespace() }) {
+            note = "请填写 HTTPS 地址，或本机 http://127.0.0.1 地址，并输入聊天 API 密钥。"
             return
         }
         val pending = chat.copy(entries = chat.entries + Entry(query, "", "发送中"))
@@ -125,7 +125,7 @@ fun main(args: Array<String>) {
         thread(isDaemon = true, name = "chatbox-request") {
             var answer = ""
             val result = runCatching {
-                sendToAstrBot(server, token, store.username, pending.session, query) { delta ->
+                sendToAstrBot(server, token, store.username, pending.session, query, allowLoopbackHttp = true) { delta ->
                     answer = delta
                     SwingUtilities.invokeLater { partial = delta }
                 }
@@ -153,7 +153,7 @@ fun main(args: Array<String>) {
             base = it
             if (previous != next) { key = ""; chat = store.read(next); note = "" }
         }, Modifier.fillMaxWidth(),
-            enabled = !busy, singleLine = true, label = { Text("AstrBot HTTPS 地址") })
+            enabled = !busy, singleLine = true, label = { Text("AstrBot 地址（HTTPS 或 127.0.0.1 HTTP）") })
         OutlinedTextField(key, { key = it }, Modifier.fillMaxWidth(), enabled = !busy, singleLine = true,
             label = { Text("对话 API 密钥 · 不保存") }, visualTransformation = PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))

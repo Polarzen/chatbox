@@ -1,21 +1,30 @@
 package dev.polarzen.chatbox
 
 import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.Proxy
 import java.net.URI
-import javax.net.ssl.HttpsURLConnection
 
-internal fun endpoint(base: String): URI {
+internal fun endpoint(base: String, allowLoopbackHttp: Boolean = false): URI {
     val uri = URI(base.trim())
-    require(uri.scheme.equals("https", true) && uri.host != null &&
-        uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null)
+    require(uri.host != null && uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null)
+    val loopbackHttp = allowLoopbackHttp && uri.scheme.equals("http", true) &&
+        uri.host == "127.0.0.1" &&
+        (uri.rawAuthority == "127.0.0.1" || (uri.port in 1..65535 &&
+            uri.rawAuthority.matches(Regex("127[.]0[.]0[.]1:[0-9]+"))))
+    require(uri.scheme.equals("https", true) || loopbackHttp)
     return URI(uri.toASCIIString().trimEnd('/') + "/api/v1/chat")
 }
 
 internal fun sendToAstrBot(
     base: String, token: String, user: String, session: String, message: String,
+    allowLoopbackHttp: Boolean = false,
     onText: (String) -> Unit,
 ) {
-    val c = endpoint(base).toURL().openConnection() as HttpsURLConnection
+    val target = endpoint(base, allowLoopbackHttp)
+    val url = target.toURL()
+    val c = (if (target.scheme.equals("http", true)) url.openConnection(Proxy.NO_PROXY)
+        else url.openConnection()) as HttpURLConnection
     try {
         c.instanceFollowRedirects = false
         c.requestMethod = "POST"
@@ -35,7 +44,7 @@ internal fun sendToAstrBot(
                 401 -> "密钥无效或已撤销。"
                 403 -> "权限不足，请检查聊天权限。"
                 404 -> "找不到对话接口，请检查 AstrBot 版本和服务地址。"
-                in 300..399 -> "服务返回重定向，请直接填写最终 HTTPS 地址。"
+                in 300..399 -> "服务返回重定向，请直接填写最终服务地址。"
                 else -> "服务器返回 HTTP $status。"
             }
         }
