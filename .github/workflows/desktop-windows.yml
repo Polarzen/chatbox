@@ -1,12 +1,25 @@
 name: Chatbox Windows verification
 on:
   push:
-    branches: ['feat/desktop-mvp']
+    branches: ['feat/desktop-mvp', 'main']
     paths:
       - 'desktop/**'
-      - 'app/src/main/java/dev/polarzen/chatbox/AstrBot.kt'
-      - 'app/src/main/java/dev/polarzen/chatbox/Sse.kt'
-      - 'gradle/wrapper/**'
+      - 'app/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - 'gradle/**'
+      - 'gradlew*'
+      - '.github/workflows/desktop-windows.yml'
+  pull_request:
+    branches: ['main']
+    paths:
+      - 'desktop/**'
+      - 'app/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - 'gradle/**'
       - 'gradlew*'
       - '.github/workflows/desktop-windows.yml'
   workflow_dispatch:
