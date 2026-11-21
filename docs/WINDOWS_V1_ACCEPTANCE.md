@@ -13,8 +13,7 @@
 | SHA-256 | `fe7d3c4ab84c6a0ce1d38451b582b726452f21f5048159d1645c3737fd37b391` |
 | 源码 | 主分支提交 [`ff7effea893a82d49ac4fdc385df7e02cacf5627`](https://github.com/Polarzen/chatbox/commit/ff7effea893a82d49ac4fdc385df7e02cacf5627)，合并 [PR #1](https://github.com/Polarzen/chatbox/pull/1) |
 | CI 构建 | [主分支 Windows CI](https://github.com/Polarzen/chatbox/actions/runs/44946797692)，产物 `Chatbox-Windows-MSI` |
-| 草稿附件 | [Windows 0.1.3 候选 MSI（私有草稿）](https://github.com/Polarzen/chatbox/releases/tag/untagged-060cc942ef447df3e47f) |
-| 正式版本入口 | [GitHub Releases](https://github.com/Polarzen/chatbox/releases) |
+| 下载入口 | 维护者登录后，在 Releases 页面打开标为 Draft 的「Chatbox Windows 0.1.3」即可下载附件。正式发布后可在同一页面找到 v0.1.3。[GitHub Releases](https://github.com/Polarzen/chatbox/releases) |
 
 主分支 CI 的 15 项 Windows 测试全部通过，无跳过。MSI 打包、包内程序启动检查、Android 单元测试及调试构建均通过。升级预检确认 MSI 的升级范围包含现有 0.1.2，两个安装包均无递归清理动作。已从草稿重新下载 MSI，大小和 SHA-256 与上表一致。
 

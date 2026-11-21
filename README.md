@@ -2,7 +2,7 @@
 
 Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 OneBot。Windows 和 Android 各自保存本机历史。[Windows 安装、连接与升级说明](desktop/README.md)
 
-目前可继续使用本机已验证的 0.1.2。0.1.3 候选包已通过 CI，待从该 MSI 完成实机升级和收发验收。[0.1.3 候选包（私有草稿）](https://github.com/Polarzen/chatbox/releases/tag/untagged-060cc942ef447df3e47f) · [验收记录](docs/WINDOWS_V1_ACCEPTANCE.md)
+目前可继续使用本机已验证的 0.1.2。0.1.3 候选包已通过 CI，待从该 MSI 完成实机升级和收发验收。维护者登录后，可在 Releases 页面打开标为 Draft 的「Chatbox Windows 0.1.3」。[私有仓库 Releases](https://github.com/Polarzen/chatbox/releases) · [验收记录](docs/WINDOWS_V1_ACCEPTANCE.md)
 
 正式发布后，从版本页面下载 MSI 与 `SHA256SUMS.txt`。用 PowerShell 运行 `Get-FileHash .\Chatbox-0.1.3.msi -Algorithm SHA256`，核对后安装。已有 0.1.1 的用户请先阅读旧卸载器的升级说明。[正式版本入口](https://github.com/Polarzen/chatbox/releases) · [从 0.1.1 升级](desktop/README.md#从-011-升级)
 
