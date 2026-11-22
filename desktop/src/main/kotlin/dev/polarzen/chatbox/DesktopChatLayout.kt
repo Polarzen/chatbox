@@ -68,8 +68,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.IOException
+import java.nio.file.InvalidPathException
 import java.nio.file.Path
 import java.awt.datatransfer.DataFlavor
+import java.awt.datatransfer.UnsupportedFlavorException
 import java.awt.dnd.DropTargetDragEvent
 import java.awt.dnd.DropTargetDropEvent
 import javax.imageio.ImageIO
@@ -111,7 +115,7 @@ internal fun DesktopChatLayout(
     assistantContent: @Composable (Entry) -> Unit,
     selectedImages: List<Path> = listOfNotNull(selectedImage),
     onRemoveImagePath: ((Path) -> Unit)? = null,
-    onAddImages: (List<Path>) -> Unit = {},
+    onAddImages: (List<File>) -> Unit = {},
     onDeleteSession: (String) -> Unit = {},
     onMessageRendered: ((String, Int) -> Unit)? = null,
     progress: EntryProgress? = null,
@@ -410,7 +414,7 @@ private fun ConversationPane(
     onChooseImage: () -> Unit,
     onRemoveImage: () -> Unit,
     onRemoveImagePath: ((Path) -> Unit)?,
-    onAddImages: (List<Path>) -> Unit,
+    onAddImages: (List<File>) -> Unit,
     onSend: () -> Unit,
     canSend: Boolean,
     notice: String?,
@@ -443,10 +447,10 @@ private fun ConversationPane(
             }
 
             override fun onDrop(event: DragAndDropEvent): Boolean {
-                val paths = droppedFilePaths(event)
+                val files = droppedFilePaths(event)
                 isExternalDragOver.value = false
-                if (paths.isEmpty()) return false
-                addImagesState.value(paths)
+                if (files.isEmpty()) return false
+                addImagesState.value(files)
                 return true
             }
         }
@@ -702,16 +706,23 @@ private fun ConversationPane(
 }
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalComposeUiApi::class)
-private fun droppedFilePaths(event: DragAndDropEvent): List<Path> {
+private fun droppedFilePaths(event: DragAndDropEvent): List<File> {
     val transferable = when (val nativeEvent = event.nativeEvent) {
         is DropTargetDragEvent -> nativeEvent.transferable
         is DropTargetDropEvent -> nativeEvent.transferable
         else -> return emptyList()
     }
     if (!transferable.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) return emptyList()
-    return runCatching {
+    val files = try {
         transferable.getTransferData(DataFlavor.javaFileListFlavor) as? List<*>
-    }.getOrNull().orEmpty().mapNotNull { (it as? java.io.File)?.toPath() }
+    } catch (error: InvalidPathException) {
+        return listOf(File(error.input))
+    } catch (_: UnsupportedFlavorException) {
+        return emptyList()
+    } catch (_: IOException) {
+        return emptyList()
+    }
+    return files.orEmpty().mapNotNull { it as? File }
 }
 
 private fun failureSummary(status: String): String = when {

@@ -24,11 +24,13 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import java.awt.Dimension
+import java.io.File
 import java.io.IOException
 import java.nio.channels.FileChannel
 import java.nio.file.AccessDeniedException
 import java.nio.file.Files
 import java.nio.file.FileSystemException
+import java.nio.file.InvalidPathException
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.net.SocketTimeoutException
@@ -135,6 +137,8 @@ private data class RejectedSourceImage(val name: String, val reason: String)
 
 private data class SourceImageValidation(val valid: List<Path>, val rejected: List<RejectedSourceImage>)
 
+internal data class SourceImageAddition(val paths: List<Path>, val notice: String?)
+
 /** Production screen shared with the desktop UI harness. */
 @Composable
 internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache: ReplyImageCache) {
@@ -195,29 +199,29 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
         index >= 0 && (chat.entries[index].status.startsWith("发送失败：") || chat.entries[index].status.startsWith("未发送："))
     }?.let { index -> failedProgressByEntry[TimedEntryKey(currentKey, index)] }
 
-    fun addValidatedImages(sessionKey: SessionKey, paths: List<Path>) {
-        val validation = inspectSourceImages(paths)
-        val validated = validation.valid
-        if (validated.isEmpty() && validation.rejected.isEmpty()) return
-        val existing = selectedImages[sessionKey].orEmpty()
-        val combined = (existing + validated).distinct()
-        if (combined.isEmpty()) selectedImages.remove(sessionKey) else selectedImages[sessionKey] = combined
-        val notice = sourceImageNotice(validation.rejected, addedCount = combined.size - existing.size)
-        if (notice == null) notices.remove(sessionKey) else notices[sessionKey] = notice
+    fun addValidatedImages(sessionKey: SessionKey, files: List<File>, invalidPathCount: Int = 0) {
+        if (files.isEmpty() && invalidPathCount == 0) return
+        val addition = addSourceImages(selectedImages[sessionKey].orEmpty(), files, invalidPathCount)
+        if (addition.paths.isEmpty()) selectedImages.remove(sessionKey) else selectedImages[sessionKey] = addition.paths
+        if (addition.notice == null) notices.remove(sessionKey) else notices[sessionKey] = addition.notice
     }
 
     fun chooseImages() {
-        val chooser = JFileChooser().apply {
-            dialogTitle = "选择图片（可多选）"
-            isAcceptAllFileFilterUsed = false
-            isMultiSelectionEnabled = true
-            fileFilter = FileNameExtensionFilter("PNG / JPEG 图片", "png", "jpg", "jpeg")
-        }
-        if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
-            val chosen = chooser.selectedFiles.takeIf { it.isNotEmpty() }
-                ?.map { it.toPath() }
-                ?: listOfNotNull(chooser.selectedFile?.toPath())
-            addValidatedImages(currentKey, chosen)
+        try {
+            val chooser = JFileChooser().apply {
+                dialogTitle = "选择图片（可多选）"
+                isAcceptAllFileFilterUsed = false
+                isMultiSelectionEnabled = true
+                fileFilter = FileNameExtensionFilter("PNG / JPEG 图片", "png", "jpg", "jpeg")
+            }
+            if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
+                val selected = chooser.selectedFiles.takeIf { it.isNotEmpty() }
+                    ?.toList()
+                    ?: listOfNotNull(chooser.selectedFile)
+                addValidatedImages(currentKey, selected)
+            }
+        } catch (_: InvalidPathException) {
+            addValidatedImages(currentKey, emptyList(), invalidPathCount = 1)
         }
     }
 
@@ -566,7 +570,7 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
                 selectedImage = currentImages.firstOrNull(),
                 selectedImages = currentImages,
                 onChooseImage = ::chooseImages,
-                onAddImages = { paths -> addValidatedImages(currentKey, paths) },
+                onAddImages = { files -> addValidatedImages(currentKey, files) },
                 onRemoveImage = { selectedImages.remove(currentKey) },
                 onRemoveImagePath = { path ->
                     val remaining = selectedImages[currentKey].orEmpty().filterNot { it == path }
@@ -651,10 +655,42 @@ private fun inspectSourceImages(paths: List<Path>): SourceImageValidation {
     return SourceImageValidation(valid.distinct(), rejected)
 }
 
-private fun sourceImageNotice(rejected: List<RejectedSourceImage>, addedCount: Int): String? {
-    if (rejected.isEmpty()) return null
+internal fun addSourceImages(
+    existing: List<Path>,
+    files: List<File>,
+    invalidPathCount: Int = 0,
+): SourceImageAddition {
+    val paths = mutableListOf<Path>()
+    var rejectedPathCount = invalidPathCount
+    files.forEach { file ->
+        try {
+            paths.add(file.toPath())
+        } catch (_: InvalidPathException) {
+            rejectedPathCount++
+        }
+    }
+    val validation = inspectSourceImages(paths)
+    val combined = (existing + validation.valid).distinct()
+    val notice = sourceImageNotice(
+        validation.rejected,
+        addedCount = combined.size - existing.size,
+        invalidPathCount = rejectedPathCount,
+    )
+    return SourceImageAddition(combined, notice)
+}
+
+private fun sourceImageNotice(
+    rejected: List<RejectedSourceImage>,
+    addedCount: Int,
+    invalidPathCount: Int,
+): String? {
+    if (rejected.isEmpty() && invalidPathCount == 0) return null
     val added = if (addedCount > 0) "已添加 $addedCount 张图片；" else "未添加图片；"
-    return added + "已跳过 ${formatRejectedImages(rejected)}。"
+    val skipped = buildList {
+        if (rejected.isNotEmpty()) add(formatRejectedImages(rejected))
+        if (invalidPathCount > 0) add("无效文件名（$invalidPathCount 个）")
+    }.joinToString("、")
+    return added + "已跳过 $skipped。"
 }
 
 private fun formatRejectedImages(rejected: List<RejectedSourceImage>): String {
