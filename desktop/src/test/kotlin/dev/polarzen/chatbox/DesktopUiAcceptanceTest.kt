@@ -4,15 +4,20 @@ import androidx.compose.material.MaterialTheme
 import androidx.compose.runtime.key
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.semantics.Role
@@ -94,7 +99,7 @@ class DesktopUiAcceptanceTest {
         fixtureLog = System.getenv("CHATBOX_UI_FIXTURE_LOG")?.let(Path::of)
         fixtureLogOffset = fixtureLog?.let { if (Files.exists(it)) Files.size(it) else 0L } ?: 0L
         installFixtureTrust()
-        setRejectOriginal(false)
+        resetFixtureControls()
         temp = Files.createTempDirectory("chatbox-ui-acceptance-")
         dataDir = temp.resolve("Chatbox")
         Files.createDirectories(dataDir)
@@ -108,7 +113,7 @@ class DesktopUiAcceptanceTest {
 
     @After
     fun cleanup() {
-        if (::fixture.isInitialized) runCatching { setRejectOriginal(false) }
+        if (::fixture.isInitialized) runCatching { resetFixtureControls() }
         priorSocketFactory?.let(HttpsURLConnection::setDefaultSSLSocketFactory)
         priorHostnameVerifier?.let(HttpsURLConnection::setDefaultHostnameVerifier)
         if (::temp.isInitialized) temp.toFile().deleteRecursively()
@@ -342,6 +347,7 @@ class DesktopUiAcceptanceTest {
         chooseImageThroughRealPicker(png)
         rule.onNodeWithTag("remove-image-button").assertIsDisplayed()
         rule.onNodeWithTag("remove-image-button").performClick()
+        advanceUiAnimations()
         assertNoTaggedNode("remove-image-button")
         chooseImageThroughRealPicker(jpeg)
         rule.onNodeWithTag("composer-field").performTextInput("synthetic JPEG caption")
@@ -360,12 +366,161 @@ class DesktopUiAcceptanceTest {
         println("UI_CASE E PASS newSession=true switchedDuringSend=true correctSession=true pngPickedRemoved=true jpegUploaded=true replyImageCached=true")
     }
 
-    private fun createV015Profiles(withLegacyKey: Boolean) {
+    @Test
+    fun acceptanceF_scrolledDuplicateSessionsKeepDraftsAndDeleteInFlightHistory() {
+        createV015Profiles(withLegacyKey = true, extraASessions = 44)
+        render()
+        awaitConnected()
+
+        val duplicateSessions = store.sessions(profileA).filter { it.title == "重复标题" }
+        assertEquals("Long history contains duplicate visible titles", 44, duplicateSessions.size)
+        val scrolledSession = duplicateSessions[35].id
+        val otherSession = duplicateSessions[12].id
+        val scrolledIndex = store.sessions(profileA).indexOfFirst { it.id == scrolledSession }
+        val orderBeforeSelection = store.sessions(profileA)
+        scrollToSessionRow(scrolledIndex)
+        val visibleBeforeSelection = visibleSessionIndices()
+        assertTrue("The requested duplicate row is actually in the sidebar viewport", scrolledIndex in visibleBeforeSelection)
+        assertEquals("The displayed middle row is the intended session", scrolledSession, orderBeforeSelection[scrolledIndex].id)
+        val clickedRowBounds = rule.onNodeWithTag("session-item-$scrolledIndex").fetchSemanticsNode().boundsInRoot
+        assertTrue("The middle row has visible screen bounds", clickedRowBounds.width > 0f && clickedRowBounds.height > 0f)
+        rule.onNodeWithTag("session-item-$scrolledIndex").performClick()
+        assertEquals(scrolledSession, store.profile(profileA)!!.currentSession)
+        val targetReply = store.sessionContent(profileA, scrolledSession).entries.single().answer
+        waitUntil("the scrolled duplicate's unique history is displayed", 5_000) {
+            runCatching { rule.onNodeWithText(targetReply, substring = true).assertIsDisplayed() }.isSuccess
+        }
+        val visibleAfterSelection = visibleSessionIndices()
+        assertEquals("Selecting a duplicate title keeps the same sidebar viewport", visibleBeforeSelection, visibleAfterSelection)
+
+        val scrolledDraft = "draft on older duplicate"
+        rule.onNodeWithTag("composer-field").performTextInput(scrolledDraft)
+        selectSession(otherSession)
+        val otherDraft = "draft on another duplicate"
+        rule.onNodeWithTag("composer-field").performTextInput(otherDraft)
+        selectSession(scrolledSession)
+        assertComposerText(scrolledDraft)
+        selectSession(otherSession)
+        assertComposerText(otherDraft)
+
+        selectSession(scrolledSession)
+        rule.onNodeWithTag("composer-field").performTextClearance()
+        val delayedQuestion = "延迟 delete this in-flight local conversation"
+        val sendOffset = fixtureLogCurrentOffset()
+        val visibleBeforeBackgroundReply = visibleSessionIndices()
+        sendText(delayedQuestion)
+        waitUntil("delayed reply starts in selected session", 10_000) {
+            runCatching { rule.onNodeWithText("本地服务已收到，正在继续", substring = true).assertIsDisplayed() }.isSuccess
+        }
+        assertEquals(scrolledSession, store.profile(profileA)!!.currentSession)
+        assertEquals("Sidebar viewport remains stable during the background reply", visibleBeforeBackgroundReply, visibleSessionIndices())
+        assertTrue("The clicked row originated below the start of the long list", scrolledIndex > 0)
+        assertEquals("Selecting a row preserves duplicate-title sidebar order", orderBeforeSelection.map { it.id }, store.sessions(profileA).map { it.id })
+
+        val orderAtDeletion = store.sessions(profileA).map { it.id }
+        val deleteIndex = orderAtDeletion.indexOf(scrolledSession)
+        assertTrue("The in-flight session remains in sidebar order until deletion", deleteIndex >= 0)
+        val expectedReplacement = orderAtDeletion.getOrNull(deleteIndex + 1)
+            ?: orderAtDeletion.getOrNull(deleteIndex - 1)
+            ?: error("Deleting the only session should create a replacement session")
+
+        clickSemanticsTag("session-menu-$scrolledSession")
+        advanceUiAnimations()
+        waitUntil("session delete menu is displayed", 5_000) {
+            runCatching { rule.onNodeWithText("删除会话", substring = false).assertIsDisplayed() }.isSuccess
+        }
+        rule.onNodeWithText("删除会话", substring = false).performClick()
+        advanceUiAnimations()
+        waitUntil("session delete confirmation is displayed", 5_000) { isDisplayed("confirm-delete-session") }
+        rule.onNodeWithTag("confirm-delete-session").performClick()
+        waitUntil("in-flight session removed from local history", 10_000) {
+            store.sessions(profileA).none { it.id == scrolledSession }
+        }
+        waitUntil("late callback settles after deletion", 20_000) {
+            fixtureRequestSeen("profile=A endpoint=POST /api/v1/chat key=old_key session=$scrolledSession", sendOffset)
+        }
+        assertTrue("Late send callbacks must not recreate the deleted history row", store.sessions(profileA).none { it.id == scrolledSession })
+        assertEquals("Deleting the selected session selects its adjacent row", expectedReplacement, store.profile(profileA)!!.currentSession)
+
+        assertTrue("Other duplicate-title history remains intact", store.sessionContent(profileA, otherSession).entries.any {
+            it.question == "重复标题"
+        })
+        restartScreen()
+        val reloaded = DesktopStore(historyFile)
+        assertTrue("Deletion persists after reopening the store", reloaded.sessions(profileA).none { it.id == scrolledSession })
+        assertEquals("The replacement selection persists after reopening", expectedReplacement, reloaded.profile(profileA)!!.currentSession)
+        assertTrue("Unrelated conversation history persists after reopening", reloaded
+            .sessionContent(profileA, otherSession).entries.any { it.question == "重复标题" })
+        assertTrue("The original conversation history persists after reopening", reloaded
+            .sessionContent(profileA, fixture.getProperty("session.a")).entries.any { it.question == "合成的 A 历史问题" })
+        println("UI_CASE F PASS duplicateTitles=44 scrolledSelection=true perSessionDrafts=true deletedDuringSend=true noResurrection=true remainingHistoryPersisted=true")
+    }
+
+    @Test
+    fun acceptanceG_sendPhasesTruncatedStreamAndUploadFailureRemainRecoverable() {
+        createV015Profiles(withLegacyKey = true)
+        render()
+        awaitConnected()
+        setFixtureControl("chat.delay.before.headers.ms", "4000")
+        setFixtureControl("chat.delay.before.first.event.ms", "4000")
+
+        val headersQuestion = "fixture:delay-before-headers wait before headers"
+        sendText(headersQuestion)
+        assertSendingWithoutAnswer(headersQuestion, "等待服务器响应")
+        waitUntil("pre-header delayed response completes", 15_000) { entryForCurrentSession(headersQuestion)?.status == "已完成" }
+
+        val firstEventQuestion = "fixture:delay-before-first-event wait before first event"
+        sendText(firstEventQuestion)
+        assertSendingWithoutAnswer(firstEventQuestion, "等待首段回复")
+        waitUntil("pre-event delayed response completes", 15_000) { entryForCurrentSession(firstEventQuestion)?.status == "已完成" }
+
+        val truncatedQuestion = "fixture:truncate-sse return a partial stream"
+        sendText(truncatedQuestion)
+        waitUntil("truncated response is persisted as a failure", 15_000) {
+            entryForCurrentSession(truncatedQuestion)?.let {
+                it.status.startsWith("发送失败：") && it.answer.contains("回复流中断前的部分内容")
+            } == true
+        }
+        rule.onNodeWithText("回复流中断", substring = true).assertIsDisplayed()
+        rule.onNodeWithTag("composer-field").performTextInput("ready after truncated response")
+        rule.onNodeWithTag("send-button").assertIsEnabled()
+        rule.onNodeWithTag("composer-field").performTextClearance()
+
+        setFixtureControl("upload.fail", "true")
+        val fixtureOffset = fixtureLogCurrentOffset()
+        chooseImageThroughRealPicker(Path.of(fixture.getProperty("media.dir")).resolve("upload-a.png"))
+        rule.onNodeWithTag("composer-field").performTextInput("caption for a failing fixture upload")
+        rule.onNodeWithTag("send-button").performClick()
+        waitUntil("upload failure is persisted without a chat request", 20_000) {
+            entryForCurrentSession("caption for a failing fixture upload")?.status?.startsWith("发送失败：") == true &&
+                fixtureRequestSeen("profile=A endpoint=POST /api/v1/file key=old_key session=- result=503", fixtureOffset)
+        }
+        val uploadEntryIndex = store.sessionContent(profileA, store.profile(profileA)!!.currentSession)
+            .entries.indexOfLast { it.question == "caption for a failing fixture upload" }
+        assertTrue("Failed upload should remain in the current message history", uploadEntryIndex >= 0)
+        val uploadFailureBubble = hasText("上传图片 1/1 失败", substring = true) and
+            hasAnyAncestor(hasTestTag("message-assistant-$uploadEntryIndex"))
+        waitUntil("upload failure stage appears in the failed message bubble", 5_000) {
+            runCatching { rule.onNode(uploadFailureBubble).assertIsDisplayed() }.isSuccess
+        }
+        assertFalse("A rejected upload must not start a chat request", fixtureRequestSeen(
+            "profile=A endpoint=POST /api/v1/chat key=old_key", fixtureOffset,
+        ))
+        rule.onNodeWithTag("composer-field").performTextInput("ready after upload failure")
+        rule.onNodeWithTag("send-button").assertIsEnabled()
+        setFixtureControl("upload.fail", "false")
+        println("UI_CASE G PASS beforeHeaders=true beforeFirstEvent=true truncatedSse=failedAndPersisted upload503=reported chatNotSent=true composerRecovered=true")
+    }
+
+    private fun createV015Profiles(withLegacyKey: Boolean, extraASessions: Int = 0) {
         val aSession = fixture.getProperty("session.a")
         val bSession = fixture.getProperty("session.b")
         val now = System.currentTimeMillis()
         val a = profileJson(profileA, fixture.getProperty("base.a"), aSession,
-            listOf(sessionJson(aSession, "合成的 A 历史问题", "合成的 A 历史回复", now)))
+            listOf(sessionJson(aSession, "合成的 A 历史问题", "合成的 A 历史回复", now)) +
+                (0 until extraASessions).map { index ->
+                    sessionJson(UUID.randomUUID().toString(), "重复标题", "本地保留的回复 $index", now - index - 1)
+                })
         val b = profileJson(profileB, fixture.getProperty("base.b"), bSession,
             listOf(sessionJson(bSession, "合成的 B 历史问题", "合成的 B 历史回复", now)))
         Files.writeString(historyFile, JSONObject()
@@ -505,7 +660,78 @@ class DesktopUiAcceptanceTest {
     private fun selectSession(sessionId: String) {
         val index = store.sessions(profileA).indexOfFirst { it.id == sessionId }
         assertTrue("Session should be present in the production sidebar", index >= 0)
+        scrollToSessionRow(index)
         rule.onNodeWithTag("session-item-$index").performClick()
+    }
+
+    private fun scrollToSessionRow(targetIndex: Int) {
+        var visible = visibleSessionIndices()
+        if (targetIndex in visible) return
+
+        val itemCount = store.sessions(profileA).size
+        repeat(itemCount + 2) {
+            if (targetIndex in visible) return
+            val movingDown = targetIndex > (visible.maxOrNull() ?: -1)
+            val visibleEdge = if (movingDown) visible.last() else visible.first()
+            rule.onNodeWithTag("session-item-$visibleEdge").performTouchInput {
+                val start = center
+                down(start)
+                moveTo(start + Offset(0f, if (movingDown) -360f else 360f), delayMillis = 250)
+                up()
+            }
+            rule.mainClock.advanceTimeBy(250)
+            rule.waitForIdle()
+            visible = visibleSessionIndices()
+        }
+        assertTrue("Sidebar should scroll row $targetIndex into view; visible rows were $visible", rule.onAllNodes(
+            SemanticsMatcher("session row $targetIndex visible") { node ->
+                node.config.contains(SemanticsProperties.TestTag) &&
+                    node.config[SemanticsProperties.TestTag] == "session-item-$targetIndex"
+            },
+        ).fetchSemanticsNodes().isNotEmpty())
+    }
+
+    private fun visibleSessionIndices(): List<Int> = rule.onAllNodes(sessionRowMatcher()).fetchSemanticsNodes().mapNotNull { node ->
+        if (!node.config.contains(SemanticsProperties.TestTag)) return@mapNotNull null
+        node.config[SemanticsProperties.TestTag].removePrefix("session-item-").toIntOrNull()
+    }.sorted()
+
+    private fun sessionRowMatcher() = SemanticsMatcher("session row") { node ->
+        node.config.contains(SemanticsProperties.TestTag) &&
+            node.config[SemanticsProperties.TestTag].startsWith("session-item-")
+    }
+
+    private fun assertComposerText(expected: String) {
+        val matcher = SemanticsMatcher("composer contains the expected session draft") { node ->
+            node.config.contains(SemanticsProperties.TestTag) &&
+                node.config[SemanticsProperties.TestTag] == "composer-field" &&
+                node.config.contains(SemanticsProperties.EditableText) &&
+                node.config[SemanticsProperties.EditableText].text == expected
+        }
+        assertTrue("Composer should restore the selected session draft", rule.onAllNodes(matcher).fetchSemanticsNodes().isNotEmpty())
+    }
+
+    private fun entryForCurrentSession(question: String) = runCatching {
+        val sessionId = store.profile(profileA)!!.currentSession
+        store.sessionContent(profileA, sessionId).entries.lastOrNull { it.question == question }
+    }.getOrNull()
+
+    private fun assertSendingWithoutAnswer(question: String, expectedStage: String) {
+        waitUntil("pending entry before response content", 5_000) {
+            entryForCurrentSession(question)?.let { it.status == "发送中" && it.answer.isEmpty() } == true
+        }
+        rule.onNodeWithTag("send-button").assertIsNotEnabled()
+        waitUntil("visible $expectedStage progress stage", 5_000) {
+            runCatching { rule.onNodeWithText(expectedStage, substring = true).assertIsDisplayed() }.isSuccess
+        }
+        waitUntil("visible elapsed timer for $expectedStage", 6_000) {
+            rule.mainClock.advanceTimeBy(250)
+            (1..5).any { seconds ->
+                runCatching {
+                    rule.onNodeWithText("$expectedStage · $seconds 秒", substring = true).assertIsDisplayed()
+                }.isSuccess
+            }
+        }
     }
 
     private fun roleMatcher(role: Role) = SemanticsMatcher("Role = $role") { node ->
@@ -560,7 +786,25 @@ class DesktopUiAcceptanceTest {
     }
 
     private fun setRejectOriginal(reject: Boolean) {
-        val control = Properties().apply { setProperty("reject.original", reject.toString()) }
+        setFixtureControl("reject.original", reject.toString())
+    }
+
+    private fun setFixtureControl(name: String, value: String) {
+        val path = Path.of(fixture.getProperty("controls.file"))
+        val controls = Properties()
+        if (Files.isRegularFile(path)) Files.newInputStream(path).use(controls::load)
+        controls.setProperty(name, value)
+        Files.newOutputStream(path).use { controls.store(it, null) }
+    }
+
+    private fun resetFixtureControls() {
+        val control = Properties().apply {
+            setProperty("reject.original", "false")
+            setProperty("chat.delay.before.headers.ms", "1500")
+            setProperty("chat.delay.before.first.event.ms", "1500")
+            setProperty("chat.truncate.sse", "false")
+            setProperty("upload.fail", "false")
+        }
         Files.newOutputStream(Path.of(fixture.getProperty("controls.file"))).use { control.store(it, null) }
     }
 
