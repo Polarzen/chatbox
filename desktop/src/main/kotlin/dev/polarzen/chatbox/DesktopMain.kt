@@ -59,6 +59,7 @@ fun main(args: Array<String>) {
     }.onFailure { lockFailure = it }.getOrDefault(false)
     val store = if (lockAcquired) runCatching { DesktopStore(dataDir.resolve("history.json")) }.getOrNull() else null
     val credentials = DesktopCredentials(dataDir.resolve("credentials"))
+    val replyImageCache = ReplyImageCache(dataDir.resolve("reply-images"))
     try {
         application {
             Window(onCloseRequest = ::exitApplication, title = "Chatbox · 小鲸鱼",
@@ -69,7 +70,7 @@ fun main(args: Array<String>) {
                             !lockAcquired && lockFailure == null -> Text("Chatbox 已在运行，请使用已打开的窗口。", Modifier.padding(16.dp))
                             !lockAcquired -> Text("无法锁定本地聊天历史文件，请检查数据目录权限。", Modifier.padding(16.dp))
                             store == null -> Text("无法读取本地聊天历史。请先备份历史文件，再检查数据目录。", Modifier.padding(16.dp))
-                            else -> Screen(store, credentials)
+                            else -> Screen(store, credentials, replyImageCache)
                         }
                     }
                 }
@@ -88,6 +89,7 @@ private data class ConnectionResult(
     val target: ValidatedTarget,
     val sessions: Set<String>,
     val rememberFailure: Throwable?,
+    val keyMarker: String,
 )
 
 private fun canonicalAddress(input: String, allowLoopbackHttp: Boolean = true): String {
@@ -111,7 +113,7 @@ private fun safeFailureMessage(error: Throwable, credential: String): String {
     return (if (credential.isNotEmpty()) message.replace(credential, "[密钥已隐藏]") else message).take(240)
 }
 
-@Composable private fun Screen(store: DesktopStore, credentials: DesktopCredentials) {
+@Composable private fun Screen(store: DesktopStore, credentials: DesktopCredentials, replyImageCache: ReplyImageCache) {
     val startupProfileId = remember(store) {
         store.activeProfileId.takeIf { store.profile(it) != null } ?: store.profiles.firstOrNull()?.id.orEmpty()
     }
@@ -141,6 +143,10 @@ private fun safeFailureMessage(error: Throwable, credential: String): String {
     var note by remember { mutableStateOf("") }
     var retry by remember { mutableStateOf<SendRetry?>(null) }
     var selectedImage by remember { mutableStateOf<Path?>(null) }
+    var replyImageCacheGeneration by remember { mutableStateOf<Map<ReplyImageKey, Int>>(emptyMap()) }
+    var replyImageFailures by remember { mutableStateOf<Map<ReplyImageKey, String>>(emptyMap()) }
+    var replyImageRetrying by remember { mutableStateOf<Set<ReplyImageKey>>(emptySet()) }
+    var verifiedKeyMarker by remember { mutableStateOf<String?>(null) }
     var profileMenu by remember { mutableStateOf(false) }
     var sessionMenu by remember { mutableStateOf(false) }
     val scroll = rememberLazyListState()
@@ -165,6 +171,51 @@ private fun safeFailureMessage(error: Throwable, credential: String): String {
     val hasUnappliedAddress = manualEntry &&
         runCatching { canonicalAddress(addressDraft) }.getOrNull() != runCatching { canonicalAddress(base) }.getOrNull()
 
+    fun retryReplyImage(profileId: String, sessionId: String, attachmentId: String) {
+        val imageKey = ReplyImageKey(profileId, sessionId, attachmentId)
+        if (profileId != activeProfileId || sessionId != chat.session || busy || connecting ||
+            connectedProfile != profileId || imageKey in replyImageRetrying
+        ) return
+        val address = base
+        val verifiedProfile = connectedProfile
+        val verifiedAddress = connectedAddress
+        val typedToken = key.trim()
+        replyImageRetrying = replyImageRetrying + imageKey
+        thread(isDaemon = true, name = "chatbox-reply-image-retry") {
+            var tokenUsed = ""
+            val result = runCatching {
+                val target = resolvedTarget(profileId, address)
+                check(verifiedProfile == profileId && target.address == verifiedAddress) {
+                    "服务地址已变化，请重新连接验证后再获取图片。"
+                }
+                val token = if (typedToken.isNotBlank()) typedToken else {
+                    check(!target.allowLoopbackHttp || profileId.startsWith("launcher:")) {
+                        "手动本机 HTTP 地址需要重新输入密钥。"
+                    }
+                    credentials.load(profileId) ?: error("已保存密钥不可用，请重新连接。")
+                }
+                tokenUsed = token
+                check(resolvedTarget(profileId, address) == target) {
+                    "服务地址已变化，请重新连接验证后再获取图片。"
+                }
+                val bytes = downloadReplyImage(target.address, token, attachmentId, target.allowLoopbackHttp)
+                check(resolvedTarget(profileId, address) == target) { "服务地址已变化，图片未缓存。" }
+                replyImageCache.save(profileId, attachmentId, bytes)
+            }
+            SwingUtilities.invokeLater {
+                replyImageRetrying = replyImageRetrying - imageKey
+                val failure = result.exceptionOrNull()?.let { safeFailureMessage(it, tokenUsed) }
+                if (failure == null) {
+                    replyImageFailures = replyImageFailures - imageKey
+                    replyImageCacheGeneration = replyImageCacheGeneration +
+                        (imageKey to ((replyImageCacheGeneration[imageKey] ?: 0) + 1))
+                } else {
+                    replyImageFailures = replyImageFailures + (imageKey to failure)
+                }
+            }
+        }
+    }
+
     fun selectProfile(profileId: String, address: String) {
         if (busy || connecting) return
         val prior = store.profile(activeProfileId)
@@ -184,6 +235,7 @@ private fun safeFailureMessage(error: Throwable, credential: String): String {
         savedCredentialAvailable = false
         connectedProfile = null
         connectedAddress = null
+        verifiedKeyMarker = null
         autoAuthTargetKey = null
         autoAuthRejectedFor = null
         autoAuthInFlightFor = null
@@ -227,6 +279,7 @@ private fun safeFailureMessage(error: Throwable, credential: String): String {
         connecting = true
         connectedProfile = null
         connectedAddress = null
+        verifiedKeyMarker = null
         note = "正在验证连接…"
         thread(isDaemon = true, name = "chatbox-authenticate") {
             var verifiedProfileIdForAttempt = profileId
@@ -250,7 +303,7 @@ private fun safeFailureMessage(error: Throwable, credential: String): String {
                 }
                 val shouldRemember = !target.allowLoopbackHttp || verifiedProfileId.startsWith("launcher:")
                 val rememberFailure = if (shouldRemember) runCatching { credentials.save(verifiedProfileId, token) }.exceptionOrNull() else null
-                ConnectionResult(verifiedProfileId, target, sessions, rememberFailure)
+                ConnectionResult(verifiedProfileId, target, sessions, rememberFailure, desktopKeyMarker(token))
             }
             SwingUtilities.invokeLater {
                 connecting = false
@@ -285,6 +338,7 @@ private fun safeFailureMessage(error: Throwable, credential: String): String {
                     sessionsRevision++
                     connectedProfile = verifiedId
                     connectedAddress = verifiedTarget.address
+                    verifiedKeyMarker = verified.keyMarker
                     val shouldRemember = !verifiedTarget.allowLoopbackHttp || verifiedId.startsWith("launcher:")
                     savedCredentialAvailable = shouldRemember && savedFailure == null
                     if (savedCredentialAvailable) key = ""
@@ -298,6 +352,7 @@ private fun safeFailureMessage(error: Throwable, credential: String): String {
                         autoAuthNextAttemptAt = Long.MAX_VALUE
                     }
                 }, { error ->
+                    verifiedKeyMarker = null
                     val safeMessage = safeFailureMessage(error, typedToken)
                     note = safeMessage
                     if (typedToken.isEmpty() &&
@@ -358,6 +413,56 @@ private fun safeFailureMessage(error: Throwable, credential: String): String {
             var answer = ""
             var tokenUsed = ""
             var requestStarted = false
+            var replyImageTarget: ValidatedTarget? = null
+            val replyImagesReceived = mutableListOf<ReplyImage>()
+            val replyImageFetchStarted = mutableSetOf<String>()
+
+            fun receiveReplyImage(attachmentId: String?, textOffset: Int) {
+                val images = synchronized(replyImagesReceived) {
+                    replyImagesReceived += ReplyImage(attachmentId, textOffset)
+                    replyImagesReceived.toList()
+                }
+                val updated = pending.copy(entries = pending.entries.dropLast(1) +
+                    entry.copy(answer = answer, replyImages = images))
+                val persisted = runCatching { store.saveProfile(profileId, updated) }
+                val imageKey = attachmentId?.let { ReplyImageKey(profileId, pending.session, it) }
+                SwingUtilities.invokeLater {
+                    if (operationId == requestId && activeProfileId == profileId && chat.session == pending.session) {
+                        chat = updated
+                        if (imageKey != null) replyImageRetrying = replyImageRetrying + imageKey
+                        if (persisted.isFailure) note = "本地保存失败；收到的图片可能无法在重启后恢复。"
+                    }
+                }
+                if (attachmentId == null) return
+                val shouldFetch = synchronized(replyImageFetchStarted) { replyImageFetchStarted.add(attachmentId) }
+                if (!shouldFetch) return
+                thread(isDaemon = true, name = "chatbox-reply-image") {
+                    val imageToken = tokenUsed
+                    val result = runCatching {
+                        val expectedTarget = checkNotNull(replyImageTarget)
+                        val fetchTarget = resolvedTarget(profileId, address)
+                        check(fetchTarget == expectedTarget && fetchTarget.address == verifiedAddress) {
+                            "服务地址已变化，请重新连接验证后再获取图片。"
+                        }
+                        val bytes = downloadReplyImage(fetchTarget.address, imageToken, attachmentId, fetchTarget.allowLoopbackHttp)
+                        check(resolvedTarget(profileId, address) == fetchTarget) { "服务地址已变化，图片未缓存。" }
+                        replyImageCache.save(profileId, attachmentId, bytes)
+                    }
+                    SwingUtilities.invokeLater {
+                        if (imageKey != null) {
+                            replyImageRetrying = replyImageRetrying - imageKey
+                            val failure = result.exceptionOrNull()?.let { safeFailureMessage(it, imageToken) }
+                            if (failure == null) {
+                                replyImageFailures = replyImageFailures - imageKey
+                                replyImageCacheGeneration = replyImageCacheGeneration +
+                                    (imageKey to ((replyImageCacheGeneration[imageKey] ?: 0) + 1))
+                            } else {
+                                replyImageFailures = replyImageFailures + (imageKey to failure)
+                            }
+                        }
+                    }
+                }
+            }
             val result = runCatching {
                 val target = resolvedTarget(profileId, address)
                 check(target.address == connectedAddress) { "服务地址已变化，请重新连接验证后再发送。" }
@@ -375,44 +480,56 @@ private fun safeFailureMessage(error: Throwable, credential: String): String {
                 if (profileId.startsWith("launcher:") && target.address != resolvedTarget(profileId, address).address) {
                     error("AstrBot Launcher 服务地址已变化，消息未发送。请重新连接。")
                 }
+                replyImageTarget = target
                 if (image == null) {
                     requestStarted = true
                     sendToAstrBot(target.address, token, store.username, pending.session, query,
-                        allowLoopbackHttp = target.allowLoopbackHttp) { delta ->
-                        answer = delta
-                        SwingUtilities.invokeLater { if (operationId == requestId && activeProfileId == profileId) partial = delta }
-                    }
+                        allowLoopbackHttp = target.allowLoopbackHttp,
+                        onReplyImage = ::receiveReplyImage,
+                        onText = { delta ->
+                            answer = delta
+                            SwingUtilities.invokeLater { if (operationId == requestId && activeProfileId == profileId && chat.session == pending.session) partial = delta }
+                        })
                 } else {
                     requestStarted = true
                     sendImageToAstrBot(target.address, token, store.username, pending.session, image, imageCaption,
-                        allowLoopbackHttp = target.allowLoopbackHttp) { delta ->
-                        answer = delta
-                        SwingUtilities.invokeLater { if (operationId == requestId && activeProfileId == profileId) partial = delta }
-                    }
+                        allowLoopbackHttp = target.allowLoopbackHttp,
+                        onReplyImage = ::receiveReplyImage,
+                        onText = { delta ->
+                            answer = delta
+                            SwingUtilities.invokeLater { if (operationId == requestId && activeProfileId == profileId && chat.session == pending.session) partial = delta }
+                        })
                 }
             }
             SwingUtilities.invokeLater {
                 val failure = result.exceptionOrNull()?.let { safeFailureMessage(it, tokenUsed) }
+                val receivedImages = synchronized(replyImagesReceived) { replyImagesReceived.toList() }
                 val completed = pending.copy(entries = pending.entries.dropLast(1) +
-                    entry.copy(answer = answer, status = if (result.isSuccess) "已完成" else
+                    entry.copy(answer = answer, replyImages = receivedImages, status = if (result.isSuccess) "已完成" else
                         (if (requestStarted) "发送失败：" else "未发送：") + failure.orEmpty()))
                 val saved = runCatching { store.saveProfile(profileId, completed) }.isSuccess
-                chat = completed
-                busy = false
-                partial = ""
-                note = when {
-                    !saved -> "本地保存失败，请勿直接重发。"
-                    result.isSuccess && answer.isEmpty() -> "回复已结束，但没有可显示的文字。"
-                    result.isSuccess -> ""
-                    else -> failure ?: "连接或解析失败；服务可能已收到消息，请勿直接重发。"
+                if (operationId == requestId) {
+                    if (activeProfileId == profileId && chat.session == pending.session) chat = completed
+                    busy = false
+                    partial = ""
+                    note = when {
+                        !saved -> "本地保存失败，请勿直接重发。"
+                        result.isSuccess && answer.isEmpty() && receivedImages.isEmpty() -> "回复已结束，但没有可显示的内容。"
+                        result.isSuccess -> ""
+                        else -> failure ?: "连接或解析失败；服务可能已收到消息，请勿直接重发。"
+                    }
                 }
-                if (typedToken.isEmpty() && (failure?.contains("密钥无效") == true ||
-                        failure?.contains("权限不足") == true || failure?.contains("权限") == true)
-                ) {
-                    autoAuthRejectedFor = "$profileId@${runCatching { canonicalAddress(address) }.getOrDefault(address)}"
-                    autoAuthNextAttemptAt = Long.MAX_VALUE
-                    connectedProfile = null
-                    connectedAddress = null
+                val authorizationRejected = failure?.let {
+                    it.contains("密钥无效") || it.contains("权限不足") || it.contains("权限")
+                } == true
+                if (authorizationRejected) {
+                    verifiedKeyMarker = null
+                    if (typedToken.isEmpty()) {
+                        autoAuthRejectedFor = "$profileId@${runCatching { canonicalAddress(address) }.getOrDefault(address)}"
+                        autoAuthNextAttemptAt = Long.MAX_VALUE
+                        connectedProfile = null
+                        connectedAddress = null
+                    }
                 }
                 if (result.isSuccess && image != null) {
                     selectedImage = null
@@ -449,6 +566,7 @@ private fun safeFailureMessage(error: Throwable, credential: String): String {
             if (current == null) {
                 connectedProfile = null
                 connectedAddress = null
+                verifiedKeyMarker = null
                 autoAuthTargetKey = null
                 autoAuthInFlightFor = null
                 autoAuthNextAttemptAt = 0L
@@ -461,6 +579,7 @@ private fun safeFailureMessage(error: Throwable, credential: String): String {
                 chat = store.readProfile(activeProfileId)
                 connectedProfile = null
                 connectedAddress = null
+                verifiedKeyMarker = null
                 note = "AstrBot Launcher 地址已变化，请重新连接验证。"
                 sessionsRevision++
             }
@@ -589,6 +708,7 @@ private fun safeFailureMessage(error: Throwable, credential: String): String {
                 key = it
                 connectedProfile = null
                 connectedAddress = null
+                verifiedKeyMarker = null
                 autoAuthTargetKey = null
                 autoAuthRejectedFor = null
                 autoAuthInFlightFor = null
@@ -609,10 +729,18 @@ private fun safeFailureMessage(error: Throwable, credential: String): String {
                         savedCredentialAvailable = false
                         connectedProfile = null
                         connectedAddress = null
+                        verifiedKeyMarker = null
                         note = if (result.isSuccess) "已清除此配置的已保存密钥。" else "无法清除已保存密钥。"
                     }
                 }
             }, enabled = !busy && !connecting) { Text("清除") }
+        }
+        val marker = verifiedKeyMarker
+        val markerAddress = connectedAddress
+        if (marker != null && markerAddress != null && connectedProfile == activeProfileId && !hasUnappliedAddress
+        ) Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            Text("当前 Key：$marker · 查看 Key 权限")
+            DesktopKeyDetails(marker, markerAddress)
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
@@ -646,7 +774,20 @@ private fun safeFailureMessage(error: Throwable, credential: String): String {
                 if (item.question.isNotBlank()) Text("你：${item.question}")
                 item.attachmentDisplayName?.let { Text("图片：$it", style = MaterialTheme.typography.caption) }
                 val answer = if (busy && item === chat.entries.lastOrNull()) partial else item.answer
-                if (answer.isNotBlank()) Text("助手：$answer")
+                DesktopReplyContent(
+                    profileId = activeProfileId,
+                    sessionId = chat.session,
+                    answer = answer,
+                    images = item.replyImages,
+                    cache = replyImageCache,
+                    cacheGeneration = replyImageCacheGeneration,
+                    failures = replyImageFailures,
+                    retrying = replyImageRetrying,
+                    retryEnabled = !busy && !connecting && connectedProfile == activeProfileId &&
+                        connectedAddress == runCatching { canonicalAddress(base, true) }.getOrNull() &&
+                        selectedProfile?.offlineOnly != true && !hasUnappliedAddress,
+                    onRetry = { attachmentId -> retryReplyImage(activeProfileId, chat.session, attachmentId) },
+                )
                 if (item.status != "已完成") Text(item.status, style = MaterialTheme.typography.caption)
                 if (!busy && item.status != "已完成") {
                     TextButton(onClick = {

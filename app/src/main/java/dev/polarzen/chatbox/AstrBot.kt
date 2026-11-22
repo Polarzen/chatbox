@@ -2,12 +2,17 @@ package dev.polarzen.chatbox
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.Proxy
 import java.net.URI
+import java.net.URLEncoder
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.UUID
+
+private const val MAX_REPLY_IMAGE_BYTES = 20 * 1024 * 1024
 
 internal fun endpoint(base: String, allowLoopbackHttp: Boolean = false): URI {
     val uri = URI(base.trim())
@@ -23,11 +28,12 @@ internal fun endpoint(base: String, allowLoopbackHttp: Boolean = false): URI {
 internal fun sendToAstrBot(
     base: String, token: String, user: String, session: String, message: String,
     allowLoopbackHttp: Boolean = false,
+    onReplyImage: (String?, Int) -> Unit = { _, _ -> },
     onText: (String) -> Unit,
 ) {
     sendToAstrBotPayload(
         base, token, user, session, JSONObject().put("message", message),
-        allowLoopbackHttp, onText,
+        allowLoopbackHttp, onReplyImage, onText,
     )
 }
 
@@ -36,6 +42,7 @@ internal fun sendImageToAstrBot(
     base: String, token: String, user: String, session: String,
     image: Path, caption: String = "",
     allowLoopbackHttp: Boolean = false,
+    onReplyImage: (String?, Int) -> Unit = { _, _ -> },
     onText: (String) -> Unit,
 ) {
     val path = image.toAbsolutePath().normalize()
@@ -47,7 +54,69 @@ internal fun sendImageToAstrBot(
     parts.put(JSONObject().put("type", "image").put("attachment_id", attachmentId)
         .put("filename", path.fileName.toString()))
     sendToAstrBotPayload(base, token, user, session, JSONObject().put("message", parts),
-        allowLoopbackHttp, onText)
+        allowLoopbackHttp, onReplyImage, onText)
+}
+
+/** Download a reply attachment through the authenticated, same-origin OpenAPI file endpoint. */
+internal fun downloadReplyImage(
+    base: String, token: String, attachmentId: String, allowLoopbackHttp: Boolean = false,
+): ByteArray {
+    require(attachmentId.isNotBlank()) { "图片附件编号无效。" }
+    val chatTarget = endpoint(base, allowLoopbackHttp)
+    val encodedId = URLEncoder.encode(attachmentId, Charsets.UTF_8.name())
+    val target = URI(chatTarget.toASCIIString().removeSuffix("/chat") + "/file?attachment_id=$encodedId")
+    val c = openAstrBotConnection(target)
+    try {
+        c.instanceFollowRedirects = false
+        c.requestMethod = "GET"
+        c.connectTimeout = 12_000
+        c.readTimeout = 30_000
+        c.setRequestProperty("Authorization", "Bearer $token")
+        c.setRequestProperty("Accept", "image/*, application/octet-stream")
+
+        val status = c.responseCode
+        check(status in 200..299) { downloadHttpError(status) }
+        val mediaType = c.contentType?.substringBefore(';')?.trim()?.lowercase()
+        check(mediaType?.startsWith("image/") == true || mediaType == "application/octet-stream") {
+            "图片下载接口未返回图片，请检查 AstrBot 服务。"
+        }
+        check(c.contentLengthLong <= MAX_REPLY_IMAGE_BYTES || c.contentLengthLong < 0) {
+            "回复图片超过 20 MB 限制。"
+        }
+        val bytes = c.inputStream.use { it.readBounded(MAX_REPLY_IMAGE_BYTES) }
+        check(bytes.isNotEmpty()) { "服务返回了空图片。" }
+        check(!looksLikeJson(bytes)) { "图片下载接口返回了错误信息，而不是图片。" }
+        return bytes
+    } finally {
+        c.disconnect()
+    }
+}
+
+private fun InputStream.readBounded(maxBytes: Int): ByteArray {
+    val output = ByteArrayOutputStream()
+    val buffer = ByteArray(8 * 1024)
+    var total = 0
+    while (true) {
+        val count = read(buffer, 0, minOf(buffer.size, maxBytes + 1 - total))
+        if (count < 0) break
+        total += count
+        check(total <= maxBytes) { "回复图片超过 20 MB 限制。" }
+        output.write(buffer, 0, count)
+    }
+    return output.toByteArray()
+}
+
+private fun looksLikeJson(bytes: ByteArray): Boolean {
+    val first = bytes.firstOrNull { !it.toInt().toChar().isWhitespace() } ?: return false
+    return first == '{'.code.toByte() || first == '['.code.toByte()
+}
+
+private fun downloadHttpError(status: Int): String = when (status) {
+    401 -> "密钥无效或已撤销。"
+    403 -> "缺少图片下载权限，请为 API 密钥启用 file 权限。"
+    404 -> "找不到回复图片，请检查附件是否仍然存在。"
+    in 300..399 -> "服务返回重定向，请直接填写最终服务地址。"
+    else -> "图片下载失败，服务器返回 HTTP $status。"
 }
 
 private fun imageMediaType(path: Path): String = when (path.fileName.toString().substringAfterLast('.', "").lowercase()) {
@@ -130,7 +199,7 @@ private fun openAstrBotConnection(target: URI): HttpURLConnection {
 
 private fun sendToAstrBotPayload(
     base: String, token: String, user: String, session: String, messagePayload: JSONObject,
-    allowLoopbackHttp: Boolean, onText: (String) -> Unit,
+    allowLoopbackHttp: Boolean, onReplyImage: (String?, Int) -> Unit, onText: (String) -> Unit,
 ) {
     val target = endpoint(base, allowLoopbackHttp)
     val c = openAstrBotConnection(target)
@@ -163,16 +232,26 @@ private fun sendToAstrBotPayload(
         var done = false
         var completedText = ""
         var pendingText = ""
+        var pendingRawImages = 0
+        fun replyOffset(): Int = completedText.length + pendingText.length
+        fun emitMissingRawImages() {
+            repeat(pendingRawImages) { onReplyImage(null, replyOffset()) }
+            pendingRawImages = 0
+        }
         c.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
             readSse(reader) { raw ->
                 val frame = JSONObject(raw)
-                when (frame.optString("type")) {
+                val type = frame.optString("type")
+                val chain = frame.optString("chain_type")
+                val hiddenPlain = type == "plain" && chain in
+                    setOf("reasoning", "tool_call", "tool_call_result", "agent_stats")
+                when (type) {
                     "plain" -> {
-                        val chain = frame.optString("chain_type")
-                        if (chain in setOf("reasoning", "tool_call", "tool_call_result", "agent_stats")) {
+                        if (hiddenPlain) {
                             completedText += pendingText
                             pendingText = ""
                         } else {
+                            emitMissingRawImages()
                             val value = frame.opt("data") as? String ?: ""
                             if (frame.optBoolean("streaming")) pendingText += value
                             else {
@@ -183,16 +262,47 @@ private fun sendToAstrBotPayload(
                             onText(completedText + pendingText)
                         }
                     }
-                    "complete", "image", "file", "video", "record", "actionrow" -> {
+                    "image" -> {
+                        val value = frame.opt("data") as? String ?: ""
+                        if (value.startsWith("[IMAGE]")) {
+                            completedText += pendingText
+                            pendingText = ""
+                            pendingRawImages++
+                        } else {
+                            emitMissingRawImages()
+                            completedText += pendingText
+                            pendingText = ""
+                        }
+                    }
+                    "attachment_saved" -> {
+                        completedText += pendingText
+                        pendingText = ""
+                        val data = frame.optJSONObject("data")
+                        val savedType = data?.optString("type")
+                        val attachmentId = data?.opt("id") as? String
+                        if (savedType == "image" && !attachmentId.isNullOrBlank()) {
+                            if (pendingRawImages > 0) pendingRawImages--
+                            onReplyImage(attachmentId, replyOffset())
+                        } else emitMissingRawImages()
+                    }
+                    "complete", "file", "video", "record", "actionrow" -> {
+                        emitMissingRawImages()
                         completedText += pendingText
                         pendingText = ""
                     }
-                    "error" -> error("AstrBot 报告对话失败，请在服务端检查配置。")
-                    "end" -> done = true
+                    "error" -> {
+                        emitMissingRawImages()
+                        error("AstrBot 报告对话失败，请在服务端检查配置。")
+                    }
+                    "end" -> {
+                        emitMissingRawImages()
+                        done = true
+                    }
                 }
                 !done
             }
         }
+        emitMissingRawImages()
         onText(completedText + pendingText)
         check(done) { "回复流意外中断，可能已在服务端执行。请勿直接重复发送。" }
     } finally {
