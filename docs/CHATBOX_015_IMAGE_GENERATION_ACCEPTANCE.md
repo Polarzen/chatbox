@@ -8,6 +8,7 @@
 |---|---|
 | 正式版 | [v0.1.5 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.5) · [MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.5/Chatbox-0.1.5.msi) · [SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.5/SHA256SUMS.txt) |
 | 安装验收用候选件 | [PR #3 的 Windows + Android CI](https://github.com/Polarzen/chatbox/actions/runs/45005911848) 检出提交 `ef27182eb32c657e108e35bb814627285aa3ce79`。下载的 Windows MSI 为 55,017,472 字节，SHA-256 `E5F0508D74C6E90F1863CDA41953C53548EF137D7A4A2725B99CBB4EFDF48856`；与本机已安装缓存 MSI 字节及哈希完全相同。 |
+| 发布后回验 | 从正式 Release 重新下载 MSI 并计算 SHA-256，与上述 PR 安装包、Windows Installer 本机缓存及随包校验文件一致。 |
 | 其他 CI MSI | 主分支 CI 从相同源码树另行生成的 MSI SHA-256 为 `11FB20478AFEFE3BE49B791F38418AE2C516BA97F92B945D75DB094F3320AC35`。该 MSI 与 PR 候选件不同，未用于本机升级验收。 |
 | 本机升级 | 从 0.1.4 通过 MSI 升级到 0.1.5，共享安装目录中的 178 个安装组件验证通过；0 个无关文件哈希不匹配。日常使用中的应用已验证可运行。 |
 
