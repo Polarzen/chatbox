@@ -20,6 +20,7 @@ $CandidateRootPath = (Resolve-Path -LiteralPath $CandidateRoot).Path
 $runnerPrefix = $runnerTemp + '\'
 $testRootPrefix = $testRootPath + '\'
 if (-not $testRootPath.StartsWith($runnerPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+    -not $CandidateRootPath.StartsWith($runnerPrefix, [StringComparison]::OrdinalIgnoreCase) -or
     -not (Split-Path -Leaf $testRootPath).StartsWith('chatbox-upgrade-regression-', [StringComparison]::OrdinalIgnoreCase) -or
     -not $installDirPath.StartsWith($testRootPrefix, [StringComparison]::OrdinalIgnoreCase) -or
     -not ([IO.Path]::GetRelativePath($testRootPath, $installDirPath).Equals('install', [StringComparison]::OrdinalIgnoreCase))) {
@@ -33,7 +34,6 @@ $legacyInstallLog = Join-Path $testRootPath 'published-v0.1.5-install.log'
 $candidateUpgradeLog = Join-Path $testRootPath 'published-v0.1.5-to-candidate-upgrade.log'
 $releaseDir = Join-Path $testRootPath 'real-upgrade-release'
 $releaseMsiPath = Join-Path $releaseDir 'Chatbox-0.1.5.msi'
-$releaseUrl = 'https://github.com/Polarzen/chatbox/releases/download/v0.1.5/Chatbox-0.1.5.msi'
 $releaseSha256 = 'E5F0508D74C6E90F1863CDA41953C53548EF137D7A4A2725B99CBB4EFDF48856'
 $fixtureRunRoot = $null
 $safeServiceLog = $null
@@ -46,7 +46,6 @@ $oldJavaToolOptions = $env:JAVA_TOOL_OPTIONS
 $installer = $null
 $candidateDatabase = $null
 $legacyDatabase = $null
-$oldAppAuthenticated = $false
 $candidateUiAccepted = $false
 $fixtureProps = @{}
 
@@ -59,9 +58,58 @@ function Get-Sha256([string] $Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
 }
 
+function Get-CheckoutToken {
+    foreach ($variableName in @('GH_TOKEN', 'GITHUB_TOKEN')) {
+        $token = [Environment]::GetEnvironmentVariable($variableName)
+        if (-not [string]::IsNullOrWhiteSpace($token)) { return $token.Trim() }
+    }
+
+    # actions/checkout persists its existing token as a local Git extraheader.
+    # Decode it in memory only; never write it to output or pass it as a CLI argument.
+    $checkoutHeader = & git config --local --get http.https://github.com/.extraheader 2>$null
+    if ($LASTEXITCODE -eq 0 -and $checkoutHeader -match '^\s*Authorization:\s*Basic\s+(\S+)\s*$') {
+        try {
+            $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Matches[1]))
+            $separator = $decoded.IndexOf(':')
+            if ($separator -gt 0 -and $decoded.Substring(0, $separator) -eq 'x-access-token') {
+                $token = $decoded.Substring($separator + 1)
+                if (-not [string]::IsNullOrWhiteSpace($token)) { return $token }
+            }
+        }
+        catch { }
+    }
+    elseif ($LASTEXITCODE -eq 0 -and $checkoutHeader -match '^\s*Authorization:\s*Bearer\s+(\S+)\s*$') {
+        return $Matches[1]
+    }
+    throw 'No GH_TOKEN, GITHUB_TOKEN, or actions/checkout repository credential is available for the private v0.1.5 release asset.'
+}
+
+function Get-PinnedReleaseMsi([string] $Destination) {
+    $priorGhToken = $env:GH_TOKEN
+    $priorGithubToken = $env:GITHUB_TOKEN
+    try {
+        if ([string]::IsNullOrWhiteSpace($env:GH_TOKEN) -and [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) {
+            $env:GH_TOKEN = Get-CheckoutToken
+        }
+        $gh = Get-Command gh -CommandType Application -ErrorAction Stop
+        & $gh.Source release download v0.1.5 --repo Polarzen/chatbox --pattern 'Chatbox-0.1.5.msi' --dir $releaseDir *> $null
+        if ($LASTEXITCODE -ne 0) { throw "GitHub CLI release download failed with exit code $LASTEXITCODE." }
+        if (-not (Test-Path -LiteralPath $Destination -PathType Leaf)) { throw 'GitHub CLI did not download the pinned release MSI asset.' }
+    }
+    finally {
+        $env:GH_TOKEN = $priorGhToken
+        $env:GITHUB_TOKEN = $priorGithubToken
+    }
+}
+
 function Get-FileVersion([string] $Path) {
     $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
     return [Version]::new($version.FileMajorPart, $version.FileMinorPart, $version.FileBuildPart)
+}
+
+function ConvertTo-ProductVersion([string] $Value) {
+    $version = [Version]$Value
+    return [Version]::new($version.Major, $version.Minor, $version.Build)
 }
 
 function Get-MsiProperty($Database, [string] $Name) {
@@ -403,7 +451,7 @@ try {
     $candidateMsiHash = Get-Sha256 $candidateMsi
     $installer = New-Object -ComObject WindowsInstaller.Installer
     $candidateDatabase = $installer.OpenDatabase($candidateMsi, 0)
-    $candidateVersion = [Version](Get-MsiProperty $candidateDatabase 'ProductVersion')
+    $candidateVersion = ConvertTo-ProductVersion (Get-MsiProperty $candidateDatabase 'ProductVersion')
     if ((Get-MsiProperty $candidateDatabase 'ProductCode') -ne $CandidateProductCode -or
         (Get-MsiProperty $candidateDatabase 'UpgradeCode') -ne $UpgradeCode -or $candidateVersion -le [Version]'0.1.5') {
         throw 'The built candidate MSI product identity or version does not match the synthetic regression install.'
@@ -414,6 +462,10 @@ try {
     $registered = @(Get-RelatedProducts $installer $UpgradeCode)
     if ($registered.Count -ne 1 -or $registered[0] -ne $CandidateProductCode) {
         throw 'Refusing to uninstall: the only related product is not the synthetic regression candidate owned by this test.'
+    }
+    $registeredInstallDir = $installer.ProductInfo($CandidateProductCode, 'InstallLocation')
+    if ($registeredInstallDir -and -not [IO.Path]::GetFullPath($registeredInstallDir).TrimEnd('\').Equals($installDirPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Refusing to uninstall: Windows Installer reports a different installation directory.'
     }
     $syntheticExe = Join-Path $installDirPath 'Chatbox.exe'
     if (-not (Test-Path -LiteralPath $syntheticExe -PathType Leaf) -or (Get-FileVersion $syntheticExe) -ne $candidateVersion) {
@@ -426,7 +478,7 @@ try {
     Write-Evidence "Built candidate MSI SHA-256: $candidateMsiHash"
 
     New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
-    Invoke-WebRequest -Uri $releaseUrl -OutFile $releaseMsiPath
+    Get-PinnedReleaseMsi $releaseMsiPath
     $releaseHash = Get-Sha256 $releaseMsiPath
     if ($releaseHash -ne $releaseSha256) { throw "Published v0.1.5 MSI SHA-256 mismatch: $releaseHash" }
     $legacyDatabase = $installer.OpenDatabase($releaseMsiPath, 0)
@@ -475,7 +527,6 @@ try {
     try {
         $oldApp = Start-InstalledApp $oldExe $false $localAppData $fixtureTrust
         Wait-ServiceRequest 'profile=A endpoint=GET /api/v1/chat/sessions key=old_key session=- result=200' $oldStartAt
-        $oldAppAuthenticated = $true
         Write-Evidence 'v0.1.5 installed executable launched through its normal entry point and authenticated the preseeded current-user DPAPI key.'
     }
     catch {
@@ -568,7 +619,7 @@ try {
     Stop-RunnerChatboxProcesses
 
     if ($candidateUiAccepted) {
-        $firstImageHash = Wait-ReplyImage $appData $profileId 'reply-image-a'
+        $null = Wait-ReplyImage $appData $profileId 'reply-image-a'
         $historyAfterUi = Get-History $historyPath
         Assert-SeedHistory $historyAfterUi $username $sessionA $sessionB
         $profileAAfterUi = @($historyAfterUi.profiles) | Where-Object id -eq $profileId | Select-Object -First 1
@@ -590,6 +641,8 @@ try {
     $uiStatus = if ($candidateUiAccepted) { 'PASS' } elseif ($candidateUiUnsupported) { 'UNSUPPORTED' } else { 'FAIL' }
     Write-Evidence "Interactive candidate chat/file status: $uiStatus."
     Write-Evidence 'Limit: provider calls are exercised against the isolated loopback fixture; no external AstrBot or model provider is contacted.'
+    Write-Evidence "Safe CI evidence paths: $summaryPath; $(Join-Path $testRootPath 'real-fixture-service.log'); $legacyInstallLog; $candidateUpgradeLog."
+    foreach ($line in $candidateLines) { Write-Host $line }
     Copy-Item -LiteralPath $safeServiceLog -Destination (Join-Path $testRootPath 'real-fixture-service.log') -Force
     if ($candidateUiFailure) { throw 'Interactive candidate chat/file acceptance failed after UIA controls were available; real upgrade and two-launch assertions passed.' }
 }
