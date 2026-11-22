@@ -34,7 +34,10 @@ compose.desktop {
             packageName = "Chatbox"
             packageVersion = windowsPackageVersion
             modules("java.prefs", "jdk.crypto.ec")
-            windows { upgradeUuid = "204b3f78-64ec-4071-9a66-a535773540eb" }
+            windows {
+                upgradeUuid = "204b3f78-64ec-4071-9a66-a535773540eb"
+                menu = true
+            }
         }
     }
 }
