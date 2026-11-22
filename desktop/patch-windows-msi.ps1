@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$MsiPath,
 
-    [string]$ExpectedVersion = '0.1.3'
+    [string]$ExpectedVersion = '0.1.4'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -215,6 +215,9 @@ try {
     }
     Set-MsiProperty $database 'SecureCustomProperties' ($securePropertyParts -join ';')
 
+    # This product owns a complete private runtime bundle; force its packaged files to be installed on upgrade.
+    Set-MsiProperty $database 'REINSTALLMODE' 'amus'
+
     foreach ($sequenceTable in @('InstallUISequence', 'InstallExecuteSequence')) {
         $sequenceRows = @(Get-MsiRows $database $sequenceTable @('Action', 'Condition', 'Sequence'))
         $appSearchAction = @($sequenceRows | Where-Object { $_.Action -eq 'AppSearch' })
@@ -270,10 +273,14 @@ try {
     if ($finalCondition.Count -ne 1 -or $finalSearch.Count -ne 1 -or $finalLocator.Count -ne 1 -or $finalRemove.Count -ne 1 -or $finalRemove[0].Sequence -ne $newRemoveSequence -or $finalExecuteLaunch.Count -ne 1 -or $finalExecuteLaunch[0].Sequence -ne 60 -or $finalUiLaunch.Count -ne 1 -or $finalUiLaunch[0].Sequence -ne 60 -or $remainingRecursiveActions.Count -ne 0) {
         throw 'Final MSI safety table validation failed.'
     }
+    if ((Get-MsiProperty $database 'REINSTALLMODE') -ne 'amus') {
+        throw "Final MSI REINSTALLMODE property validation failed."
+    }
 
     [void]$database.Commit()
     Write-Output "Patched MSI database: $MsiPath"
     Write-Output "  ProductVersion: $ExpectedVersion"
+    Write-Output '  REINSTALLMODE: amus'
     Write-Output '  Recursive uninstall rows/actions: 0'
     Write-Output "  Legacy 0.1.1 guard: $guardCondition"
     Write-Output "  RemoveExistingProducts sequence: $newRemoveSequence"

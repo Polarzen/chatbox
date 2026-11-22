@@ -43,6 +43,7 @@ jobs:
             $wix = Get-ChildItem -Path "${env:ProgramFiles(x86)}\WiX Toolset v3*" -Directory |
               Sort-Object Name -Descending | Select-Object -First 1
             if (-not $wix) { throw "WiX Toolset v3 not found on runner." }
+            Add-Content -Path $env:GITHUB_PATH -Value "$($wix.FullName)\bin"
             $env:PATH = "$($wix.FullName)\bin;$env:PATH"
           }
           Get-Command candle.exe,light.exe -ErrorAction Stop
@@ -69,6 +70,14 @@ jobs:
           if (-not $process.WaitForExit(30000)) { $process.Kill(); throw "Packaged app did not finish its smoke check." }
           if ($process.ExitCode -ne 0) { throw "Packaged smoke check failed: $($process.ExitCode)" }
           if (-not (Test-Path $marker) -or (Get-Content -Raw $marker) -ne "chatbox-smoke-ok") { throw "Packaged smoke marker was not written." }
+          & .\desktop\test-windows-upgrade.ps1 -MsiPath $packages[0].FullName -CandidateRoot $unpacked
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: Chatbox-Windows-MSI-Upgrade-Logs
+          path: ${{ runner.temp }}/chatbox-upgrade-regression-*/*.log
+          retention-days: 7
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: Chatbox-Windows-MSI
