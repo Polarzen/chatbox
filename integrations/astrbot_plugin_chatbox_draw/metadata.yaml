@@ -1,0 +1,6 @@
+name: astrbot_plugin_chatbox_draw
+display_name: Chatbox Draw
+desc: Generate a new image for the enrolled WebChat administrator
+author: Codex
+version: 1.0.0
+astrbot_version: ">=4.29.4"

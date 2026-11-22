@@ -1,0 +1,14 @@
+{
+  "provider_id": {
+    "description": "ID of an existing OpenAI Responses provider configured with a supported HTTPS DashScope base URL",
+    "type": "string",
+    "hint": "The plugin uses the same host's native DashScope synchronous image endpoint and the provider's current key. Leave empty to disable image generation.",
+    "default": ""
+  },
+  "allowed_origin": {
+    "description": "Exact unified message origin of the single enrolled WebChat conversation",
+    "type": "string",
+    "hint": "Set this to the exact WebChat UMO for the intended administrator conversation. Leave empty to disable the plugin.",
+    "default": ""
+  }
+}
