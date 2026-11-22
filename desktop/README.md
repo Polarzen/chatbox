@@ -4,7 +4,7 @@ Windows 桌面版使用 AstrBot OpenAPI 收发文字和图片。每个服务配�
 
 ## 安装与构建
 
-从私有仓库的正式版本页下载 MSI 和 `SHA256SUMS.txt`。用 PowerShell 运行 `Get-FileHash .\Chatbox-0.1.4.msi -Algorithm SHA256`，核对后退出 Chatbox，并将新版本安装到原目录。0.1.1 用户请先阅读下方的旧卸载器升级说明。0.1.3 草稿因升级时丢失 JVM 已停止发布，0.1.4 的交付状态见验收报告。[正式版本](https://github.com/Polarzen/chatbox/releases) · [验收报告](../docs/WINDOWS_V1_ACCEPTANCE.md)
+从私有仓库下载 [Chatbox 0.1.4 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.4/Chatbox-0.1.4.msi) 和 [SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.4/SHA256SUMS.txt)，或查看 [v0.1.4 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.4)。用 PowerShell 运行 `Get-FileHash .\Chatbox-0.1.4.msi -Algorithm SHA256`，与校验文件比对。退出 Chatbox 后，将 MSI 安装到原目录。0.1.4 修复了 0.1.3 升级时 JVM 文件漏装、导致应用无法启动的问题。0.1.1 用户先阅读下方的旧卸载器升级说明。[Windows 0.1.4 验收报告](../docs/WINDOWS_V1_ACCEPTANCE.md)
 
 开发验证用的 CI 产物可在 [Windows 验证工作流](https://github.com/Polarzen/chatbox/actions/workflows/desktop-windows.yml) 的成功运行中下载，产物名为 `Chatbox-Windows-MSI`，保留 7 天。CI 下载不能替代正式 Release 或实际升级验收。
 
@@ -17,7 +17,7 @@ MSI 生成于 `desktop/build/compose/binaries/main/msi/`。从源码启动可运
 
 ## 连接和发送
 
-从「配置」选择正在运行的 AstrBot Launcher 实例，或填写自行部署服务的 HTTPS 地址。手动 HTTP 地址仅支持本机 `127.0.0.1`。在密码框填写 AstrBot OpenAPI Key 并点「连接 / 验证」。收发文字需要 `chat` 权限，发送 PNG 或 JPEG 还需要 `file` 权限。选图后可直接发送，也可填写图片说明。
+从「配置」选择正在运行的 AstrBot Launcher 实例，或填写自行部署服务的 HTTPS 地址。手动 HTTP 地址仅支持本机 `127.0.0.1`。在密码框填写 AstrBot OpenAPI Key 并点「连接 / 验证」。建议用同时含 `chat` 和 `file` 权限的一把 Key，一次验证后即可收发文字和 PNG/JPEG 图片。选图后可直接发送，也可填写图片说明。
 
 Chatbox 按实例 UUID 找回上次选择的 Launcher 实例，确认当前回环地址后使用已保存的凭据重连。旧版按完整 URL 查找本地历史，地址大小写或端口变化可能使旧对话从界面消失。新版向 `/api/v1/chat/sessions` 核对原用户名和会话 UUID，匹配的旧会话可继续聊天，其余旧记录保留供离线打开。可在「会话」中切换对话，点「新会话」创建对话。
 
@@ -35,6 +35,6 @@ Launcher 和 HTTPS 配置的 Key 通过验证后，使用当前 Windows 用户�
 
 ## 历史验收记录
 
-0.1.2 的本机基线、0.1.3 安装失败经过，以及 0.1.4 的待验条件统一记录在 [Windows 候选验收报告](../docs/WINDOWS_V1_ACCEPTANCE.md)。
+各版本的本机基线和 Windows 安装验收记录见 [Windows 0.1.4 验收报告](../docs/WINDOWS_V1_ACCEPTANCE.md)。
 
 [官方 AstrBot OpenAPI 文档](https://docs.astrbot.app/dev/openapi.html)
