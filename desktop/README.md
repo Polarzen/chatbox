@@ -4,7 +4,7 @@ Windows 桌面版使用 AstrBot OpenAPI 收发文字和图片。每个服务配�
 
 ## 安装与构建
 
-本轮 Windows 构建是 **0.1.6**。退出正在运行的 Chatbox，双击交付的 `Chatbox-0.1.6.msi`，升级时沿用原安装目录。安装完成后从开始菜单打开 Chatbox。下面的 0.1.5 链接指向此前发布的版本。[0.1.6 验收记录](../docs/WINDOWS_016_ACCEPTANCE.md)
+本轮 Windows 候选版是 **0.1.6**。退出正在运行的 Chatbox，双击交付的 `Chatbox-0.1.6.msi`，升级时沿用原安装目录。安装完成后从开始菜单打开 Chatbox。下方可下载已发布的 0.1.5。[0.1.6 候选版验收记录](../docs/WINDOWS_016_RELEASE_ACCEPTANCE.md)
 
 从 [Chatbox 0.1.5 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.5/Chatbox-0.1.5.msi) 和 [SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.5/SHA256SUMS.txt) 下载，或查看 [v0.1.5 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.5)。用 PowerShell 运行 `Get-FileHash .\Chatbox-0.1.5.msi -Algorithm SHA256`，与校验文件比对。退出 Chatbox 后，将 MSI 安装到原目录。0.1.4 修复了 0.1.3 升级时 JVM 文件漏装、导致应用无法启动的问题。0.1.1 用户先阅读下方的旧卸载器升级说明。[0.1.5 增量验收报告](../docs/CHATBOX_015_IMAGE_GENERATION_ACCEPTANCE.md)
 
