@@ -42,11 +42,11 @@ class DesktopReplyTransportTest {
                 try {
                     sendToAstrBot("http://127.0.0.1:${server.address.port}", "fixture-key", "user", "session",
                         "question", allowLoopbackHttp = true,
-                        onEvent = { event ->
-                            events += event
-                            if (event == AstrBotTransportEvent.FirstContent) firstContent.countDown()
-                        },
-                        onText = { texts += it })
+                        onEvent = { events += it },
+                        onText = {
+                            texts += it
+                            firstContent.countDown()
+                        })
                 } catch (error: Throwable) {
                     failure.set(error)
                 }
