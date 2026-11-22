@@ -2,9 +2,9 @@
 
 Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 OneBot。Windows 和 Android 各自保存本机历史。[Windows 安装、连接与升级说明](desktop/README.md)
 
-Windows 0.1.4 修复了 0.1.3 升级时漏装 Java 运行时文件、导致应用无法启动的问题。下载 [Chatbox 0.1.4 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.4/Chatbox-0.1.4.msi) 和 [SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.4/SHA256SUMS.txt)，也可查看 [v0.1.4 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.4)。在 PowerShell 中用 `Get-FileHash .\Chatbox-0.1.4.msi -Algorithm SHA256` 与校验文件比对。退出 Chatbox 后，将 MSI 安装到原目录。0.1.1 用户先阅读[旧卸载器升级说明](desktop/README.md#从-011-升级)。[Windows 验收记录](docs/WINDOWS_V1_ACCEPTANCE.md)
+Windows 最新版 0.1.5 可从 [Chatbox 0.1.5 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.5/Chatbox-0.1.5.msi) 和 [SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.5/SHA256SUMS.txt) 下载，或查看 [v0.1.5 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.5)。在 PowerShell 中用 `Get-FileHash .\Chatbox-0.1.5.msi -Algorithm SHA256` 与校验文件比对；退出 Chatbox 后，将 MSI 安装到原目录。Windows 0.1.4 修复了 0.1.3 升级时漏装 Java 运行时文件、导致应用无法启动的问题。0.1.1 用户先阅读[旧卸载器升级说明](desktop/README.md#从-011-升级)。[Windows 0.1.4 历史验收记录](docs/WINDOWS_V1_ACCEPTANCE.md) · [0.1.5 增量验收报告](docs/CHATBOX_015_IMAGE_GENERATION_ACCEPTANCE.md)
 
-首次连接时，选择正在运行的 AstrBot Launcher 实例，输入同时具有 `chat` 和 `file` 权限的 OpenAPI Key，并点击一次「连接 / 验证」即可收发文字和图片。
+首次连接时，选择正在运行的 AstrBot Launcher 实例，输入同时具有 `chat` 和 `file` 权限的 OpenAPI Key，并点击一次「连接 / 验证」即可收发文字和图片。桌面端接收并显示服务端回复的图片；图片生成由 AstrBot 服务端的图像服务或插件提供。
 
 以下为 Kotlin + Jetpack Compose 实现的 Android 首版原型，仍待真实手机与服务端联合验收。
 
