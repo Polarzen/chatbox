@@ -65,13 +65,30 @@ function Get-RelatedProducts($InstallerObject, [string] $Code) {
     return @($InstallerObject.RelatedProducts($Code))
 }
 
-function Invoke-Msi([string[]] $Arguments, [string] $LogPath) {
-    & "$env:SystemRoot\System32\msiexec.exe" @Arguments
-    $exitCode = $LASTEXITCODE
+function Invoke-Msi([string] $MsiPath, [string] $InstallDir, [string] $LogPath) {
+    $arguments = "/i `"$MsiPath`" /qn INSTALLDIR=`"$InstallDir`" /L*v `"$LogPath`""
+    Write-Host "msiexec.exe $arguments"
+    $process = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -ArgumentList $arguments -Wait -PassThru -NoNewWindow
+    $exitCode = $process.ExitCode
     if ($exitCode -ne 0) {
         if (Test-Path -LiteralPath $LogPath) { Get-Content -LiteralPath $LogPath -Tail 100 }
         throw "msiexec failed with exit code $exitCode. Log: $LogPath"
     }
+    return $exitCode
+}
+
+function Write-MsiDiagnostics([string] $Step, [string] $InstallDir, [string] $ExpectedFile, [int] $ExitCode, [string] $LogPath) {
+    Write-Host "MSI $Step exit code: $ExitCode; expected: $ExpectedFile; INSTALLDIR: $InstallDir"
+    if (Test-Path -LiteralPath $InstallDir) {
+        Get-ChildItem -LiteralPath $InstallDir -Recurse -Force -ErrorAction Continue | ForEach-Object { Write-Host $_.FullName }
+    }
+    else { Write-Host "INSTALLDIR does not exist: $InstallDir" }
+    if (Test-Path -LiteralPath $LogPath) {
+        Write-Host "Relevant MSI log lines from $LogPath"
+        Select-String -LiteralPath $LogPath -Pattern 'Command Line|Property\(S\): INSTALLDIR|INSTALLDIR =|FileCopy|jvm\.dll|Return value 3' |
+            Select-Object -Last 120 | ForEach-Object { Write-Host $_.Line }
+    }
+    else { Write-Host "MSI log was not created: $LogPath" }
 }
 
 try {
@@ -157,8 +174,12 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "WiX light failed: $LASTEXITCODE" }
 
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
-    Invoke-Msi @('/i', $legacyMsiPath, '/qn', "INSTALLDIR=$installDir", '/L*v', $legacyLog) $legacyLog
+    $legacyExitCode = Invoke-Msi $legacyMsiPath $installDir $legacyLog
     $installedJvm = Join-Path $installDir 'runtime\bin\server\jvm.dll'
+    if (-not (Test-Path -LiteralPath $installedJvm)) {
+        Write-MsiDiagnostics 'legacy fixture install' $installDir $installedJvm $legacyExitCode $legacyLog
+        throw "Legacy fixture install returned $legacyExitCode but did not create $installedJvm. Log: $legacyLog"
+    }
     $installedVersion = Get-FileVersion $installedJvm
     if ($installedVersion -ne $oldJvmVersion) {
         throw "The installed legacy jvm.dll version $installedVersion does not match fixture version $oldJvmVersion."
@@ -167,7 +188,7 @@ try {
     Set-Content -LiteralPath $sentinel -Value 'preserve across upgrade' -NoNewline
 
     # This is deliberately a normal major-upgrade install: do not pass REINSTALLMODE.
-    Invoke-Msi @('/i', $msiPath, '/qn', "INSTALLDIR=$installDir", '/L*v', $upgradeLog) $upgradeLog
+    $candidateExitCode = Invoke-Msi $msiPath $installDir $upgradeLog
 
     $relatedProducts = Get-RelatedProducts $installer $upgradeCode
     if ($relatedProducts -contains $legacyProductCode) { throw 'The old 0.1.2 MSI product remains installed after upgrade.' }
@@ -179,7 +200,10 @@ try {
     foreach ($name in @('jvm.dll', 'java.dll')) {
         $candidateFiles = if ($name -eq 'jvm.dll') { $candidateJvms } else { $candidateJavas }
         $installedFile = Join-Path $installDir $(if ($name -eq 'jvm.dll') { 'runtime\bin\server\jvm.dll' } else { 'runtime\bin\java.dll' })
-        if (-not (Test-Path -LiteralPath $installedFile)) { throw "Upgraded package is missing $installedFile" }
+        if (-not (Test-Path -LiteralPath $installedFile)) {
+            Write-MsiDiagnostics 'candidate upgrade' $installDir $installedFile $candidateExitCode $upgradeLog
+            throw "Upgraded package is missing $installedFile. Log: $upgradeLog"
+        }
         $candidateHash = (Get-FileHash -LiteralPath $candidateFiles[0].FullName -Algorithm SHA256).Hash
         $installedHash = (Get-FileHash -LiteralPath $installedFile -Algorithm SHA256).Hash
         if ($candidateHash -ne $installedHash) {
