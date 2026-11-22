@@ -15,6 +15,7 @@ internal data class Entry(
     val status: String,
     val attachmentReference: String? = null,
     val attachmentDisplayName: String? = null,
+    val replyImages: List<ReplyImage> = emptyList(),
 )
 
 internal data class Chat(val session: String, val entries: List<Entry> = emptyList())
@@ -298,6 +299,7 @@ internal class DesktopStore(private val file: Path) {
                 .put("status", entry.status)
             entry.attachmentReference?.let { row.put("attachmentReference", it) }
             entry.attachmentDisplayName?.let { row.put("attachmentDisplayName", it) }
+            row.put("replyImages", replyImagesToJson(entry.replyImages, entry.answer))
             entries.put(row)
         }
         session.put("entries", entries)
@@ -356,11 +358,15 @@ internal class DesktopStore(private val file: Path) {
             for (index in 0 until oldEntries.length()) {
                 val row = oldEntries.optJSONObject(index) ?: error("Invalid legacy entry")
                 val status = row.getString("status").let { if (it == "发送中") "上次回复未确认" else it }
+                val answer = row.getString("answer")
                 entries.put(JSONObject()
                     .put("question", row.getString("question"))
-                    .put("answer", row.getString("answer"))
+                    .put("answer", answer)
                     .put("status", status)
-                    .also { copyAttachmentFields(row, it) })
+                    .also {
+                        copyAttachmentFields(row, it)
+                        copyReplyImages(row, it, answer)
+                    })
             }
             group.sessions += JSONObject().put("id", sessionId).put("entries", entries)
             if (addressKey == lastServer) {
@@ -460,7 +466,9 @@ internal class DesktopStore(private val file: Path) {
         val status = row.getString("status").let { if (it == "发送中") "上次回复未确认" else it }
         val reference = row.optString("attachmentReference").takeIf { it.isNotEmpty() }
         val displayName = row.optString("attachmentDisplayName").takeIf { it.isNotEmpty() }
-        return Entry(row.getString("question"), row.getString("answer"), status, reference, displayName)
+        val answer = row.getString("answer")
+        return Entry(row.getString("question"), answer, status, reference, displayName,
+            replyImagesFrom(row, answer))
     }
 
     private fun findManualProfileByAddress(source: JSONObject, address: String): JSONObject? {
@@ -523,6 +531,39 @@ internal class DesktopStore(private val file: Path) {
         private fun copyAttachmentFields(source: JSONObject, target: JSONObject) {
             source.optString("attachmentReference").takeIf { it.isNotEmpty() }?.let { target.put("attachmentReference", it) }
             source.optString("attachmentDisplayName").takeIf { it.isNotEmpty() }?.let { target.put("attachmentDisplayName", it) }
+        }
+
+        private fun copyReplyImages(source: JSONObject, target: JSONObject, answer: String) {
+            if (source.has("replyImages")) {
+                target.put("replyImages", replyImagesToJson(replyImagesFrom(source, answer), answer))
+            }
+        }
+
+        private fun replyImagesFrom(source: JSONObject, answer: String): List<ReplyImage> {
+            val rows = source.optJSONArray("replyImages") ?: return emptyList()
+            return buildList {
+                for (index in 0 until rows.length()) {
+                    val row = rows.optJSONObject(index) ?: continue
+                    val offset = row.opt("textOffset") as? Number ?: continue
+                    val numericOffset = offset.toDouble()
+                    if (!numericOffset.isFinite() || numericOffset % 1.0 != 0.0 ||
+                        numericOffset < Int.MIN_VALUE || numericOffset > Int.MAX_VALUE) continue
+                    val attachmentId = when (val raw = row.opt("attachmentId")) {
+                        null, JSONObject.NULL -> null
+                        is String -> raw
+                        else -> continue
+                    }
+                    add(ReplyImage(attachmentId, numericOffset.toInt().coerceIn(0, answer.length)))
+                }
+            }
+        }
+
+        private fun replyImagesToJson(images: List<ReplyImage>, answer: String): JSONArray = JSONArray().also { rows ->
+            images.forEach { image ->
+                rows.put(JSONObject()
+                    .put("attachmentId", image.attachmentId ?: JSONObject.NULL)
+                    .put("textOffset", image.textOffset.coerceIn(0, answer.length)))
+            }
         }
     }
 }
