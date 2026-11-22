@@ -24,6 +24,11 @@ $installer = $null
 $candidateDatabase = $null
 $candidateProductCode = $null
 
+function Get-FileVersion([string] $Path) {
+    $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
+    return [Version]::new($info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart)
+}
+
 function Get-MsiProperty($Database, [string] $Name) {
     $view = $null
     try {
@@ -79,18 +84,20 @@ try {
 
     $candidateJvms = @(Get-ChildItem -LiteralPath $candidateRoot -Recurse -File -Filter 'jvm.dll')
     $candidateJavas = @(Get-ChildItem -LiteralPath $candidateRoot -Recurse -File -Filter 'java.dll')
-    $candidateExecutables = @(Get-ChildItem -LiteralPath $candidateRoot -Recurse -File -Filter 'Chatbox.exe')
-    if ($candidateJvms.Count -ne 1 -or $candidateJavas.Count -ne 1 -or $candidateExecutables.Count -ne 1) {
-        throw "Expected one packaged jvm.dll, java.dll and Chatbox.exe; found $($candidateJvms.Count), $($candidateJavas.Count), $($candidateExecutables.Count)."
+    if ($candidateJvms.Count -ne 1 -or $candidateJavas.Count -ne 1) {
+        throw "Expected one packaged jvm.dll and java.dll; found $($candidateJvms.Count), $($candidateJavas.Count)."
     }
+    $candidateJvmVersion = Get-FileVersion $candidateJvms[0].FullName
 
     $installer = New-Object -ComObject WindowsInstaller.Installer
     if ((Get-RelatedProducts $installer $upgradeCode).Count -ne 0) {
         throw "A Chatbox product with UpgradeCode $upgradeCode is already installed on this runner."
     }
     $candidateDatabase = $installer.OpenDatabase($msiPath, 0)
-    if ((Get-MsiProperty $candidateDatabase 'ProductVersion') -ne '0.1.4') {
-        throw "Expected candidate ProductVersion 0.1.4, got $(Get-MsiProperty $candidateDatabase 'ProductVersion')."
+    $candidateVersion = [Version](Get-MsiProperty $candidateDatabase 'ProductVersion')
+    $legacyVersion = [Version]'0.1.2'
+    if ($candidateVersion -le $legacyVersion) {
+        throw "Candidate ProductVersion $candidateVersion must be newer than fixture $legacyVersion."
     }
     $candidateProductCode = Get-MsiProperty $candidateDatabase 'ProductCode'
     if ((Get-MsiProperty $candidateDatabase 'UpgradeCode') -ne $upgradeCode) {
@@ -99,73 +106,21 @@ try {
     if ((Get-JvmComponentId $candidateDatabase) -ne $jvmComponentCode) {
         throw "Candidate jvm.dll does not use the expected component ID $jvmComponentCode."
     }
+    [void] [Runtime.InteropServices.Marshal]::FinalReleaseComObject($candidateDatabase)
+    $candidateDatabase = $null
 
     New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
-    $syntheticJvmPath = Join-Path $testRoot 'jvm.dll'
-    $sourcePath = Join-Path $testRoot 'synthetic-jvm.c'
-    $resourceSourcePath = Join-Path $testRoot 'jvm-version.rc'
-    $resourcePath = Join-Path $testRoot 'jvm-version.res'
-    $objectPath = Join-Path $testRoot 'synthetic-jvm.obj'
-    $buildScriptPath = Join-Path $testRoot 'build-synthetic-jvm.cmd'
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (-not (Test-Path -LiteralPath $vswhere)) { throw 'Visual Studio discovery tool was not found on the runner.' }
-    $vsInstall = & $vswhere -latest -products '*' -property installationPath
-    $vsDevCmd = Join-Path $vsInstall 'Common7\Tools\VsDevCmd.bat'
-    if (-not (Test-Path -LiteralPath $vsDevCmd)) { throw 'Visual Studio native build tools were not found on the runner.' }
-    Set-Content -LiteralPath $sourcePath -Encoding ASCII -Value @'
-#include <windows.h>
-BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) { return TRUE; }
-'@
-    Set-Content -LiteralPath $resourceSourcePath -Encoding ASCII -Value @'
-#include <winver.h>
-VS_VERSION_INFO VERSIONINFO
- FILEVERSION 99,0,0,0
- PRODUCTVERSION 99,0,0,0
- FILEFLAGSMASK 0x3fL
- FILEFLAGS 0x0L
- FILEOS 0x40004L
- FILETYPE 0x2L
- FILESUBTYPE 0x0L
-BEGIN
-  BLOCK "StringFileInfo"
-  BEGIN
-    BLOCK "040904B0"
-    BEGIN
-      VALUE "CompanyName", "Chatbox CI\0"
-      VALUE "FileDescription", "Chatbox upgrade regression fixture\0"
-      VALUE "FileVersion", "99.0.0.0\0"
-      VALUE "InternalName", "jvm.dll\0"
-      VALUE "OriginalFilename", "jvm.dll\0"
-      VALUE "ProductName", "Chatbox\0"
-      VALUE "ProductVersion", "99.0.0.0\0"
-    END
-  END
-  BLOCK "VarFileInfo"
-  BEGIN
-    VALUE "Translation", 0x409, 1200
-  END
-END
-'@
-    $buildScript = @"
-@echo off
-call "$vsDevCmd" -no_logo -arch=x64
-if errorlevel 1 exit /b %errorlevel%
-rc.exe /nologo /fo "$resourcePath" "$resourceSourcePath"
-if errorlevel 1 exit /b %errorlevel%
-cl.exe /nologo /c /O1 /Fo"$objectPath" "$sourcePath"
-if errorlevel 1 exit /b %errorlevel%
-link.exe /nologo /DLL /MACHINE:X64 /OUT:"$syntheticJvmPath" "$objectPath" "$resourcePath"
-exit /b %errorlevel%
-"@
-    Set-Content -LiteralPath $buildScriptPath -Value $buildScript -Encoding ASCII
-    $build = Start-Process -FilePath $env:ComSpec -ArgumentList @('/d', '/c', "call `"$buildScriptPath`"") -Wait -PassThru -NoNewWindow
-    if ($build.ExitCode -ne 0) { throw "Native fixture compilation failed with exit code $($build.ExitCode)." }
-    $oldVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($syntheticJvmPath).FileVersion
-    if ([Version]$oldVersion -lt [Version]'99.0.0.0') {
-        throw "Synthetic jvm.dll did not get the required high PE file version: $oldVersion"
+    $jdk21Home = $env:JAVA_HOME_21_X64
+    if ([string]::IsNullOrWhiteSpace($jdk21Home)) { throw 'GitHub hosted runner did not provide JAVA_HOME_21_X64 for the old high-version runtime fixture.' }
+    $oldJvmPath = Join-Path $jdk21Home 'bin\server\jvm.dll'
+    if (-not (Test-Path -LiteralPath $oldJvmPath)) { throw "JDK 21 fixture jvm.dll was not found: $oldJvmPath" }
+    $oldJvmVersion = Get-FileVersion $oldJvmPath
+    if ($oldJvmVersion -le $candidateJvmVersion) {
+        throw "Runner JDK 21 jvm.dll version $oldJvmVersion is not newer than candidate JDK version $candidateJvmVersion."
     }
 
-    $escapedJvmPath = [Security.SecurityElement]::Escape($syntheticJvmPath)
+    Write-Host "MSI logs: $legacyLog and $upgradeLog"
+    $escapedJvmPath = [Security.SecurityElement]::Escape($oldJvmPath)
     $wxs = @"
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -204,9 +159,9 @@ exit /b %errorlevel%
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
     Invoke-Msi @('/i', $legacyMsiPath, '/qn', "INSTALLDIR=$installDir", '/L*v', $legacyLog) $legacyLog
     $installedJvm = Join-Path $installDir 'runtime\bin\server\jvm.dll'
-    $installedVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($installedJvm).FileVersion
-    if ([Version]$installedVersion -lt [Version]'99.0.0.0') {
-        throw "The installed legacy jvm.dll lost its high PE file version: $installedVersion"
+    $installedVersion = Get-FileVersion $installedJvm
+    if ($installedVersion -ne $oldJvmVersion) {
+        throw "The installed legacy jvm.dll version $installedVersion does not match fixture version $oldJvmVersion."
     }
     $sentinel = Join-Path $installDir 'shared-directory-sentinel.txt'
     Set-Content -LiteralPath $sentinel -Value 'preserve across upgrade' -NoNewline
@@ -241,7 +196,7 @@ exit /b %errorlevel%
     if (-not (Test-Path -LiteralPath $smokeMarker) -or (Get-Content -Raw -LiteralPath $smokeMarker) -ne 'chatbox-smoke-ok') {
         throw 'Installed app smoke-test marker was not written.'
     }
-    Write-Host "MSI upgrade regression passed. Legacy file version $oldVersion was replaced; logs: $legacyLog, $upgradeLog"
+    Write-Host "MSI upgrade regression passed. JDK 21 file version $oldJvmVersion was replaced by JDK 17 version $candidateJvmVersion."
 }
 finally {
     if ($null -ne $candidateDatabase) { [void] [Runtime.InteropServices.Marshal]::FinalReleaseComObject($candidateDatabase) }
