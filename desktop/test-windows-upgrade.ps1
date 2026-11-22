@@ -221,6 +221,11 @@ try {
         throw 'Installed app smoke-test marker was not written.'
     }
     Write-Host "MSI upgrade regression passed. JDK 21 file version $oldJvmVersion was replaced by JDK 17 version $candidateJvmVersion."
+
+    $realUpgradeTest = Join-Path $PSScriptRoot 'qa\upgrade\test-real-msi-upgrade.ps1'
+    & $realUpgradeTest -CandidateMsiPath $msiPath -InstallDir $installDir `
+        -CandidateProductCode $candidateProductCode -UpgradeCode $upgradeCode `
+        -CandidateRoot $candidateRoot -TestRoot $testRoot
 }
 finally {
     if ($null -ne $candidateDatabase) { [void] [Runtime.InteropServices.Marshal]::FinalReleaseComObject($candidateDatabase) }

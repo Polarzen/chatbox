@@ -169,11 +169,21 @@ public final class FixtureServer {
         String request = new String(body, StandardCharsets.UTF_8);
         String reply = profile.equals("A") ? "已收到本地验收消息。" : "B 服务已收到本地验收消息。";
         boolean delayed = request.contains("延迟");
+        boolean delayBeforeHeaders = request.contains("fixture:delay-before-headers");
+        boolean delayBeforeFirstEvent = request.contains("fixture:delay-before-first-event");
+        boolean truncate = request.contains("fixture:truncate-sse") || control("chat.truncate.sse", false);
         boolean uploadedImage = request.contains("\"type\":\"image\"") || request.contains("\"type\": \"image\"");
+        if (delayBeforeHeaders && !pause(controlMillis("chat.delay.before.headers.ms", 1_500))) return 200;
         exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
         exchange.getResponseHeaders().set("Cache-Control", "no-cache");
         exchange.sendResponseHeaders(200, 0);
         var output = exchange.getResponseBody();
+        if (delayBeforeFirstEvent && !pause(controlMillis("chat.delay.before.first.event.ms", 1_500))) return 200;
+        if (truncate) {
+            writeEvent(output, "{\"type\":\"plain\",\"data\":\"回复流中断前的部分内容。\"}");
+            output.flush();
+            return 200;
+        }
         if (delayed) {
             writeEvent(output, "{\"type\":\"plain\",\"data\":\"本地服务已收到，正在继续\",\"streaming\":true}");
             output.flush();
@@ -204,6 +214,10 @@ public final class FixtureServer {
         if (mediaType == null || !mediaType.startsWith("multipart/form-data") || multipart.length == 0) {
             send(exchange, 400, "application/json", "{\"status\":\"error\"}".getBytes(StandardCharsets.UTF_8));
             return 400;
+        }
+        if (control("upload.fail", false)) {
+            send(exchange, 503, "application/json", "{\"status\":\"error\"}".getBytes(StandardCharsets.UTF_8));
+            return 503;
         }
         String id = "upload-" + profile.toLowerCase() + "-" + UUID.randomUUID();
         String json = "{\"status\":\"ok\",\"data\":{\"attachment_id\":\"" + id + "\"}}";
@@ -240,13 +254,42 @@ public final class FixtureServer {
     }
 
     private boolean rejectOldKey() {
+        return control("reject.original", false);
+    }
+
+    private boolean control(String name, boolean fallback) {
+        Properties controls = readControls();
+        return Boolean.parseBoolean(controls.getProperty(name, Boolean.toString(fallback)));
+    }
+
+    private long controlMillis(String name, long fallback) {
+        Properties controls = readControls();
+        try {
+            return Math.min(60_000, Math.max(0, Long.parseLong(controls.getProperty(name, Long.toString(fallback)))));
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
+    private Properties readControls() {
         Properties controls = new Properties();
         try (var input = Files.newInputStream(controlsFile)) {
             controls.load(input);
         } catch (IOException ignored) {
+            // The fixture remains usable with its default, non-failing behavior if a control file is absent.
+        }
+        return controls;
+    }
+
+    private static boolean pause(long millis) {
+        if (millis <= 0) return true;
+        try {
+            Thread.sleep(millis);
+            return true;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
             return false;
         }
-        return Boolean.parseBoolean(controls.getProperty("reject.original", "false"));
     }
 
     private void logRequest(String profile, String method, String path, String alias, String session, int result) {
