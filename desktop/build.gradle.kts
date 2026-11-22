@@ -24,7 +24,7 @@ dependencies {
     implementation("org.json:json:20240303")
     testImplementation("junit:junit:4.13.2")
 }
-val windowsPackageVersion = "0.1.3"
+val windowsPackageVersion = "0.1.4"
 compose.desktop {
     application {
         mainClass = "dev.polarzen.chatbox.DesktopMainKt"

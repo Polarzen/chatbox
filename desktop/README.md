@@ -1,19 +1,19 @@
 # Chatbox Windows 桌面版
 
-Chatbox 0.1.3 使用 AstrBot OpenAPI 收发文字和图片。每个服务配置可以保留多个会话，桌面端和 Android 各自保存本机历史。
+Windows 桌面版使用 AstrBot OpenAPI 收发文字和图片。每个服务配置可以保留多个会话，桌面端和 Android 各自保存本机历史。
 
 ## 安装与构建
 
-0.1.3 仍是候选草稿，实际 Windows 提权升级待验。进度见 [Windows 0.1.3 安装验收记录](../docs/WINDOWS_V1_ACCEPTANCE.md)。正式版本发布后，从 [GitHub 正式版本索引](https://github.com/Polarzen/chatbox/releases) 下载 MSI 与 `SHA256SUMS.txt`，核对后运行 `Chatbox-0.1.3.msi`。已有 0.1.2 时，退出客户端并将 0.1.3 安装到原目录即可升级。从 0.1.1 升级请先阅读下方说明。
+从私有仓库的正式版本页下载 MSI 和 `SHA256SUMS.txt`。用 PowerShell 运行 `Get-FileHash .\Chatbox-0.1.4.msi -Algorithm SHA256`，核对后退出 Chatbox，并将新版本安装到原目录。0.1.1 用户请先阅读下方的旧卸载器升级说明。0.1.3 草稿因升级时丢失 JVM 已停止发布，0.1.4 的交付状态见验收报告。[正式版本](https://github.com/Polarzen/chatbox/releases) · [验收报告](../docs/WINDOWS_V1_ACCEPTANCE.md)
 
-开发构建可在 [Windows 验证工作流](https://github.com/Polarzen/chatbox/actions/workflows/desktop-windows.yml) 的成功运行中下载，产物名为 `Chatbox-Windows-MSI`，保留 7 天。
+开发验证用的 CI 产物可在 [Windows 验证工作流](https://github.com/Polarzen/chatbox/actions/workflows/desktop-windows.yml) 的成功运行中下载，产物名为 `Chatbox-Windows-MSI`，保留 7 天。CI 下载不能替代正式 Release 或实际升级验收。
 
 如需自行构建，在 Windows 安装 JDK 17 和 WiX Toolset 3.x，然后在仓库根目录运行下列命令。
 
     .\gradlew.bat -p desktop test desktopSmoke
     .\gradlew.bat -p desktop packageMsi
 
-安装包生成于 `desktop/build/compose/binaries/main/msi/Chatbox-0.1.3.msi`。从源码启动可运行 `.\gradlew.bat -p desktop run`。
+MSI 生成于 `desktop/build/compose/binaries/main/msi/`。从源码启动可运行 `.\gradlew.bat -p desktop run`。
 
 ## 连接和发送
 
@@ -33,14 +33,8 @@ Launcher 和 HTTPS 配置的 Key 通过验证后，使用当前 Windows 用户�
 
 0.1.1 的卸载程序可能递归清理整个安装目录。从 0.1.2 起，新 MSI 已移除自身的递归清理动作，但升级仍会调用已安装的旧版卸载程序。检测到 0.1.1 的旧清理设置时，新安装包会阻止升级。若安装目录与源码、下载文件或其他数据共用，请保留现有安装，避免直接卸载旧版。管理员需先备份共享目录，将旧清理目标重定向到独立空目录，并核实它不是重解析点（包括符号链接和目录联接），再按安装器提示继续升级。
 
-## 0.1.2 开发阶段实测
+## 历史验收记录
 
-安装版恢复了 4 个旧会话、8 条记录。完全退出再打开后，使用已保存的 Key 继续收发。通过 Launcher 正常重启实例，端口从 `18759` 变为 `20493`，后续回复仍带有原服务端会话 UUID。
-
-AstrBot 在同一会话分别记录了纯 PNG 的 `image` 组件，以及 JPEG 图文消息的 `plain` 和 `image` 组件。两份服务端附件均可读取，SHA-256 与原图一致。早期普通文本请求曾经超时，当时用内置命令 `/sid` 验证了收发。
-
-后续在同一份本地安装包上完成了三轮普通模型对话，重开并从 `20493` 重连到 `21056` 后仍能答出上文的船名和余票。两张未在文字中透露答案的图片均得到正确回答。纯 PNG 为红色圆形、149，JPEG 图文为蓝色三角形、882。重开后仍可看到图片记录和回答。正式安装包的实测结果见 Release 随包报告。
-
-15 项桌面测试和启动冒烟检查通过。本地安装验收使用的 MSI 的 SHA-256 为 `AE12A3F653E279B7007544C40AA51CB3A6F88EA4BD37858C072F33C2F849D292`。CI 单独构建安装包。
+0.1.2 的本机基线、0.1.3 安装失败经过，以及 0.1.4 的待验条件统一记录在 [Windows 候选验收报告](../docs/WINDOWS_V1_ACCEPTANCE.md)。
 
 [官方 AstrBot OpenAPI 文档](https://docs.astrbot.app/dev/openapi.html)
