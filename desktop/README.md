@@ -1,8 +1,10 @@
-# Chatbox Windows 桌面版
+# chatbox Windows 桌面版
 
 Windows 桌面版使用 AstrBot OpenAPI 收发文字和图片。每个服务配置可以保留多个会话，桌面端和 Android 各自保存本机历史。
 
 ## 安装与构建
+
+本轮 Windows 构建是 **0.1.6**。退出正在运行的 Chatbox，双击交付的 `Chatbox-0.1.6.msi`，升级时沿用原安装目录。安装完成后从开始菜单打开 Chatbox。下面的 0.1.5 链接指向此前发布的版本。[0.1.6 验收记录](../docs/WINDOWS_016_ACCEPTANCE.md)
 
 从 [Chatbox 0.1.5 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.5/Chatbox-0.1.5.msi) 和 [SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.5/SHA256SUMS.txt) 下载，或查看 [v0.1.5 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.5)。用 PowerShell 运行 `Get-FileHash .\Chatbox-0.1.5.msi -Algorithm SHA256`，与校验文件比对。退出 Chatbox 后，将 MSI 安装到原目录。0.1.4 修复了 0.1.3 升级时 JVM 文件漏装、导致应用无法启动的问题。0.1.1 用户先阅读下方的旧卸载器升级说明。[0.1.5 增量验收报告](../docs/CHATBOX_015_IMAGE_GENERATION_ACCEPTANCE.md)
 
@@ -17,13 +19,15 @@ MSI 生成于 `desktop/build/compose/binaries/main/msi/`。从源码启动可运
 
 ## 连接和发送
 
-从「配置」选择正在运行的 AstrBot Launcher 实例，或填写自行部署服务的 HTTPS 地址。手动 HTTP 地址仅支持本机 `127.0.0.1`。在密码框填写 AstrBot OpenAPI Key 并点「连接 / 验证」。常规聊天使用仅含 `chat` 和 `file` 权限的 Key：`chat` 用于文字，`file` 用于图片上传和读取回复图片。选图后可直接发送，也可填写图片说明。
+0.1.6 的主窗口直接打开上次的会话。点击右上角的连接状态进入「连接设置」，选择运行中的 Launcher 实例，或填写自行部署的 HTTPS 地址。手动 HTTP 仅支持本机 `127.0.0.1`。
 
-连接后，「当前 Key」显示已验证 Key 的公开标记（标准 Key 显示前缀，不显示完整密钥）。点击「密钥信息」可查看标记，并从对话框打开当前服务的 AstrBot WebUI OpenAPI 密钥设置；在密钥列表中按名称、前缀、创建时间、状态和权限范围核对正在使用的 Key。`chat:admin` 会按服务端 `admins_id` 将对应身份授予全局管理员权限；如确需管理能力，应使用专用 Key，不要与日常聊天 Key 共用。
+首次使用时，点击「添加密钥」，填写本地名称和 AstrBot OpenAPI Key。已配置多把密钥时，点开顶栏密钥菜单，再点目标名称即可验证并切换。验证失败时可以继续使用原先已连接的密钥。「管理密钥」提供改名、权限信息和移除操作。名称用于本机识别，AstrBot WebUI 的 OpenAPI 设置列出服务端授予的权限。普通文字聊天需要 `chat`，图片上传与下载还需要 `file`；运行管理员命令需要服务端登记的管理员身份和 `chat:admin`。
+
+在底部输入栏按 Enter 发送，按 Shift+Enter 换行。「＋」可以选择 PNG 或 JPEG。选图后可以补充文字，也可以直接发送纯图片。
 
 桌面客户端可接收、显示服务端回复中的图片；生成图片由服务端图像提供方或插件决定，例如 [Chatbox Draw 插件说明](../integrations/astrbot_plugin_chatbox_draw/README.md)。详见 [0.1.5 增量验收报告](../docs/CHATBOX_015_IMAGE_GENERATION_ACCEPTANCE.md)。
 
-Chatbox 按实例 UUID 找回上次选择的 Launcher 实例，确认当前回环地址后使用已保存的凭据重连。旧版按完整 URL 查找本地历史，地址大小写或端口变化可能使旧对话从界面消失。新版向 `/api/v1/chat/sessions` 核对原用户名和会话 UUID，匹配的旧会话可继续聊天，其余旧记录保留供离线打开。可在「会话」中切换对话，点「新会话」创建对话。
+Chatbox 按实例 UUID 找回上次选择的 Launcher 实例，确认当前回环地址后使用已保存的凭据重连。旧版按完整 URL 查找本地历史，地址大小写或端口变化可能使旧对话从界面消失。新版向 `/api/v1/chat/sessions` 核对原用户名和会话 UUID，匹配的旧会话可继续聊天，其余旧记录保留供离线打开。左侧历史栏按最近使用时间排列。点击会话标题打开历史，点击「新建会话」开始对话；窄窗口可从顶栏展开历史栏。
 
 如果上传因权限不足被拒绝，消息会显示缺少的权限，更新 Key 后可点「重试这条」。如果回复中断，服务端可能已经收件。退出时仍在等待回复的消息会在重开后标为「上次回复未确认」。Chatbox 保留记录，由用户确认是否重发。
 
@@ -31,7 +35,7 @@ Chatbox 按实例 UUID 找回上次选择的 Launcher 实例，确认当前回�
 
 聊天记录保存在 `%LOCALAPPDATA%\Chatbox\history.json`，历史与备份均为明文。迁移旧版历史前，Chatbox 会在同一目录保留 `history.json.pre-migration.bak`。若同名备份已存在且内容不同，另存为 `history.json.<UUID>.pre-migration.bak`。
 
-Launcher 和 HTTPS 配置的 Key 通过验证后，使用当前 Windows 用户的 DPAPI 加密保存在 `%LOCALAPPDATA%\Chatbox\credentials`。在同一配置的密码框输入新 Key 并验证即可更换，点「清除」可删除保存的 Key。无法核实实例身份的手动本机 HTTP 地址仅在当前窗口使用输入的 Key。
+密钥值使用当前 Windows 用户的 DPAPI 保存在 `%LOCALAPPDATA%\Chatbox\credentials`。每份服务配置独立保存密钥名称、内部引用和活动项。0.1.5 已保存的单把 Key 升级后显示为「原有密钥」，可直接改名。移除密钥只影响本机；需要撤销服务端授权时，请在 AstrBot WebUI 操作。
 
 ## 从 0.1.1 升级
 

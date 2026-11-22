@@ -28,7 +28,7 @@ internal data class Profile(
     val currentSession: String,
 )
 
-internal data class SessionInfo(val id: String, val entryCount: Int, val selected: Boolean)
+internal data class SessionInfo(val id: String, val entryCount: Int, val selected: Boolean, val title: String)
 
 /** Durable local chat storage. Profile IDs, endpoint addresses, and server session IDs are distinct. */
 internal class DesktopStore(private val file: Path) {
@@ -42,6 +42,7 @@ internal class DesktopStore(private val file: Path) {
             when {
                 loaded.optInt("schemaVersion") == SCHEMA_VERSION -> {
                     validateCurrentState(loaded)
+                    normalizePendingStatuses(loaded)
                     loaded
                 }
                 loaded.has("servers") && !loaded.has("schemaVersion") -> {
@@ -81,8 +82,19 @@ internal class DesktopStore(private val file: Path) {
         val current = profile.optString("currentSession")
         val rows = profile.getJSONArray("sessions")
         return (0 until rows.length()).map { index ->
-            val row = rows.getJSONObject(index)
-            SessionInfo(row.getString("id"), row.getJSONArray("entries").length(), row.getString("id") == current)
+            index to rows.getJSONObject(index)
+        }.sortedWith(
+            compareByDescending<Pair<Int, JSONObject>> {
+                sessionTimestamp(it.second, "lastUsedAt") ?: sessionTimestamp(it.second, "createdAt")
+            }
+                .thenByDescending { it.first }
+        ).map { (_, row) ->
+            SessionInfo(
+                row.getString("id"),
+                row.getJSONArray("entries").length(),
+                row.getString("id") == current,
+                sessionTitle(row),
+            )
         }
     }
 
@@ -108,6 +120,7 @@ internal class DesktopStore(private val file: Path) {
             val profile = requireProfile(copy, profileId)
             chat = readProfileInternal(profile, sessionId)
             copy.put("activeProfileId", profileId)
+            if (sessionId != null) findSession(profile, sessionId)?.let { touchSession(copy, it) }
         }
         return checkNotNull(chat)
     }
@@ -127,13 +140,14 @@ internal class DesktopStore(private val file: Path) {
             if (existing == null) {
                 val kind = if (profileId.startsWith("launcher:")) "launcher" else "manual"
                 val sessionId = UUID.randomUUID().toString()
+                val session = newSession(copy, sessionId, recentlyUsed = true)
                 profileArray(copy).put(JSONObject()
                     .put("id", profileId)
                     .put("address", normalized)
                     .put("kind", kind)
                     .put("offlineOnly", false)
                     .put("currentSession", sessionId)
-                    .put("sessions", JSONArray().put(JSONObject().put("id", sessionId).put("entries", JSONArray()))))
+                    .put("sessions", JSONArray().put(session)))
             } else {
                 require(!existing.optBoolean("offlineOnly")) { "Legacy offline profiles must be explicitly adopted first" }
                 existing.put("address", normalized)
@@ -158,15 +172,20 @@ internal class DesktopStore(private val file: Path) {
     @Synchronized
     fun selectProfile(profileId: String) {
         requireProfile(state, profileId)
-        persist { it.put("activeProfileId", profileId) }
+        persist { copy ->
+            val profile = requireProfile(copy, profileId)
+            findSession(profile, profile.optString("currentSession"))?.let { touchSession(copy, it) }
+            copy.put("activeProfileId", profileId)
+        }
     }
 
     @Synchronized
     fun selectSession(profileId: String, sessionId: String) {
         persist { copy ->
             val profile = requireProfile(copy, profileId)
-            require(findSession(profile, sessionId) != null) { "Unknown session" }
+            val session = findSession(profile, sessionId) ?: error("Unknown session")
             profile.put("currentSession", sessionId)
+            touchSession(copy, session)
             copy.put("activeProfileId", profileId)
         }
     }
@@ -177,7 +196,7 @@ internal class DesktopStore(private val file: Path) {
         persist { copy ->
             val profile = requireProfile(copy, profileId)
             require(!profile.optBoolean("offlineOnly")) { "Legacy offline profiles cannot start sessions" }
-            val session = JSONObject().put("id", UUID.randomUUID().toString()).put("entries", JSONArray())
+            val session = newSession(copy, UUID.randomUUID().toString(), recentlyUsed = true)
             profile.getJSONArray("sessions").put(session)
             profile.put("currentSession", session.getString("id"))
             copy.put("activeProfileId", profileId)
@@ -191,9 +210,28 @@ internal class DesktopStore(private val file: Path) {
         persist { copy ->
             val profile = requireProfile(copy, profileId)
             require(!profile.optBoolean("offlineOnly")) { "Legacy offline profiles are read-only" }
-            saveChat(profile, chat)
+            saveChat(copy, profile, chat)
             copy.put("activeProfileId", profileId)
         }
+    }
+
+    /** Persists a send or reply update without changing the active profile or selected session. */
+    @Synchronized
+    fun saveSessionContent(profileId: String, chat: Chat) {
+        persist { copy ->
+            val profile = requireProfile(copy, profileId)
+            require(!profile.optBoolean("offlineOnly")) { "Legacy offline profiles are read-only" }
+            val session = findSession(profile, chat.session) ?: error("Unknown session")
+            writeSessionContent(copy, session, chat, touch = true)
+        }
+    }
+
+    /** Returns a session snapshot without changing selection or recency. */
+    @Synchronized
+    fun sessionContent(profileId: String, sessionId: String): Chat {
+        val profile = requireProfile(state, profileId)
+        val session = findSession(profile, sessionId) ?: error("Unknown session")
+        return chatFrom(session)
     }
 
     /** Compatibility API used by the original single-address UI and tests. */
@@ -202,7 +240,7 @@ internal class DesktopStore(private val file: Path) {
         val address = normalizeAddress(server)
         persist { copy ->
             val profile = findManualProfileByAddress(copy, address) ?: createProfileInState(copy, address)
-            saveChat(profile, chat)
+            saveChat(copy, profile, chat)
             copy.put("activeProfileId", profile.getString("id"))
         }
     }
@@ -285,12 +323,17 @@ internal class DesktopStore(private val file: Path) {
         return chatFrom(findSession(profile, sessionId)!!)
     }
 
-    private fun saveChat(profile: JSONObject, chat: Chat) {
+    private fun saveChat(source: JSONObject, profile: JSONObject, chat: Chat) {
         var session = findSession(profile, chat.session)
         if (session == null) {
-            session = JSONObject().put("id", chat.session).put("entries", JSONArray())
+            session = newSession(source, chat.session, recentlyUsed = false)
             profile.getJSONArray("sessions").put(session)
         }
+        writeSessionContent(source, session, chat, touch = true)
+        profile.put("currentSession", chat.session)
+    }
+
+    private fun writeSessionContent(source: JSONObject, session: JSONObject, chat: Chat, touch: Boolean) {
         val entries = JSONArray()
         chat.entries.forEach { entry ->
             val row = JSONObject()
@@ -303,7 +346,71 @@ internal class DesktopStore(private val file: Path) {
             entries.put(row)
         }
         session.put("entries", entries)
-        profile.put("currentSession", chat.session)
+        if (touch) touchSession(source, session)
+    }
+
+    private fun newSession(source: JSONObject, id: String, recentlyUsed: Boolean): JSONObject {
+        val createdAt = nextTimestamp(source)
+        return JSONObject()
+            .put("id", id)
+            .put("entries", JSONArray())
+            .put("createdAt", createdAt)
+            .also { if (recentlyUsed) it.put("lastUsedAt", createdAt) }
+    }
+
+    private fun touchSession(source: JSONObject, session: JSONObject) {
+        session.put("lastUsedAt", nextTimestamp(source))
+    }
+
+    private fun nextTimestamp(source: JSONObject): Long {
+        var latest = Long.MIN_VALUE
+        val profiles = profileArray(source)
+        for (profileIndex in 0 until profiles.length()) {
+            val sessions = profiles.getJSONObject(profileIndex).getJSONArray("sessions")
+            for (sessionIndex in 0 until sessions.length()) {
+                val session = sessions.getJSONObject(sessionIndex)
+                listOfNotNull(sessionTimestamp(session, "lastUsedAt"), sessionTimestamp(session, "createdAt")).forEach {
+                    if (it > latest) latest = it
+                }
+            }
+        }
+        val wallClock = System.currentTimeMillis()
+        return if (latest == Long.MIN_VALUE || wallClock > latest) wallClock else if (latest < Long.MAX_VALUE) latest + 1 else latest
+    }
+
+    private fun sessionTimestamp(session: JSONObject, key: String): Long? {
+        val raw = session.opt(key) as? Number ?: return null
+        val numeric = raw.toDouble()
+        return numeric.takeIf { it.isFinite() && it % 1.0 == 0.0 && it >= Long.MIN_VALUE.toDouble() && it <= Long.MAX_VALUE.toDouble() }
+            ?.toLong()
+    }
+
+    private fun sessionTitle(session: JSONObject): String {
+        session.optString("title").trim().takeIf { it.isNotEmpty() }?.let { return shortTitle(it) }
+        val entries = session.getJSONArray("entries")
+        for (index in 0 until entries.length()) {
+            val entry = entries.getJSONObject(index)
+            entry.optString("question").trim().takeIf { it.isNotEmpty() }?.let { return shortTitle(it) }
+        }
+        val imageOnly = (0 until entries.length()).any { index ->
+            val entry = entries.getJSONObject(index)
+            isImageAttachment(entry.optString("attachmentDisplayName")) ||
+                isImageAttachment(entry.optString("attachmentReference"))
+        }
+        return if (imageOnly) IMAGE_SESSION_TITLE else NEW_SESSION_TITLE
+    }
+
+    private fun shortTitle(value: String): String {
+        val normalized = value.trim().replace(Regex("\\s+"), " ")
+        val count = normalized.codePointCount(0, normalized.length)
+        if (count <= MAX_TITLE_CODE_POINTS) return normalized
+        val end = normalized.offsetByCodePoints(0, MAX_TITLE_CODE_POINTS - 1)
+        return normalized.substring(0, end).trimEnd() + "…"
+    }
+
+    private fun isImageAttachment(value: String): Boolean {
+        val path = value.substringBefore('?').substringBefore('#').trim().lowercase(Locale.ROOT)
+        return IMAGE_EXTENSIONS.any { extension -> path.endsWith(extension) }
     }
 
     private fun persist(change: (JSONObject) -> Unit) {
@@ -426,6 +533,20 @@ internal class DesktopStore(private val file: Path) {
         }
     }
 
+    private fun normalizePendingStatuses(candidate: JSONObject) {
+        val profiles = profileArray(candidate)
+        for (profileIndex in 0 until profiles.length()) {
+            val sessions = profiles.getJSONObject(profileIndex).getJSONArray("sessions")
+            for (sessionIndex in 0 until sessions.length()) {
+                val entries = sessions.getJSONObject(sessionIndex).getJSONArray("entries")
+                for (entryIndex in 0 until entries.length()) {
+                    val entry = entries.getJSONObject(entryIndex)
+                    if (entry.optString("status") == "发送中") entry.put("status", "上次回复未确认")
+                }
+            }
+        }
+    }
+
     private fun profileArray(source: JSONObject): JSONArray = source.getJSONArray("profiles")
 
     private fun findProfile(source: JSONObject, profileId: String): JSONObject? {
@@ -463,7 +584,7 @@ internal class DesktopStore(private val file: Path) {
     }
 
     private fun chatEntryFrom(row: JSONObject): Entry {
-        val status = row.getString("status").let { if (it == "发送中") "上次回复未确认" else it }
+        val status = row.getString("status")
         val reference = row.optString("attachmentReference").takeIf { it.isNotEmpty() }
         val displayName = row.optString("attachmentDisplayName").takeIf { it.isNotEmpty() }
         val answer = row.getString("answer")
@@ -499,6 +620,10 @@ internal class DesktopStore(private val file: Path) {
 
     companion object {
         private const val SCHEMA_VERSION = 2
+        private const val MAX_TITLE_CODE_POINTS = 40
+        private const val IMAGE_SESSION_TITLE = "图片会话"
+        private const val NEW_SESSION_TITLE = "新会话"
+        private val IMAGE_EXTENSIONS = setOf(".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".heic", ".heif", ".avif")
 
         private fun emptyState() = JSONObject()
             .put("schemaVersion", SCHEMA_VERSION)

@@ -1,0 +1,12 @@
+allprojects {
+    tasks.withType(org.gradle.api.tasks.JavaExec).configureEach {
+        if (name == 'run') {
+            def trustStore = System.getenv('CHATBOX_FIXTURE_TRUSTSTORE')
+            if (trustStore == null || trustStore.isBlank()) {
+                throw new GradleException('The fixture public-certificate truststore path is missing.')
+            }
+            jvmArgs('-Djavax.net.ssl.trustStore=' + trustStore)
+            jvmArgs('-Djavax.net.ssl.trustStoreType=PKCS12')
+        }
+    }
+}

@@ -18,16 +18,25 @@ internal class DesktopCredentials(private val directory: Path) {
     fun save(profileId: String, credential: String) {
         requireWindows()
         val profile = profileHash(profileId)
+        saveAt(fileFor(profile), profile, credential)
+    }
+
+    fun saveNamed(profileId: String, keyId: String, credential: String) {
+        requireWindows()
+        val reference = namedReferenceHash(profileId, keyId)
+        saveAt(namedFileFor(reference), reference, credential)
+    }
+
+    private fun saveAt(target: Path, entropy: ByteArray, credential: String) {
         val plain = credential.toByteArray(StandardCharsets.UTF_8)
         val protected = try {
-            transform(profile, plain, protect = true)
+            transform(entropy, plain, protect = true)
         } finally {
             plain.fill(0)
         }
 
         try {
             Files.createDirectories(directory)
-            val target = fileFor(profile)
             val temporary = Files.createTempFile(directory, "credential-", ".tmp")
             try {
                 Files.write(temporary, protected)
@@ -45,13 +54,26 @@ internal class DesktopCredentials(private val directory: Path) {
     fun load(profileId: String): String? {
         requireWindows()
         val profile = profileHash(profileId)
+        return loadAt(fileFor(profile), profile)
+    }
+
+    fun loadNamed(profileId: String, keyId: String): String? {
+        requireWindows()
+        val reference = namedReferenceHash(profileId, keyId)
+        return loadAt(namedFileFor(reference), reference)
+    }
+
+    private fun loadAt(file: Path, entropy: ByteArray): String? {
         val encrypted = try {
-            Files.readAllBytes(fileFor(profile))
+            Files.readAllBytes(file)
         } catch (_: NoSuchFileException) {
             return null
         }
-        val plain = transform(profile, encrypted, protect = false)
-        encrypted.fill(0)
+        val plain = try {
+            transform(entropy, encrypted, protect = false)
+        } finally {
+            encrypted.fill(0)
+        }
         return try {
             String(plain, StandardCharsets.UTF_8)
         } finally {
@@ -64,12 +86,30 @@ internal class DesktopCredentials(private val directory: Path) {
         Files.deleteIfExists(fileFor(profileHash(profileId)))
     }
 
+    fun clearNamed(profileId: String, keyId: String) {
+        requireWindows()
+        Files.deleteIfExists(namedFileFor(namedReferenceHash(profileId, keyId)))
+    }
+
     private fun fileFor(profileHash: ByteArray): Path =
         directory.resolve("credential-${Base64.getUrlEncoder().withoutPadding().encodeToString(profileHash)}.bin")
+
+    private fun namedFileFor(referenceHash: ByteArray): Path =
+        directory.resolve("named-credential-${Base64.getUrlEncoder().withoutPadding().encodeToString(referenceHash)}.bin")
 
     private fun profileHash(profileId: String): ByteArray {
         require(profileId.isNotBlank()) { "Profile id must not be blank." }
         return MessageDigest.getInstance("SHA-256").digest(profileId.toByteArray(StandardCharsets.UTF_8))
+    }
+
+    private fun namedReferenceHash(profileId: String, keyId: String): ByteArray {
+        require(profileId.isNotBlank() && keyId.isNotBlank()) { "Credential reference is required." }
+        return MessageDigest.getInstance("SHA-256").run {
+            update(profileId.toByteArray(StandardCharsets.UTF_8))
+            update(0.toByte())
+            update(keyId.toByteArray(StandardCharsets.UTF_8))
+            digest()
+        }
     }
 
     private fun transform(profileHash: ByteArray, bytes: ByteArray, protect: Boolean): ByteArray {
