@@ -177,7 +177,10 @@ function Start-InstalledApp([string] $Executable, [bool] $RequireStartMenuShortc
 
     $deadline = [DateTime]::UtcNow.AddSeconds(45)
     while ([DateTime]::UtcNow -lt $deadline) {
-        $app = Get-Process -Name Chatbox -ErrorAction SilentlyContinue | Where-Object { $_.StartTime -ge $startTime } | Select-Object -First 1
+        # jpackage can leave both a launcher and a window-owning child named Chatbox.
+        $app = Get-Process -Name Chatbox -ErrorAction SilentlyContinue | Where-Object {
+            $_.StartTime -ge $startTime -and $_.MainWindowHandle -ne [IntPtr]::Zero
+        } | Select-Object -First 1
         if ($app) {
             $app.Refresh()
             if ($app.MainWindowHandle -ne [IntPtr]::Zero) {
