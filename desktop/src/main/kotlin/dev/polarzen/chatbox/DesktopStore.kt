@@ -16,6 +16,7 @@ internal data class Entry(
     val attachmentReference: String? = null,
     val attachmentDisplayName: String? = null,
     val replyImages: List<ReplyImage> = emptyList(),
+    val attachmentReferences: List<String> = attachmentReference?.let(::listOf) ?: emptyList(),
 )
 
 internal data class Chat(val session: String, val entries: List<Entry> = emptyList())
@@ -42,11 +43,18 @@ internal class DesktopStore(private val file: Path) {
             when {
                 loaded.optInt("schemaVersion") == SCHEMA_VERSION -> {
                     validateCurrentState(loaded)
+                    if (loaded.optInt("sessionOrderVersion") < SESSION_ORDER_VERSION) {
+                        normalizeLegacySessionOrder(loaded)
+                        loaded.put("sessionOrderVersion", SESSION_ORDER_VERSION)
+                        writeAtomic(loaded)
+                    }
                     normalizePendingStatuses(loaded)
                     loaded
                 }
                 loaded.has("servers") && !loaded.has("schemaVersion") -> {
                     val migrated = migrateLegacy(loaded)
+                    normalizeLegacySessionOrder(migrated)
+                    migrated.put("sessionOrderVersion", SESSION_ORDER_VERSION)
                     backupPriorHistory()
                     writeAtomic(migrated)
                     migrated
@@ -82,13 +90,7 @@ internal class DesktopStore(private val file: Path) {
         val current = profile.optString("currentSession")
         val rows = profile.getJSONArray("sessions")
         return (0 until rows.length()).map { index ->
-            index to rows.getJSONObject(index)
-        }.sortedWith(
-            compareByDescending<Pair<Int, JSONObject>> {
-                sessionTimestamp(it.second, "lastUsedAt") ?: sessionTimestamp(it.second, "createdAt")
-            }
-                .thenByDescending { it.first }
-        ).map { (_, row) ->
+            val row = rows.getJSONObject(index)
             SessionInfo(
                 row.getString("id"),
                 row.getJSONArray("entries").length(),
@@ -120,7 +122,6 @@ internal class DesktopStore(private val file: Path) {
             val profile = requireProfile(copy, profileId)
             chat = readProfileInternal(profile, sessionId)
             copy.put("activeProfileId", profileId)
-            if (sessionId != null) findSession(profile, sessionId)?.let { touchSession(copy, it) }
         }
         return checkNotNull(chat)
     }
@@ -140,7 +141,7 @@ internal class DesktopStore(private val file: Path) {
             if (existing == null) {
                 val kind = if (profileId.startsWith("launcher:")) "launcher" else "manual"
                 val sessionId = UUID.randomUUID().toString()
-                val session = newSession(copy, sessionId, recentlyUsed = true)
+                val session = newSession(sessionId)
                 profileArray(copy).put(JSONObject()
                     .put("id", profileId)
                     .put("address", normalized)
@@ -173,8 +174,7 @@ internal class DesktopStore(private val file: Path) {
     fun selectProfile(profileId: String) {
         requireProfile(state, profileId)
         persist { copy ->
-            val profile = requireProfile(copy, profileId)
-            findSession(profile, profile.optString("currentSession"))?.let { touchSession(copy, it) }
+            requireProfile(copy, profileId)
             copy.put("activeProfileId", profileId)
         }
     }
@@ -183,11 +183,51 @@ internal class DesktopStore(private val file: Path) {
     fun selectSession(profileId: String, sessionId: String) {
         persist { copy ->
             val profile = requireProfile(copy, profileId)
-            val session = findSession(profile, sessionId) ?: error("Unknown session")
+            require(findSession(profile, sessionId) != null) { "Unknown session" }
             profile.put("currentSession", sessionId)
-            touchSession(copy, session)
             copy.put("activeProfileId", profileId)
         }
+    }
+
+    /** Deletes only the requested local session and returns the selected session after deletion. */
+    @Synchronized
+    fun deleteSession(profileId: String, sessionId: String): Chat {
+        var selected: Chat? = null
+        persist { copy ->
+            val profile = requireProfile(copy, profileId)
+            val sessions = profile.getJSONArray("sessions")
+            val deletedIndex = indexOfSession(profile, sessionId)
+            val wasCurrent = profile.optString("currentSession") == sessionId
+            sessions.remove(deletedIndex)
+
+            if (wasCurrent) {
+                if (sessions.length() == 0) {
+                    profile.put("currentSession", "")
+                    selected = Chat("")
+                } else {
+                    // The item now at the removed index is the next displayed session; at the end,
+                    // select the previous one.
+                    val replacement = sessions.getJSONObject(deletedIndex.coerceAtMost(sessions.length() - 1))
+                    profile.put("currentSession", replacement.getString("id"))
+                    selected = chatFrom(replacement)
+                }
+            } else {
+                val current = findSession(profile, profile.optString("currentSession"))
+                if (current == null) {
+                    if (sessions.length() == 0) {
+                        profile.put("currentSession", "")
+                        selected = Chat("")
+                    } else {
+                        val replacement = sessions.getJSONObject(0)
+                        profile.put("currentSession", replacement.getString("id"))
+                        selected = chatFrom(replacement)
+                    }
+                } else {
+                    selected = chatFrom(current)
+                }
+            }
+        }
+        return checkNotNull(selected)
     }
 
     @Synchronized
@@ -196,8 +236,8 @@ internal class DesktopStore(private val file: Path) {
         persist { copy ->
             val profile = requireProfile(copy, profileId)
             require(!profile.optBoolean("offlineOnly")) { "Legacy offline profiles cannot start sessions" }
-            val session = newSession(copy, UUID.randomUUID().toString(), recentlyUsed = true)
-            profile.getJSONArray("sessions").put(session)
+            val session = newSession(UUID.randomUUID().toString())
+            insertSessionAtHead(profile, session)
             profile.put("currentSession", session.getString("id"))
             copy.put("activeProfileId", profileId)
             chat = Chat(session.getString("id"))
@@ -210,7 +250,7 @@ internal class DesktopStore(private val file: Path) {
         persist { copy ->
             val profile = requireProfile(copy, profileId)
             require(!profile.optBoolean("offlineOnly")) { "Legacy offline profiles are read-only" }
-            saveChat(copy, profile, chat)
+            saveChat(profile, chat)
             copy.put("activeProfileId", profileId)
         }
     }
@@ -222,7 +262,7 @@ internal class DesktopStore(private val file: Path) {
             val profile = requireProfile(copy, profileId)
             require(!profile.optBoolean("offlineOnly")) { "Legacy offline profiles are read-only" }
             val session = findSession(profile, chat.session) ?: error("Unknown session")
-            writeSessionContent(copy, session, chat, touch = true)
+            writeSessionContent(session, chat)
         }
     }
 
@@ -240,7 +280,7 @@ internal class DesktopStore(private val file: Path) {
         val address = normalizeAddress(server)
         persist { copy ->
             val profile = findManualProfileByAddress(copy, address) ?: createProfileInState(copy, address)
-            saveChat(copy, profile, chat)
+            saveChat(profile, chat)
             copy.put("activeProfileId", profile.getString("id"))
         }
     }
@@ -312,70 +352,77 @@ internal class DesktopStore(private val file: Path) {
     }
 
     private fun readProfileInternal(profile: JSONObject, requestedSession: String?): Chat {
-        val sessions = profile.getJSONArray("sessions")
-        var sessionId = requestedSession?.also { require(findSession(profile, it) != null) { "Unknown session" } }
-            ?: profile.optString("currentSession").takeIf { findSession(profile, it) != null }
+        val sessionId = requestedSession?.takeIf { it.isNotBlank() }
+            ?.also { require(findSession(profile, it) != null) { "Unknown session" } }
+            ?: findSession(profile, profile.optString("currentSession"))?.getString("id")
+            ?: profile.getJSONArray("sessions").optJSONObject(0)?.optString("id")?.takeIf { it.isNotBlank() }
         if (sessionId == null) {
-            sessionId = UUID.randomUUID().toString()
-            sessions.put(JSONObject().put("id", sessionId).put("entries", JSONArray()))
+            profile.put("currentSession", "")
+            return Chat("")
         }
         profile.put("currentSession", sessionId)
         return chatFrom(findSession(profile, sessionId)!!)
     }
 
-    private fun saveChat(source: JSONObject, profile: JSONObject, chat: Chat) {
+    private fun saveChat(profile: JSONObject, chat: Chat) {
+        require(chat.session.isNotBlank()) { "Session identity is required" }
         var session = findSession(profile, chat.session)
         if (session == null) {
-            session = newSession(source, chat.session, recentlyUsed = false)
-            profile.getJSONArray("sessions").put(session)
+            session = newSession(chat.session)
+            insertSessionAtHead(profile, session)
         }
-        writeSessionContent(source, session, chat, touch = true)
+        writeSessionContent(session, chat)
         profile.put("currentSession", chat.session)
     }
 
-    private fun writeSessionContent(source: JSONObject, session: JSONObject, chat: Chat, touch: Boolean) {
+    private fun writeSessionContent(session: JSONObject, chat: Chat) {
         val entries = JSONArray()
         chat.entries.forEach { entry ->
             val row = JSONObject()
                 .put("question", entry.question)
                 .put("answer", entry.answer)
                 .put("status", entry.status)
-            entry.attachmentReference?.let { row.put("attachmentReference", it) }
+            val references = entry.attachmentReferences.ifEmpty {
+                entry.attachmentReference?.let(::listOf) ?: emptyList()
+            }
+            (entry.attachmentReference ?: references.firstOrNull())?.let { row.put("attachmentReference", it) }
             entry.attachmentDisplayName?.let { row.put("attachmentDisplayName", it) }
+            row.put("attachmentReferences", JSONArray(references))
             row.put("replyImages", replyImagesToJson(entry.replyImages, entry.answer))
             entries.put(row)
         }
         session.put("entries", entries)
-        if (touch) touchSession(source, session)
     }
 
-    private fun newSession(source: JSONObject, id: String, recentlyUsed: Boolean): JSONObject {
-        val createdAt = nextTimestamp(source)
-        return JSONObject()
-            .put("id", id)
-            .put("entries", JSONArray())
-            .put("createdAt", createdAt)
-            .also { if (recentlyUsed) it.put("lastUsedAt", createdAt) }
+    private fun newSession(id: String): JSONObject = JSONObject()
+        .put("id", id)
+        .put("entries", JSONArray())
+
+    private fun insertSessionAtHead(profile: JSONObject, session: JSONObject) {
+        val rows = profile.getJSONArray("sessions")
+        val reordered = JSONArray().put(session)
+        for (index in 0 until rows.length()) reordered.put(rows.getJSONObject(index))
+        profile.put("sessions", reordered)
     }
 
-    private fun touchSession(source: JSONObject, session: JSONObject) {
-        session.put("lastUsedAt", nextTimestamp(source))
-    }
-
-    private fun nextTimestamp(source: JSONObject): Long {
-        var latest = Long.MIN_VALUE
-        val profiles = profileArray(source)
+    /** Convert the old timestamp-based view into stored display order exactly once. */
+    private fun normalizeLegacySessionOrder(candidate: JSONObject) {
+        val profiles = profileArray(candidate)
         for (profileIndex in 0 until profiles.length()) {
-            val sessions = profiles.getJSONObject(profileIndex).getJSONArray("sessions")
-            for (sessionIndex in 0 until sessions.length()) {
-                val session = sessions.getJSONObject(sessionIndex)
-                listOfNotNull(sessionTimestamp(session, "lastUsedAt"), sessionTimestamp(session, "createdAt")).forEach {
-                    if (it > latest) latest = it
-                }
+            val profile = profiles.getJSONObject(profileIndex)
+            val rows = profile.getJSONArray("sessions")
+            val orderedIndices = (0 until rows.length()).sortedWith(
+                compareByDescending<Int> { index ->
+                    val row = rows.getJSONObject(index)
+                    sessionTimestamp(row, "lastUsedAt") ?: sessionTimestamp(row, "createdAt")
+                }.thenByDescending { it }
+            )
+            if (orderedIndices.withIndex().any { (newIndex, oldIndex) -> newIndex != oldIndex }) {
+                profile.put("sessions", JSONArray().also { ordered ->
+                    orderedIndices.forEach { ordered.put(rows.getJSONObject(it)) }
+                })
             }
         }
-        val wallClock = System.currentTimeMillis()
-        return if (latest == Long.MIN_VALUE || wallClock > latest) wallClock else if (latest < Long.MAX_VALUE) latest + 1 else latest
     }
 
     private fun sessionTimestamp(session: JSONObject, key: String): Long? {
@@ -395,7 +442,8 @@ internal class DesktopStore(private val file: Path) {
         val imageOnly = (0 until entries.length()).any { index ->
             val entry = entries.getJSONObject(index)
             isImageAttachment(entry.optString("attachmentDisplayName")) ||
-                isImageAttachment(entry.optString("attachmentReference"))
+                isImageAttachment(entry.optString("attachmentReference")) ||
+                attachmentReferencesFrom(entry).any(::isImageAttachment)
         }
         return if (imageOnly) IMAGE_SESSION_TITLE else NEW_SESSION_TITLE
     }
@@ -505,6 +553,7 @@ internal class DesktopStore(private val file: Path) {
         val username = legacy.optString("username").ifBlank { newUsername() }
         return JSONObject()
             .put("schemaVersion", SCHEMA_VERSION)
+            .put("sessionOrderVersion", SESSION_ORDER_VERSION)
             .put("username", username)
             .put("activeProfileId", activeProfileId)
             .put("profiles", profiles)
@@ -585,12 +634,35 @@ internal class DesktopStore(private val file: Path) {
 
     private fun chatEntryFrom(row: JSONObject): Entry {
         val status = row.getString("status")
-        val reference = row.optString("attachmentReference").takeIf { it.isNotEmpty() }
+        val oldReference = row.optString("attachmentReference").takeIf { it.isNotEmpty() }
+        val references = attachmentReferencesFrom(row).ifEmpty { oldReference?.let(::listOf) ?: emptyList() }
+        val reference = oldReference ?: references.firstOrNull()
         val displayName = row.optString("attachmentDisplayName").takeIf { it.isNotEmpty() }
+            ?: reference?.let(::attachmentNameFromReference)
         val answer = row.getString("answer")
         return Entry(row.getString("question"), answer, status, reference, displayName,
-            replyImagesFrom(row, answer))
+            replyImagesFrom(row, answer), references)
     }
+
+    private fun attachmentReferencesFrom(row: JSONObject): List<String> {
+        val values = row.optJSONArray("attachmentReferences") ?: return emptyList()
+        return buildList {
+            for (index in 0 until values.length()) {
+                val value = values.opt(index) as? String ?: continue
+                if (value.isNotEmpty()) add(value)
+            }
+        }
+    }
+
+    private fun attachmentNameFromReference(reference: String): String? = runCatching {
+        val uri = URI(reference)
+        val name = if (uri.scheme.equals("file", ignoreCase = true)) {
+            Path.of(uri).fileName?.toString()
+        } else {
+            uri.path?.substringAfterLast('/') ?: Path.of(reference).fileName?.toString()
+        }
+        name?.takeIf { it.isNotBlank() }
+    }.getOrNull()
 
     private fun findManualProfileByAddress(source: JSONObject, address: String): JSONObject? {
         val rows = profileArray(source)
@@ -620,6 +692,7 @@ internal class DesktopStore(private val file: Path) {
 
     companion object {
         private const val SCHEMA_VERSION = 2
+        private const val SESSION_ORDER_VERSION = 1
         private const val MAX_TITLE_CODE_POINTS = 40
         private const val IMAGE_SESSION_TITLE = "图片会话"
         private const val NEW_SESSION_TITLE = "新会话"
@@ -627,6 +700,7 @@ internal class DesktopStore(private val file: Path) {
 
         private fun emptyState() = JSONObject()
             .put("schemaVersion", SCHEMA_VERSION)
+            .put("sessionOrderVersion", SESSION_ORDER_VERSION)
             .put("username", newUsername())
             .put("activeProfileId", "")
             .put("profiles", JSONArray())
@@ -656,6 +730,7 @@ internal class DesktopStore(private val file: Path) {
         private fun copyAttachmentFields(source: JSONObject, target: JSONObject) {
             source.optString("attachmentReference").takeIf { it.isNotEmpty() }?.let { target.put("attachmentReference", it) }
             source.optString("attachmentDisplayName").takeIf { it.isNotEmpty() }?.let { target.put("attachmentDisplayName", it) }
+            source.optJSONArray("attachmentReferences")?.let { target.put("attachmentReferences", JSONArray(it.toString())) }
         }
 
         private fun copyReplyImages(source: JSONObject, target: JSONObject, answer: String) {
