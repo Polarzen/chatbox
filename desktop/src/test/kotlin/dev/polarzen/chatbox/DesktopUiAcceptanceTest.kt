@@ -5,9 +5,11 @@ import androidx.compose.runtime.key
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.hasTestTag
@@ -15,11 +17,14 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.withKeyDown
 import androidx.compose.ui.semantics.Role
 import androidx.compose.runtime.mutableIntStateOf
 import org.json.JSONArray
@@ -293,6 +298,7 @@ class DesktopUiAcceptanceTest {
         println("UI_CASE D PASS profileSelectionPersisted=true AKeys=1 BKeys=0 removedActiveUnselected=true")
     }
 
+    @OptIn(ExperimentalTestApi::class)
     @Test
     fun acceptanceE_sessionsDelayedSendAndRealPngJpegPicker() {
         createV015Profiles(withLegacyKey = true)
@@ -363,7 +369,57 @@ class DesktopUiAcceptanceTest {
         val latest = store.sessionContent(profileA, currentAfterNew).entries.last()
         assertTrue("Response metadata remains attached to the originating conversation", latest.replyImages.any { it.attachmentId == "reply-image-a" })
         assertTrue("The request reached the HTTPS mock service with the fixture session id", fixtureRequestSeen("profile=A endpoint=POST /api/v1/chat key=old_key session=$currentAfterNew"))
-        println("UI_CASE E PASS newSession=true switchedDuringSend=true correctSession=true pngPickedRemoved=true jpegUploaded=true replyImageCached=true")
+
+        val multiSelectOffset = fixtureLogCurrentOffset()
+        chooseImagesThroughRealPicker(listOf(png, jpeg))
+        assertComposerContainsText(png.fileName.toString())
+        assertComposerContainsText(jpeg.fileName.toString())
+        rule.onNodeWithTag("remove-image-button").assertIsDisplayed()
+        rule.onNodeWithTag("remove-image-button-1").assertIsDisplayed()
+        val multiCaption = "保留 JPEG 的说明"
+        val secondLine = "第二行来自 Shift+Enter"
+        val expectedQuestion = "$multiCaption\n$secondLine"
+        rule.onNodeWithTag("composer-field").performTextInput(multiCaption)
+        rule.onNodeWithTag("remove-image-button").performClick()
+        advanceUiAnimations()
+        assertNoComposerText(png.fileName.toString(), "Removing the PNG removes only its preview")
+        assertComposerContainsText(jpeg.fileName.toString())
+        rule.onNodeWithTag("remove-image-button").assertIsDisplayed()
+        assertNoTaggedNode("remove-image-button-1")
+        assertEquals("Removing a preview preserves the existing caption draft", multiCaption, composerFieldText())
+        rule.onNodeWithTag("composer-field").performSemanticsAction(SemanticsActions.RequestFocus)
+        rule.onNodeWithTag("composer-field").performKeyInput {
+            withKeyDown(Key.ShiftLeft) { pressKey(Key.Enter) }
+        }
+        rule.onNodeWithTag("composer-field").performTextInput(secondLine)
+        assertEquals("Shift+Enter inserts a newline and keeps the composer draft", expectedQuestion, composerFieldText())
+        val fileRequest = "profile=A endpoint=POST /api/v1/file key=old_key session=- result=200"
+        val chatRequest = "profile=A endpoint=POST /api/v1/chat key=old_key session=$currentAfterNew"
+        assertEquals("Shift+Enter inserts a newline without uploading or sending", 0, fixtureRequestCount(fileRequest, multiSelectOffset) + fixtureRequestCount(chatRequest, multiSelectOffset))
+        assertTrue("Shift+Enter does not create a message entry", store.sessionContent(profileA, currentAfterNew).entries.none { it.question == expectedQuestion })
+
+        rule.onNodeWithTag("composer-field").performKeyInput { pressKey(Key.Enter) }
+        waitUntil("remaining JPEG and multiline caption are sent", 20_000) {
+            store.sessionContent(profileA, currentAfterNew).entries.lastOrNull()?.let { entry ->
+                entry.question == expectedQuestion && entry.status == "已完成" &&
+                    entry.attachmentDisplayName == jpeg.fileName.toString() &&
+                    entry.attachmentReferences == listOf(jpeg.toString())
+            } == true && fixtureRequestSeen(fileRequest, multiSelectOffset) && fixtureRequestSeen(chatRequest, multiSelectOffset)
+        }
+        val multiEntry = store.sessionContent(profileA, currentAfterNew).entries.last()
+        assertEquals("Only the retained JPEG path is recorded on the sent message", listOf(jpeg.toString()), multiEntry.attachmentReferences)
+        assertEquals("The removed PNG is not recorded as an attachment", jpeg.fileName.toString(), multiEntry.attachmentDisplayName)
+        assertEquals("Exactly one file upload reached the fixture", 1, fixtureRequestCount(fileRequest, multiSelectOffset))
+        assertEquals("Exactly one chat request reached the fixture", 1, fixtureRequestCount(chatRequest, multiSelectOffset))
+        assertEquals("The composer clears after ordinary Enter sends", "", composerFieldText())
+
+        restartScreen()
+        val reopened = store.sessionContent(profileA, currentAfterNew).entries.last()
+        assertEquals("Multiline question persists after reopening", expectedQuestion, reopened.question)
+        assertEquals("Completed status persists after reopening", "已完成", reopened.status)
+        assertEquals("Only the JPEG attachment persists after reopening", listOf(jpeg.toString()), reopened.attachmentReferences)
+        assertEquals("JPEG display name persists after reopening", jpeg.fileName.toString(), reopened.attachmentDisplayName)
+        println("UI_CASE E PASS newSession=true switchedDuringSend=true correctSession=true pngPickedRemoved=true jpegUploaded=true replyImageCached=true multiSelect=true removeOnePreservedDraft=true shiftEnterNoSend=true enterSentOneRetainedImage=true fixtureFilePosts=" + fixtureRequestCount(fileRequest, multiSelectOffset) + " fixtureChatPosts=" + fixtureRequestCount(chatRequest, multiSelectOffset) + " savedAttachmentName=" + multiEntry.attachmentDisplayName + " historyReloaded=true")
     }
 
     @Test
@@ -711,6 +767,17 @@ class DesktopUiAcceptanceTest {
         assertTrue("Composer should restore the selected session draft", rule.onAllNodes(matcher).fetchSemanticsNodes().isNotEmpty())
     }
 
+    private fun composerFieldText(): String =
+        rule.onNodeWithTag("composer-field").fetchSemanticsNode().config[SemanticsProperties.EditableText].text
+
+    private fun assertComposerContainsText(expected: String) {
+        rule.onNode(hasText(expected) and hasAnyAncestor(hasTestTag("composer"))).assertIsDisplayed()
+    }
+
+    private fun assertNoComposerText(expected: String, message: String) {
+        assertTrue(message, rule.onAllNodes(hasText(expected) and hasAnyAncestor(hasTestTag("composer"))).fetchSemanticsNodes().isEmpty())
+    }
+
     private fun entryForCurrentSession(question: String) = runCatching {
         val sessionId = store.profile(profileA)!!.currentSession
         store.sessionContent(profileA, sessionId).entries.lastOrNull { it.question == question }
@@ -745,6 +812,11 @@ class DesktopUiAcceptanceTest {
     }
 
     private fun chooseImageThroughRealPicker(path: Path) {
+        chooseImagesThroughRealPicker(listOf(path))
+    }
+
+    private fun chooseImagesThroughRealPicker(paths: List<Path>) {
+        require(paths.isNotEmpty()) { "At least one image must be selected." }
         val automationFailure = AtomicReference<Throwable?>()
         val automation = Thread({
             try {
@@ -756,8 +828,13 @@ class DesktopUiAcceptanceTest {
             }
             val visible = chooserRef.get() ?: error("Swing image picker did not open")
             SwingUtilities.invokeAndWait {
-                check(visible.fileFilter.accept(path.toFile())) { "Fixture file does not match the real picker filter" }
-                visible.selectedFile = path.toFile()
+                paths.forEach { path ->
+                    check(visible.fileFilter.accept(path.toFile())) { "Fixture file does not match the real picker filter" }
+                }
+                visible.selectedFiles = paths.map(Path::toFile).toTypedArray()
+                check(visible.selectedFiles.map { it.toPath().normalize() } == paths.map(Path::normalize)) {
+                    "The real picker did not retain the complete synthetic multi-selection"
+                }
                 val approve = findComponent(visible) { it is JButton && it.actionCommand == JFileChooser.APPROVE_SELECTION } as? JButton
                 if (approve != null) approve.doClick() else visible.approveSelection()
             }
@@ -768,9 +845,11 @@ class DesktopUiAcceptanceTest {
         rule.onNodeWithTag("choose-image-button").performClick()
         automation.join(15_000)
         assertFalse("File picker automation should finish", automation.isAlive)
-        assertTrue("Real file picker should accept the synthetic image", automationFailure.get() == null)
+        assertTrue("Real file picker should accept the synthetic image selection", automationFailure.get() == null)
         rule.waitForIdle()
-        rule.onNodeWithText(path.fileName.toString()).assertIsDisplayed()
+        paths.forEach { path ->
+            assertTrue("Real picker selection renders " + path.fileName, rule.onAllNodes(hasText(path.fileName.toString())).fetchSemanticsNodes().isNotEmpty())
+        }
     }
 
     private fun findVisibleChooser(): JFileChooser? = Window.getWindows()
@@ -809,14 +888,18 @@ class DesktopUiAcceptanceTest {
     }
 
     private fun fixtureRequestSeen(fragment: String, afterOffset: Long = fixtureLogOffset): Boolean {
-        val log = fixtureLog ?: return false
-        if (!Files.exists(log)) return false
+        return fixtureRequestCount(fragment, afterOffset) > 0
+    }
+
+    private fun fixtureRequestCount(fragment: String, afterOffset: Long = fixtureLogOffset): Int {
+        val log = fixtureLog ?: return 0
+        if (!Files.exists(log)) return 0
         val offset = afterOffset.coerceAtMost(Files.size(log))
         val current = Files.newInputStream(log).use { input ->
             input.skipNBytes(offset)
             input.readAllBytes()
         }
-        return current.toString(Charsets.UTF_8).lineSequence().any { it.contains(fragment) }
+        return current.toString(Charsets.UTF_8).lineSequence().count { it.contains(fragment) }
     }
 
     private fun fixtureLogCurrentOffset(): Long = fixtureLog?.let(Files::size) ?: 0L
