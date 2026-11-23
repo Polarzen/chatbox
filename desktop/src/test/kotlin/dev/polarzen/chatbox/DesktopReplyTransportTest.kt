@@ -6,10 +6,91 @@ import org.junit.Test
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 class DesktopReplyTransportTest {
+    @Test fun contentRendersBeforeDelayedStreamCompletesAndHeadersAreDistinctMilestones() {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val firstFrameSent = CountDownLatch(1)
+        val allowCompletion = CountDownLatch(1)
+        val firstContent = CountDownLatch(1)
+        val events = CopyOnWriteArrayList<AstrBotTransportEvent>()
+        val texts = CopyOnWriteArrayList<String>()
+        val failure = AtomicReference<Throwable?>()
+        lateinit var request: Thread
+        try {
+            server.createContext("/api/v1/chat") { exchange ->
+                exchange.use {
+                    it.requestBody.readBytes()
+                    it.responseHeaders.add("Content-Type", "text/event-stream")
+                    it.sendResponseHeaders(200, 0) // chunked: keep the response open after the first frame
+                    it.responseBody.write(frame("plain", "early", streaming = true).toSse().toByteArray())
+                    it.responseBody.flush()
+                    firstFrameSent.countDown()
+                    allowCompletion.await(5, TimeUnit.SECONDS)
+                    it.responseBody.write((frame("plain", " later", streaming = true).toSse() +
+                        frame("end", "").toSse()).toByteArray())
+                }
+            }
+            server.start()
+            request = Thread {
+                try {
+                    sendToAstrBot("http://127.0.0.1:${server.address.port}", "fixture-key", "user", "session",
+                        "question", allowLoopbackHttp = true,
+                        onEvent = { events += it },
+                        onText = {
+                            texts += it
+                            firstContent.countDown()
+                        })
+                } catch (error: Throwable) {
+                    failure.set(error)
+                }
+            }
+            request.start()
+
+            assertTrue(firstFrameSent.await(5, TimeUnit.SECONDS))
+            assertTrue(firstContent.await(5, TimeUnit.SECONDS))
+            assertEquals(listOf(
+                AstrBotTransportEvent.ChatStarted, AstrBotTransportEvent.HeadersReceived,
+                AstrBotTransportEvent.StreamReady, AstrBotTransportEvent.FirstContent,
+            ), events.toList())
+            assertEquals("early", texts.first())
+            assertFalse(events.contains(AstrBotTransportEvent.Completed))
+
+            allowCompletion.countDown()
+            request.join(5_000)
+            assertFalse("transport should finish after server releases the stream", request.isAlive)
+            assertNull(failure.get())
+            assertEquals(AstrBotTransportEvent.Completed, events.last())
+            assertEquals("early later", texts.last())
+        } finally {
+            allowCompletion.countDown()
+            server.stop(0)
+        }
+    }
+
+    @Test fun prematureEofKeepsPartialTextAndDoesNotReportCompletion() {
+        withChatServer(listOf(frame("plain", "partial", streaming = true)), appendEnd = false) { base, _ ->
+            val events = mutableListOf<AstrBotTransportEvent>()
+            val texts = mutableListOf<String>()
+            val failure = assertThrows(IllegalStateException::class.java) {
+                sendToAstrBot(base, "fixture-key", "user", "session", "question",
+                    allowLoopbackHttp = true, onEvent = { events += it }, onText = { texts += it })
+            }
+            assertTrue(failure.message.orEmpty().contains("意外中断"))
+            assertEquals("partial", texts.last())
+            assertEquals(listOf(
+                AstrBotTransportEvent.ChatStarted, AstrBotTransportEvent.HeadersReceived,
+                AstrBotTransportEvent.StreamReady, AstrBotTransportEvent.FirstContent,
+            ), events)
+        }
+    }
+
     @Test fun rawAndSavedImagesFollowPublicTextOffsetsWithoutChangingTextStream() {
         val frames = listOf(
             frame("plain", "A🙂", streaming = true),
@@ -213,6 +294,8 @@ class DesktopReplyTransportTest {
 
     private fun frame(type: String, data: String, streaming: Boolean = false): String =
         org.json.JSONObject().put("type", type).put("data", data).put("streaming", streaming).toString()
+
+    private fun String.toSse(): String = "data: $this\n\n"
 
     private fun saved(id: String): String = org.json.JSONObject().put("type", "attachment_saved")
         .put("data", org.json.JSONObject().put("id", id).put("type", "image")).toString()

@@ -14,6 +14,17 @@ import java.util.UUID
 
 private const val MAX_REPLY_IMAGE_BYTES = 20 * 1024 * 1024
 
+/** Transport milestones emitted synchronously on the sending thread. Upload indexes are zero-based. */
+internal sealed interface AstrBotTransportEvent {
+    data class UploadStarted(val index: Int, val count: Int) : AstrBotTransportEvent
+    data class UploadFinished(val index: Int, val count: Int) : AstrBotTransportEvent
+    data object ChatStarted : AstrBotTransportEvent
+    data object HeadersReceived : AstrBotTransportEvent
+    data object StreamReady : AstrBotTransportEvent
+    data object FirstContent : AstrBotTransportEvent
+    data object Completed : AstrBotTransportEvent
+}
+
 internal fun endpoint(base: String, allowLoopbackHttp: Boolean = false): URI {
     val uri = URI(base.trim())
     require(uri.host != null && uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null)
@@ -31,9 +42,21 @@ internal fun sendToAstrBot(
     onReplyImage: (String?, Int) -> Unit = { _, _ -> },
     onText: (String) -> Unit,
 ) {
+    sendToAstrBot(base, token, user, session, message, allowLoopbackHttp,
+        onReplyImage, {}, onText)
+}
+
+/** Event-aware overload. The original overload remains for existing Android and desktop callers. */
+internal fun sendToAstrBot(
+    base: String, token: String, user: String, session: String, message: String,
+    allowLoopbackHttp: Boolean = false,
+    onReplyImage: (String?, Int) -> Unit = { _, _ -> },
+    onEvent: (AstrBotTransportEvent) -> Unit,
+    onText: (String) -> Unit,
+) {
     sendToAstrBotPayload(
         base, token, user, session, JSONObject().put("message", message),
-        allowLoopbackHttp, onReplyImage, onText,
+        allowLoopbackHttp, onReplyImage, onEvent, onText,
     )
 }
 
@@ -45,16 +68,54 @@ internal fun sendImageToAstrBot(
     onReplyImage: (String?, Int) -> Unit = { _, _ -> },
     onText: (String) -> Unit,
 ) {
-    val path = image.toAbsolutePath().normalize()
-    require(Files.isRegularFile(path) && Files.isReadable(path)) { "无法读取所选图片。" }
-    val mediaType = imageMediaType(path)
-    val attachmentId = uploadImageToAstrBot(base, token, path, mediaType, allowLoopbackHttp)
+    sendImageToAstrBot(base, token, user, session, image, caption, allowLoopbackHttp,
+        onReplyImage, {}, onText)
+}
+
+/** Event-aware single-image overload, preserving the original overload for existing callers. */
+internal fun sendImageToAstrBot(
+    base: String, token: String, user: String, session: String,
+    image: Path, caption: String = "",
+    allowLoopbackHttp: Boolean = false,
+    onReplyImage: (String?, Int) -> Unit = { _, _ -> },
+    onEvent: (AstrBotTransportEvent) -> Unit,
+    onText: (String) -> Unit,
+) {
+    sendImagesToAstrBot(base, token, user, session, listOf(image), caption,
+        allowLoopbackHttp, onReplyImage, onEvent, onText)
+}
+
+/** Upload ordered images using OpenAPI's file scope, then send all attachments in one chat message. */
+internal fun sendImagesToAstrBot(
+    base: String, token: String, user: String, session: String,
+    images: List<Path>, caption: String = "",
+    allowLoopbackHttp: Boolean = false,
+    onReplyImage: (String?, Int) -> Unit = { _, _ -> },
+    onEvent: (AstrBotTransportEvent) -> Unit = {},
+    onText: (String) -> Unit,
+) {
+    require(images.isNotEmpty()) { "至少选择一张图片。" }
+    // Validate the complete selection before starting uploads, so a later invalid entry cannot
+    // leave earlier attachments uploaded without a corresponding chat message.
+    val prepared = images.map { image ->
+        val path = image.toAbsolutePath().normalize()
+        require(Files.isRegularFile(path) && Files.isReadable(path)) { "无法读取所选图片。" }
+        path to imageMediaType(path)
+    }
+    val uploaded = prepared.mapIndexed { index, (path, mediaType) ->
+        onEvent(AstrBotTransportEvent.UploadStarted(index, prepared.size))
+        val attachmentId = uploadImageToAstrBot(base, token, path, mediaType, allowLoopbackHttp)
+        onEvent(AstrBotTransportEvent.UploadFinished(index, prepared.size))
+        path to attachmentId
+    }
     val parts = JSONArray()
     if (caption.isNotEmpty()) parts.put(JSONObject().put("type", "plain").put("text", caption))
-    parts.put(JSONObject().put("type", "image").put("attachment_id", attachmentId)
-        .put("filename", path.fileName.toString()))
+    uploaded.forEach { (path, attachmentId) ->
+        parts.put(JSONObject().put("type", "image").put("attachment_id", attachmentId)
+            .put("filename", path.fileName.toString()))
+    }
     sendToAstrBotPayload(base, token, user, session, JSONObject().put("message", parts),
-        allowLoopbackHttp, onReplyImage, onText)
+        allowLoopbackHttp, onReplyImage, onEvent, onText)
 }
 
 /** Download a reply attachment through the authenticated, same-origin OpenAPI file endpoint. */
@@ -199,11 +260,13 @@ private fun openAstrBotConnection(target: URI): HttpURLConnection {
 
 private fun sendToAstrBotPayload(
     base: String, token: String, user: String, session: String, messagePayload: JSONObject,
-    allowLoopbackHttp: Boolean, onReplyImage: (String?, Int) -> Unit, onText: (String) -> Unit,
+    allowLoopbackHttp: Boolean, onReplyImage: (String?, Int) -> Unit,
+    onEvent: (AstrBotTransportEvent) -> Unit, onText: (String) -> Unit,
 ) {
     val target = endpoint(base, allowLoopbackHttp)
     val c = openAstrBotConnection(target)
     try {
+        onEvent(AstrBotTransportEvent.ChatStarted)
         c.instanceFollowRedirects = false
         c.requestMethod = "POST"
         c.doOutput = true
@@ -217,6 +280,7 @@ private fun sendToAstrBotPayload(
         c.setFixedLengthStreamingMode(bytes.size)
         c.outputStream.use { it.write(bytes) }
         val status = c.responseCode
+        onEvent(AstrBotTransportEvent.HeadersReceived)
         check(status in 200..299) {
             when (status) {
                 401 -> "密钥无效或已撤销。"
@@ -229,13 +293,24 @@ private fun sendToAstrBotPayload(
         check(c.contentType?.substringBefore(';')?.trim()?.equals("text/event-stream", true) == true) {
             "服务未返回对话事件流，请检查接口地址。"
         }
+        onEvent(AstrBotTransportEvent.StreamReady)
         var done = false
+        var emittedFirstContent = false
         var completedText = ""
         var pendingText = ""
         var pendingRawImages = 0
         fun replyOffset(): Int = completedText.length + pendingText.length
+        fun emitFirstContent() {
+            if (!emittedFirstContent) {
+                emittedFirstContent = true
+                onEvent(AstrBotTransportEvent.FirstContent)
+            }
+        }
         fun emitMissingRawImages() {
-            repeat(pendingRawImages) { onReplyImage(null, replyOffset()) }
+            repeat(pendingRawImages) {
+                emitFirstContent()
+                onReplyImage(null, replyOffset())
+            }
             pendingRawImages = 0
         }
         c.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
@@ -259,6 +334,7 @@ private fun sendToAstrBotPayload(
                                 completedText += pendingText
                                 pendingText = ""
                             }
+                            if ((completedText + pendingText).isNotEmpty()) emitFirstContent()
                             onText(completedText + pendingText)
                         }
                     }
@@ -282,6 +358,7 @@ private fun sendToAstrBotPayload(
                         val attachmentId = data?.opt("id") as? String
                         if (savedType == "image" && !attachmentId.isNullOrBlank()) {
                             if (pendingRawImages > 0) pendingRawImages--
+                            emitFirstContent()
                             onReplyImage(attachmentId, replyOffset())
                         } else emitMissingRawImages()
                     }
@@ -305,6 +382,7 @@ private fun sendToAstrBotPayload(
         emitMissingRawImages()
         onText(completedText + pendingText)
         check(done) { "回复流意外中断，可能已在服务端执行。请勿直接重复发送。" }
+        onEvent(AstrBotTransportEvent.Completed)
     } finally {
         c.disconnect()
     }

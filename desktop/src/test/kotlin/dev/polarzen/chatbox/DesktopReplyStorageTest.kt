@@ -57,6 +57,49 @@ class DesktopReplyStorageTest {
         }
     }
 
+    @Test fun multipleLocalImagePathsRoundTripKeepLegacyFirstFieldsAndDeriveNamesFromPaths() {
+        val temp = Files.createTempDirectory("chatbox-local-image-history-")
+        try {
+            val file = temp.resolve("history.json")
+            val store = DesktopStore(file)
+            val profile = store.ensureProfile("profile-images", "https://images.example")
+            val first = "file:///one/shared-name.png"
+            val second = "file:///two/shared-name.png"
+            val imageOnly = Entry(
+                question = "",
+                answer = "",
+                status = "已完成",
+                attachmentReference = first,
+                attachmentReferences = listOf(first, second),
+            )
+            store.saveSessionContent(profile.id, Chat(profile.currentSession, listOf(imageOnly)))
+
+            val stored = JSONObject(Files.readString(file)).getJSONArray("profiles").getJSONObject(0)
+                .getJSONArray("sessions").getJSONObject(0).getJSONArray("entries").getJSONObject(0)
+            assertEquals(first, stored.getString("attachmentReference"))
+            assertEquals(listOf(first, second), (0 until stored.getJSONArray("attachmentReferences").length())
+                .map { stored.getJSONArray("attachmentReferences").getString(it) })
+
+            val restored = DesktopStore(file)
+            val entry = restored.sessionContent(profile.id, profile.currentSession).entries.single()
+            assertEquals(listOf(first, second), entry.attachmentReferences)
+            assertEquals(first, entry.attachmentReference)
+            assertEquals("shared-name.png", entry.attachmentDisplayName)
+            assertEquals("图片会话", restored.sessions(profile.id).single().title)
+
+            // Removing the new optional array leaves the legacy first path fully readable.
+            val oldState = JSONObject(Files.readString(file))
+            oldState.getJSONArray("profiles").getJSONObject(0).getJSONArray("sessions")
+                .getJSONObject(0).getJSONArray("entries").getJSONObject(0).remove("attachmentReferences")
+            Files.writeString(file, oldState.toString())
+            val legacyEntry = DesktopStore(file).sessionContent(profile.id, profile.currentSession).entries.single()
+            assertEquals(listOf(first), legacyEntry.attachmentReferences)
+            assertEquals("shared-name.png", legacyEntry.attachmentDisplayName)
+        } finally {
+            temp.toFile().deleteRecursively()
+        }
+    }
+
     @Test fun imageCacheDecodesPngsPersistsAcrossInstancesAndScopesByProfile() {
         val temp = Files.createTempDirectory("chatbox-reply-cache-")
         try {

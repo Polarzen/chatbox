@@ -36,12 +36,10 @@ internal object LauncherInstanceResolver {
         return verifiedInstances.singleOrNull { it.identity == canonicalIdentity }?.url
     }
 
-    fun runningInstances(): List<LauncherInstance> = discover(
-        instancesDirectory,
-        processSnapshot(),
-        listenerSnapshot(),
-        ::isAstrBotDashboard,
-    )
+    fun runningInstances(): List<LauncherInstance> {
+        val listeners = listenerSnapshot()
+        return discover(instancesDirectory, processSnapshot(listeners), listeners, ::isAstrBotDashboard)
+    }
 
     internal fun discover(
         instancesDirectory: Path,
@@ -149,12 +147,23 @@ internal object LauncherInstanceResolver {
         return result.copyOf(used)
     }
 
-    private fun processSnapshot(): List<LauncherProcess> = runCatching {
-        ProcessHandle.allProcesses().iterator().asSequence().mapNotNull { handle ->
-            val executable = runCatching { handle.info().command().orElse(null) }.getOrNull()
-            LauncherProcess(handle.pid(), handle.parent().map { it.pid() }.orElse(null), executable)
-        }.toList()
-    }.getOrDefault(emptyList())
+    private fun processSnapshot(listeners: List<LauncherListener>): List<LauncherProcess> {
+        val processes = mutableListOf<LauncherProcess>()
+        val visitedPids = hashSetOf<Long>()
+        listeners.asSequence()
+            .filter { it.address == "127.0.0.1" && it.port in 1..65535 }
+            .forEach { listener ->
+                var pid = listener.pid
+                while (visitedPids.add(pid)) {
+                    val handle = runCatching { ProcessHandle.of(pid).orElse(null) }.getOrNull() ?: break
+                    val parentPid = runCatching { handle.parent().map { it.pid() }.orElse(null) }.getOrNull()
+                    val executable = runCatching { handle.info().command().orElse(null) }.getOrNull()
+                    processes += LauncherProcess(pid, parentPid, executable)
+                    pid = parentPid ?: break
+                }
+            }
+        return processes
+    }
 
     private fun listenerSnapshot(): List<LauncherListener> {
         if (!System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) return emptyList()

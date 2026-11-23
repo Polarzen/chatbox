@@ -25,7 +25,7 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation(compose.desktop.uiTestJUnit4)
 }
-val windowsPackageVersion = "0.1.6"
+val windowsPackageVersion = "0.1.7"
 compose.desktop {
     application {
         mainClass = "dev.polarzen.chatbox.DesktopMainKt"
@@ -34,7 +34,10 @@ compose.desktop {
             packageName = "Chatbox"
             packageVersion = windowsPackageVersion
             modules("java.prefs", "jdk.crypto.ec")
-            windows { upgradeUuid = "204b3f78-64ec-4071-9a66-a535773540eb" }
+            windows {
+                upgradeUuid = "204b3f78-64ec-4071-9a66-a535773540eb"
+                menu = true
+            }
         }
     }
 }

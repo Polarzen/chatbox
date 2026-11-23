@@ -4,11 +4,11 @@ Windows 桌面版使用 AstrBot OpenAPI 收发文字和图片。每个服务配�
 
 ## 安装与构建
 
-本轮 Windows 构建是 **0.1.6**。退出正在运行的 Chatbox，双击交付的 `Chatbox-0.1.6.msi`，升级时沿用原安装目录。安装完成后从开始菜单打开 Chatbox。下面的 0.1.5 链接指向此前发布的版本。[0.1.6 验收记录](../docs/WINDOWS_016_ACCEPTANCE.md)
+Windows 0.1.7 安装包及校验文件见正式发布页。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.7/Chatbox-0.1.7.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.7/SHA256SUMS.txt) · [v0.1.7 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.7)
 
-从 [Chatbox 0.1.5 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.5/Chatbox-0.1.5.msi) 和 [SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.5/SHA256SUMS.txt) 下载，或查看 [v0.1.5 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.5)。用 PowerShell 运行 `Get-FileHash .\Chatbox-0.1.5.msi -Algorithm SHA256`，与校验文件比对。退出 Chatbox 后，将 MSI 安装到原目录。0.1.4 修复了 0.1.3 升级时 JVM 文件漏装、导致应用无法启动的问题。0.1.1 用户先阅读下方的旧卸载器升级说明。[0.1.5 增量验收报告](../docs/CHATBOX_015_IMAGE_GENERATION_ACCEPTANCE.md)
+在 PowerShell 中运行 `Get-FileHash .\Chatbox-0.1.7.msi -Algorithm SHA256`，确认结果与 `SHA256SUMS.txt` 中的 `c1622a874510d58c9bf03a7a6e90c226be8a0ae74e52ed5ef89f41ea6580aac2` 一致。从 0.1.5 或 0.1.6 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。安装完成后从开始菜单打开 Chatbox。0.1.1 用户先阅读[旧卸载器升级说明](#从-011-升级)。
 
-开发验证用的 CI 产物可在 [Windows 验证工作流](https://github.com/Polarzen/chatbox/actions/workflows/desktop-windows.yml) 的成功运行中下载，产物名为 `Chatbox-Windows-MSI`，保留 7 天。CI 下载不能替代正式 Release 或实际升级验收。
+托管 Windows 已验证从 0.1.5 原目录升级，日常机器已验证从 0.1.6 原目录升级。安装版现场验收覆盖会话列表、冷启动恢复和资源管理器混合拖放。[0.1.7 验收记录](../docs/WINDOWS_017_RELEASE_ACCEPTANCE.md) · [0.1.5 历史发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.5)
 
 如需自行构建，在 Windows 安装 JDK 17 和 WiX Toolset 3.x，然后在仓库根目录运行下列命令。
 
@@ -19,15 +19,17 @@ MSI 生成于 `desktop/build/compose/binaries/main/msi/`。从源码启动可运
 
 ## 连接和发送
 
-0.1.6 的主窗口直接打开上次的会话。点击右上角的连接状态进入「连接设置」，选择运行中的 Launcher 实例，或填写自行部署的 HTTPS 地址。手动 HTTP 仅支持本机 `127.0.0.1`。
+主窗口直接打开上次的会话。点击右上角的连接状态进入「连接设置」，选择运行中的 Launcher 实例，或填写自行部署的 HTTPS 地址。手动 HTTP 仅支持本机 `127.0.0.1`。
 
 首次使用时，点击「添加密钥」，填写本地名称和 AstrBot OpenAPI Key。已配置多把密钥时，点开顶栏密钥菜单，再点目标名称即可验证并切换。验证失败时可以继续使用原先已连接的密钥。「管理密钥」提供改名、权限信息和移除操作。名称用于本机识别，AstrBot WebUI 的 OpenAPI 设置列出服务端授予的权限。普通文字聊天需要 `chat`，图片上传与下载还需要 `file`；运行管理员命令需要服务端登记的管理员身份和 `chat:admin`。
 
-在底部输入栏按 Enter 发送，按 Shift+Enter 换行。「＋」可以选择 PNG 或 JPEG。选图后可以补充文字，也可以直接发送纯图片。
+把资源管理器中的 PNG 或 JPEG 拖到聊天区或输入区，或点击「＋」选图。发送前可以逐张移除图片、补充说明。按 Enter 发送，按 Shift+Enter 换行。回复气泡显示图片上传进度、等待服务器响应和等待首段回复的时间。
 
 桌面客户端可接收、显示服务端回复中的图片；生成图片由服务端图像提供方或插件决定，例如 [Chatbox Draw 插件说明](../integrations/astrbot_plugin_chatbox_draw/README.md)。详见 [0.1.5 增量验收报告](../docs/CHATBOX_015_IMAGE_GENERATION_ACCEPTANCE.md)。
 
-Chatbox 按实例 UUID 找回上次选择的 Launcher 实例，确认当前回环地址后使用已保存的凭据重连。旧版按完整 URL 查找本地历史，地址大小写或端口变化可能使旧对话从界面消失。新版向 `/api/v1/chat/sessions` 核对原用户名和会话 UUID，匹配的旧会话可继续聊天，其余旧记录保留供离线打开。左侧历史栏按最近使用时间排列。点击会话标题打开历史，点击「新建会话」开始对话；窄窗口可从顶栏展开历史栏。
+Chatbox 按实例 UUID 找回上次选择的 Launcher 实例，确认当前回环地址后使用已保存的凭据重连。旧版按完整 URL 查找本地历史，地址大小写或端口变化可能使旧对话从界面消失。新版向 `/api/v1/chat/sessions` 核对原用户名和会话 UUID，匹配的旧会话可继续聊天，其余旧记录保留供离线打开。
+
+新建的会话排在左栏顶部。点击会话标题原位切换，长列表可用细滚动条或鼠标滚轮浏览。滚动条的鼠标操作区域宽 14 dp，列表无需滚动时自动隐藏滚动条。展开行末的「⋯」，选择「删除会话」并确认，即可删除该服务配置下的一段本机聊天记录。窄窗口可从顶栏展开历史栏。
 
 如果上传因权限不足被拒绝，消息会显示缺少的权限，更新 Key 后可点「重试这条」。如果回复中断，服务端可能已经收件。退出时仍在等待回复的消息会在重开后标为「上次回复未确认」。Chatbox 保留记录，由用户确认是否重发。
 
@@ -43,6 +45,6 @@ Chatbox 按实例 UUID 找回上次选择的 Launcher 实例，确认当前回�
 
 ## 历史验收记录
 
-0.1.4 及更早版本的 Windows 验收记录见 [历史验收报告](../docs/WINDOWS_V1_ACCEPTANCE.md)；0.1.5 见 [增量验收报告](../docs/CHATBOX_015_IMAGE_GENERATION_ACCEPTANCE.md)。
+0.1.4 修复了从 0.1.3 升级时 JVM 文件漏装导致应用无法启动的问题。[0.1.4 及更早版本验收报告](../docs/WINDOWS_V1_ACCEPTANCE.md) · [0.1.5 增量验收报告](../docs/CHATBOX_015_IMAGE_GENERATION_ACCEPTANCE.md) · [0.1.6 候选版验收记录](../docs/WINDOWS_016_RELEASE_ACCEPTANCE.md)
 
 [官方 AstrBot OpenAPI 文档](https://docs.astrbot.app/dev/openapi.html)

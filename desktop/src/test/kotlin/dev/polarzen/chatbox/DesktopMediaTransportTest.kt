@@ -10,6 +10,117 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicInteger
 
 class DesktopMediaTransportTest {
+    @Test fun uploadsOrderedImagesAndReportsTransportMilestones() {
+        val temp = Files.createTempDirectory("chatbox-media-multi-")
+        val first = temp.resolve("first.png")
+        val second = temp.resolve("second.jpg")
+        Files.write(first, byteArrayOf(1, 2, 3))
+        Files.write(second, byteArrayOf(4, 5, 6))
+        val uploads = LinkedBlockingQueue<ByteArray>()
+        val chat = LinkedBlockingQueue<JSONObject>()
+        val uploadIndex = AtomicInteger()
+        val events = mutableListOf<AstrBotTransportEvent>()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        try {
+            server.createContext("/api/v1/file") { exchange ->
+                exchange.use {
+                    uploads += it.requestBody.readBytes()
+                    val id = "attachment-${uploadIndex.incrementAndGet()}"
+                    val body = """{"status":"ok","data":{"attachment_id":"$id"}}"""
+                        .toByteArray(Charsets.UTF_8)
+                    it.responseHeaders.add("Content-Type", "application/json")
+                    it.sendResponseHeaders(200, body.size.toLong())
+                    it.responseBody.write(body)
+                }
+            }
+            server.createContext("/api/v1/chat") { exchange ->
+                exchange.use {
+                    chat += JSONObject(it.requestBody.bufferedReader(Charsets.UTF_8).use { reader -> reader.readText() })
+                    val response = "data: {\"type\":\"plain\",\"data\":\"ready\"}\n\ndata: {\"type\":\"end\"}\n\n"
+                        .toByteArray(Charsets.UTF_8)
+                    it.responseHeaders.add("Content-Type", "text/event-stream")
+                    it.sendResponseHeaders(200, response.size.toLong())
+                    it.responseBody.write(response)
+                }
+            }
+            server.start()
+
+            sendImagesToAstrBot("http://127.0.0.1:${server.address.port}", "fixture-key", "user", "session",
+                listOf(first, second), caption = "look", allowLoopbackHttp = true,
+                onEvent = { events += it }, onText = {})
+
+            val firstUpload = checkNotNull(uploads.poll())
+            val secondUpload = checkNotNull(uploads.poll())
+            assertTrue(firstUpload.toString(Charsets.ISO_8859_1).contains("filename=\"image.png\""))
+            assertTrue(firstUpload.toList().windowed(3).any { it == listOf<Byte>(1, 2, 3) })
+            assertTrue(secondUpload.toString(Charsets.ISO_8859_1).contains("filename=\"image.jpg\""))
+            assertTrue(secondUpload.toList().windowed(3).any { it == listOf<Byte>(4, 5, 6) })
+
+            val message = checkNotNull(chat.poll()).getJSONArray("message")
+            assertEquals(3, message.length())
+            assertEquals("look", message.getJSONObject(0).getString("text"))
+            assertEquals("attachment-1", message.getJSONObject(1).getString("attachment_id"))
+            assertEquals("first.png", message.getJSONObject(1).getString("filename"))
+            assertEquals("attachment-2", message.getJSONObject(2).getString("attachment_id"))
+            assertEquals("second.jpg", message.getJSONObject(2).getString("filename"))
+            assertEquals(listOf(
+                AstrBotTransportEvent.UploadStarted(0, 2), AstrBotTransportEvent.UploadFinished(0, 2),
+                AstrBotTransportEvent.UploadStarted(1, 2), AstrBotTransportEvent.UploadFinished(1, 2),
+                AstrBotTransportEvent.ChatStarted, AstrBotTransportEvent.HeadersReceived,
+                AstrBotTransportEvent.StreamReady, AstrBotTransportEvent.FirstContent,
+                AstrBotTransportEvent.Completed,
+            ), events)
+        } finally {
+            server.stop(0)
+            temp.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun failedSecondUploadLeavesLatestMilestoneAtThatUploadAndSkipsChat() {
+        val temp = Files.createTempDirectory("chatbox-media-multi-failure-")
+        val first = temp.resolve("first.png")
+        val second = temp.resolve("second.png")
+        Files.write(first, byteArrayOf(1))
+        Files.write(second, byteArrayOf(2))
+        val uploadIndex = AtomicInteger()
+        val events = mutableListOf<AstrBotTransportEvent>()
+        val chatRequests = AtomicInteger()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        try {
+            server.createContext("/api/v1/file") { exchange ->
+                exchange.use {
+                    it.requestBody.readBytes()
+                    val status = if (uploadIndex.incrementAndGet() == 2) 403 else 200
+                    val body = if (status == 200)
+                        """{"status":"ok","data":{"attachment_id":"first"}}""".toByteArray()
+                    else "{}".toByteArray()
+                    if (status == 200) it.responseHeaders.add("Content-Type", "application/json")
+                    it.sendResponseHeaders(status, body.size.toLong())
+                    it.responseBody.write(body)
+                }
+            }
+            server.createContext("/api/v1/chat") { exchange ->
+                chatRequests.incrementAndGet()
+                exchange.use { it.sendResponseHeaders(200, -1) }
+            }
+            server.start()
+
+            val failure = assertThrows(IllegalStateException::class.java) {
+                sendImagesToAstrBot("http://127.0.0.1:${server.address.port}", "fixture-key", "user", "session",
+                    listOf(first, second), allowLoopbackHttp = true, onEvent = { events += it }, onText = {})
+            }
+            assertTrue(failure.message.orEmpty().contains("文件上传权限"))
+            assertEquals(listOf(
+                AstrBotTransportEvent.UploadStarted(0, 2), AstrBotTransportEvent.UploadFinished(0, 2),
+                AstrBotTransportEvent.UploadStarted(1, 2),
+            ), events)
+            assertEquals(0, chatRequests.get())
+        } finally {
+            server.stop(0)
+            temp.toFile().deleteRecursively()
+        }
+    }
+
     @Test fun uploadsImageThenSendsCaptionAndAttachmentInSameSession() {
         val temp = Files.createTempDirectory("chatbox-media-")
         val image = temp.resolve("猫 图片.png")

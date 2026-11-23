@@ -189,7 +189,7 @@ $props = [ordered]@{
 $propertiesText = ($props.GetEnumerator() | ForEach-Object { $_.Key + '=' + $_.Value }) -join [Environment]::NewLine
 [IO.File]::WriteAllText($privateProps, $propertiesText + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
 
-& $javac --add-modules jdk.httpserver -d $classesDir (Join-Path $PSScriptRoot 'FixtureServer.java') (Join-Path $PSScriptRoot 'FixtureProbe.java')
+& $javac -encoding UTF-8 --add-modules jdk.httpserver -d $classesDir (Join-Path $PSScriptRoot 'FixtureServer.java') (Join-Path $PSScriptRoot 'FixtureProbe.java')
 if ($LASTEXITCODE -ne 0) { throw 'Could not compile the local fixture service and probe.' }
 
 $argumentLine = '--add-modules=jdk.httpserver -cp "' + $classesDir + '" FixtureServer "' + $privateProps + '"'

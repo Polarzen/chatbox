@@ -5,11 +5,12 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.nio.file.Files
 
 class DesktopSessionHistoryTest {
-    @Test fun oldSessionsGetTitlesAndDeterministicCreationOrderWithoutReadTouches() {
+    @Test fun oldSessionsKeepTheirDisplayedOrderAndOnlyNewSessionsMoveToTheHead() {
         val temp = Files.createTempDirectory("chatbox-session-titles-")
         try {
             val file = temp.resolve("history.json")
@@ -42,18 +43,22 @@ class DesktopSessionHistoryTest {
 
             assertEquals(Chat("old-first", listOf(Entry("earlier question", "", "已完成"))), store.readProfile("profile-a"))
             assertEquals("profile-a", store.activeProfileId)
-            assertEquals(beforeRead, Files.readString(file))
-            assertEquals(listOf("old-empty", "old-image", "old-second", "old-first"), store.sessions("profile-a").map { it.id })
+            assertTrue("The first load persists the former displayed order", beforeRead != Files.readString(file))
+            assertEquals(listOf("old-empty", "old-image", "old-second", "old-first"),
+                DesktopStore(file).sessions("profile-a").map { it.id })
 
             store.selectSession("profile-a", "old-first")
-            assertEquals("old-first", store.sessions("profile-a").first().id)
+            assertEquals("old-empty", store.sessions("profile-a").first().id)
             assertFalse(store.sessions("profile-a").first { it.id == "old-first" }.title.isBlank())
+            assertEquals("old-empty", DesktopStore(file).sessions("profile-a").first().id)
+            val fresh = store.createSession("profile-a")
+            assertEquals(fresh.session, DesktopStore(file).sessions("profile-a").first().id)
         } finally {
             temp.toFile().deleteRecursively()
         }
     }
 
-    @Test fun explicitSendsAndSelectionsMoveSessionsToTheTopAndTitlesKeepUnicodeWhole() {
+    @Test fun sessionUpdatesAndSelectionsPreserveOrderAndTitlesKeepUnicodeWhole() {
         val temp = Files.createTempDirectory("chatbox-session-recency-")
         try {
             val file = temp.resolve("history.json")
@@ -70,7 +75,7 @@ class DesktopSessionHistoryTest {
             assertEquals(second, store.sessions(profile.id).first().id)
 
             store.selectSession(profile.id, first)
-            assertEquals(first, store.sessions(profile.id).first().id)
+            assertEquals(listOf(second, first), store.sessions(profile.id).map { it.id })
             assertEquals(title, store.sessionContent(profile.id, second).entries.single().question)
         } finally {
             temp.toFile().deleteRecursively()
@@ -91,9 +96,7 @@ class DesktopSessionHistoryTest {
             store.selectSession(firstProfile.id, second.session)
 
             val selectedProfile = store.ensureProfile("profile-b", "https://second.example.invalid")
-            val before = JSONObject(Files.readString(file))
-            val beforeFirst = findSession(before, firstProfile.id, firstSession)
-            val createdAt = beforeFirst.getLong("createdAt")
+            val orderBeforeLateReply = store.sessions(firstProfile.id).map { it.id }
             val selectedSession = store.profile(firstProfile.id)!!.currentSession
             val activeProfile = store.activeProfileId
 
@@ -112,16 +115,115 @@ class DesktopSessionHistoryTest {
             assertEquals(second.session, store.profile(firstProfile.id)!!.currentSession)
 
             val after = JSONObject(Files.readString(file))
-            val afterFirst = findSession(after, firstProfile.id, firstSession)
-            assertEquals(createdAt, afterFirst.getLong("createdAt"))
             assertEquals(second.session, after.getJSONArray("profiles").getJSONObject(0).getString("currentSession"))
             assertEquals(selectedProfile.id, after.getString("activeProfileId"))
+            assertEquals(orderBeforeLateReply, DesktopStore(file).sessions(firstProfile.id).map { it.id })
 
             val reopened = DesktopStore(file)
             assertEquals(selectedProfile.id, reopened.activeProfileId)
             assertEquals(second.session, reopened.profile(firstProfile.id)!!.currentSession)
             assertEquals(completed, reopened.sessionContent(firstProfile.id, firstSession))
             assertEquals("answer", reopened.sessionContent(firstProfile.id, second.session).entries.single().answer)
+        } finally {
+            temp.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun deletingCurrentSessionSelectsNextOrPreviousAndLastDeletionPersistsEmptyOrder() {
+        val temp = Files.createTempDirectory("chatbox-session-delete-")
+        try {
+            val file = temp.resolve("history.json")
+            val store = DesktopStore(file)
+            val profile = store.ensureProfile("profile-a", "https://example.invalid")
+            val first = profile.currentSession
+            val next = store.createSession(profile.id).session
+            val last = store.createSession(profile.id).session
+
+            assertEquals(next, store.deleteSession(profile.id, last).session)
+            assertEquals(listOf(next, first), store.sessions(profile.id).map { it.id })
+
+            // A stored order can legitimately leave the selected ID at the end (for example after
+            // importing old history); deleting it then falls back to the previous item.
+            val previousFixture = JSONObject(Files.readString(file))
+            val sessionRows = previousFixture.getJSONArray("profiles").getJSONObject(0).getJSONArray("sessions")
+            val previous = session("previous", "previous question")
+            val current = session("current", "current question")
+            sessionRows.put(previous).put(current)
+            previousFixture.getJSONArray("profiles").getJSONObject(0).put("currentSession", "current")
+            Files.writeString(file, previousFixture.toString())
+            val imported = DesktopStore(file)
+            assertEquals("previous", imported.deleteSession(profile.id, "current").session)
+
+            imported.sessions(profile.id).map { it.id }.filter { it != "previous" }.forEach { id ->
+                imported.deleteSession(profile.id, id)
+            }
+            val empty = imported.deleteSession(profile.id, "previous")
+            assertEquals(Chat(""), empty)
+            assertTrue(imported.sessions(profile.id).isEmpty())
+            assertEquals("", imported.profile(profile.id)!!.currentSession)
+            assertEquals(Chat(""), imported.readProfile(profile.id))
+            imported.selectProfile(profile.id)
+            assertTrue(imported.sessions(profile.id).isEmpty())
+            assertEquals(Chat(""), DesktopStore(file).readProfile(profile.id))
+            assertThrows(IllegalStateException::class.java) {
+                imported.saveSessionContent(profile.id, Chat("previous", listOf(Entry("late", "reply", "已完成"))))
+            }
+            assertTrue(imported.sessions(profile.id).isEmpty())
+        } finally {
+            temp.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun failedSessionDeletionDoesNotChangeMemoryOrDurableHistory() {
+        val temp = Files.createTempDirectory("chatbox-session-delete-rollback-")
+        try {
+            val file = temp.resolve("history.json")
+            val store = DesktopStore(file)
+            val profile = store.ensureProfile("profile-a", "https://example.invalid")
+            val oldSession = profile.currentSession
+            val removable = store.createSession(profile.id).session
+            val before = Files.readString(file)
+            val displaced = temp.resolve("history-original.json")
+
+            Files.move(file, displaced)
+            Files.createDirectory(file)
+            assertThrows(Exception::class.java) { store.deleteSession(profile.id, removable) }
+            assertEquals(listOf(removable, oldSession), store.sessions(profile.id).map { it.id })
+            assertEquals(removable, store.profile(profile.id)!!.currentSession)
+
+            Files.delete(file)
+            Files.move(displaced, file)
+            assertEquals(before, Files.readString(file))
+            assertEquals(listOf(removable, oldSession), DesktopStore(file).sessions(profile.id).map { it.id })
+            assertEquals(removable, DesktopStore(file).profile(profile.id)!!.currentSession)
+        } finally {
+            temp.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun offlineLocalHistoryCanBeDeleted() {
+        val temp = Files.createTempDirectory("chatbox-offline-delete-")
+        try {
+            val file = temp.resolve("history.json")
+            val profile = JSONObject()
+                .put("id", "offline-profile")
+                .put("address", "")
+                .put("kind", "legacy")
+                .put("offlineOnly", true)
+                .put("currentSession", "offline-session")
+                .put("sessions", JSONArray().put(session("offline-session", "saved locally")))
+            Files.writeString(file, JSONObject()
+                .put("schemaVersion", 2)
+                .put("sessionOrderVersion", 1)
+                .put("username", "offline-user")
+                .put("activeProfileId", "offline-profile")
+                .put("profiles", JSONArray().put(profile))
+                .toString())
+
+            val store = DesktopStore(file)
+            assertEquals(Chat(""), store.deleteSession("offline-profile", "offline-session"))
+            assertTrue(store.sessions("offline-profile").isEmpty())
+            assertEquals("", store.profile("offline-profile")!!.currentSession)
         } finally {
             temp.toFile().deleteRecursively()
         }
@@ -137,17 +239,4 @@ class DesktopSessionHistoryTest {
         .put("status", "已完成")
         .also { attachmentName?.let { name -> it.put("attachmentDisplayName", name) } }
 
-    private fun findSession(history: JSONObject, profileId: String, sessionId: String): JSONObject {
-        val profiles = history.getJSONArray("profiles")
-        for (profileIndex in 0 until profiles.length()) {
-            val profile = profiles.getJSONObject(profileIndex)
-            if (profile.getString("id") != profileId) continue
-            val sessions = profile.getJSONArray("sessions")
-            for (sessionIndex in 0 until sessions.length()) {
-                val session = sessions.getJSONObject(sessionIndex)
-                if (session.getString("id") == sessionId) return session
-            }
-        }
-        error("Missing test session")
-    }
 }
