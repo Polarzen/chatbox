@@ -123,7 +123,7 @@ internal fun DesktopAppearanceControls(
     onCommit: (DesktopAppearance) -> Unit,
 ) {
     val palette = desktopPalette
-    val pinLabel = if (appearance.pinned) "取消窗口置顶" else "窗口置顶"
+    val pinLabel = if (appearance.pinned) "取消置顶" else "窗口置顶"
     var expanded by remember { mutableStateOf(false) }
     Row(verticalAlignment = Alignment.CenterVertically) {
         TooltipArea(tooltip = { AppearanceTooltip(pinLabel) }) {
@@ -170,15 +170,13 @@ internal fun DesktopAppearanceControls(
                 var dragPercent by remember { mutableStateOf<Int?>(null) }
                 Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp)) {
                     Text("窗口外观", style = MaterialTheme.typography.subtitle1)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        listOf(false to "浅色", true to "深色").forEach { (dark, label) ->
-                            Row(Modifier.selectable(
-                                selected = appearance.dark == dark, role = Role.RadioButton,
-                                onClick = { onCommit(appearance.copy(dark = dark)) },
-                            ).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                RadioButton(selected = appearance.dark == dark, onClick = null)
-                                Text(label, Modifier.padding(start = 5.dp))
-                            }
+                    listOf(false to "浅色（Light）", true to "深色（Dark）").forEach { (dark, label) ->
+                        Row(Modifier.fillMaxWidth().selectable(
+                            selected = appearance.dark == dark, role = Role.RadioButton,
+                            onClick = { onCommit(appearance.copy(dark = dark)) },
+                        ).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(selected = appearance.dark == dark, onClick = null)
+                            Text(label, Modifier.padding(start = 5.dp))
                         }
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -187,7 +185,8 @@ internal fun DesktopAppearanceControls(
                     }
                     Slider(
                         value = appearance.opacityPercent.toFloat(), valueRange = 50f..100f,
-                        modifier = Modifier.fillMaxWidth().testTag("appearance-opacity"),
+                        // DropdownMenu queries intrinsic sizes. Slider's BoxWithConstraints cannot supply them.
+                        modifier = Modifier.size(width = 216.dp, height = 48.dp).testTag("appearance-opacity"),
                         onValueChange = {
                             val percent = it.roundToInt().coerceIn(50, 100)
                             dragPercent = percent
@@ -199,7 +198,7 @@ internal fun DesktopAppearanceControls(
                         },
                     )
                     TextButton(onClick = { onCommit(appearance.copy(opacityPercent = 100)) }) { Text("恢复 100%") }
-                    TextButton(onClick = { onCommit(DesktopAppearance()) }) { Text("重置所有外观设置") }
+                    TextButton(onClick = { onCommit(DesktopAppearance()) }) { Text("恢复默认外观") }
                 }
             }
         }

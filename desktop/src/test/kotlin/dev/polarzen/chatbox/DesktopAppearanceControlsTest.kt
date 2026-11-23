@@ -33,7 +33,8 @@ class DesktopAppearanceControlsTest {
         }
         ui.onNodeWithTag("appearance-pin").performClick()
         ui.onNodeWithTag("appearance-open").performClick()
-        ui.onNodeWithText("深色").performClick()
+        ui.onNodeWithText("浅色（Light）").assertIsDisplayed()
+        ui.onNodeWithText("深色（Dark）").performClick()
         ui.runOnIdle { assertEquals(DesktopAppearance(pinned = true, dark = true), commits.last()) }
         val slider = ui.onNodeWithTag("appearance-opacity")
         slider.performMouseInput {
@@ -50,7 +51,7 @@ class DesktopAppearanceControlsTest {
         ui.runOnIdle { assertEquals(appearance.value, commits.last()) }
         ui.onNodeWithText("恢复 100%").performClick()
         ui.runOnIdle { assertEquals(DesktopAppearance(pinned = true, dark = true), commits.last()) }
-        ui.onNodeWithText("重置所有外观设置").performClick()
+        ui.onNodeWithText("恢复默认外观").performClick()
         ui.runOnIdle { assertEquals(DesktopAppearance(), commits.last()) }
     }
 }

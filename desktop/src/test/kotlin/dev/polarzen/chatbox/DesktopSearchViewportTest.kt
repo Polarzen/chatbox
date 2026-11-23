@@ -1,6 +1,7 @@
 package dev.polarzen.chatbox
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
@@ -48,7 +49,10 @@ class DesktopSearchViewportTest {
         }
         rule.mainClock.autoAdvance = false
         rule.setContent {
-            MessageViewport("profile", "session", count.intValue, Modifier.size(320.dp, 200.dp), request.value) {
+            // The desktop test renderer reuses its raster surface between frames.
+            // Paint the same opaque canvas as the chat so removed marks erase their pixels.
+            MessageViewport("profile", "session", count.intValue,
+                Modifier.size(320.dp, 200.dp).background(lightDesktopPalette.canvas), request.value) {
                 item {
                     SearchHitEntry(0) {
                         Column {
@@ -107,6 +111,7 @@ class DesktopSearchViewportTest {
             mediaHeight.intValue = 140
         }
         rule.mainClock.advanceTimeBy(2200)
+        rule.waitForIdle()
         assertEquals(readingY, hitBox().center.y, 1f)
         assertFalse("The highlight expires without moving the line", highlighted())
         rule.runOnIdle { precedingMediaHeight.intValue = 300 }
