@@ -97,7 +97,7 @@ internal class DesktopStore(private val file: Path) {
         val rows = profile.getJSONArray("sessions")
         return (0 until rows.length()).map { index ->
             val row = rows.getJSONObject(index)
-            val manualName = (row.opt("manualName") as? String)?.takeIf { it.isNotBlank() }
+            val manualName = manualSessionName(row)
             SessionInfo(
                 row.getString("id"),
                 row.getJSONArray("entries").length(),
@@ -107,6 +107,33 @@ internal class DesktopStore(private val file: Path) {
             )
         }
     }
+
+    /** Only persist() publishes new state, so the captured session rows can be read off-lock. */
+    fun historySearchSnapshot(
+        profileId: String,
+        cancelled: () -> Boolean = { false },
+    ): HistorySearchSnapshot {
+        val rows = synchronized(this) { requireProfile(state, profileId).getJSONArray("sessions") }
+        return HistorySearchSnapshot(profileId, buildList {
+            for (index in 0 until rows.length()) {
+                checkHistorySearchCancellation(cancelled)
+                val row = rows.getJSONObject(index)
+                val title = manualSessionName(row) ?: defaultSessionTitle(row)
+                val entries = row.getJSONArray("entries")
+                val textEntries = buildList {
+                    for (entryIndex in 0 until entries.length()) {
+                        checkHistorySearchCancellation(cancelled)
+                        val entry = entries.getJSONObject(entryIndex)
+                        add(SearchEntry(entry.getString("question"), entry.getString("answer")))
+                    }
+                }
+                add(SearchSession(row.getString("id"), title, textEntries))
+            }
+        })
+    }
+
+    private fun manualSessionName(session: JSONObject): String? =
+        (session.opt("manualName") as? String)?.takeIf { it.isNotBlank() }
 
     /** Finds or creates a manual profile by normalized address and selects its current session. */
     @Synchronized

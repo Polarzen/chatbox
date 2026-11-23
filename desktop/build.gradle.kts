@@ -21,11 +21,12 @@ tasks.named<KotlinCompile>("compileKotlin") {
 }
 dependencies {
     implementation(compose.desktop.currentOs)
+    implementation("net.java.dev.jna:jna:5.19.1")
     implementation("org.json:json:20240303")
     testImplementation("junit:junit:4.13.2")
     testImplementation(compose.desktop.uiTestJUnit4)
 }
-val windowsPackageVersion = "0.1.9"
+val windowsPackageVersion = "0.1.10"
 compose.desktop {
     application {
         mainClass = "dev.polarzen.chatbox.DesktopMainKt"
@@ -33,7 +34,7 @@ compose.desktop {
             targetFormats(TargetFormat.Msi)
             packageName = "Chatbox"
             packageVersion = windowsPackageVersion
-            modules("java.prefs", "jdk.crypto.ec")
+            modules("java.prefs", "java.logging", "jdk.crypto.ec")
             windows {
                 upgradeUuid = "204b3f78-64ec-4071-9a66-a535773540eb"
                 menu = true

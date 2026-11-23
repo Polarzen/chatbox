@@ -21,6 +21,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.ScrollbarStyle
 import androidx.compose.foundation.VerticalScrollbar
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -40,6 +42,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -104,14 +107,6 @@ import java.awt.dnd.DropTargetDragEvent
 import java.awt.dnd.DropTargetDropEvent
 import javax.imageio.ImageIO
 
-private val ChatCanvas = Color(0xFFF7F6FA)
-private val ChatPanel = Color(0xFFFFFFFF)
-private val ChatInk = Color(0xFF292735)
-private val ChatMuted = Color(0xFF888594)
-private val ChatLine = Color(0xFFE9E6EF)
-private val ChatPurple = Color(0xFF7455C7)
-private val ChatPurpleLight = Color(0xFFF0EBFB)
-private val ChatAssistant = Color(0xFFFFFFFF)
 private val SidebarInset = 14.dp
 
 internal data class EntryProgress(
@@ -148,13 +143,15 @@ internal fun DesktopChatLayout(
     progress: EntryProgress? = null,
     profileId: String = "",
     onRenameSession: (String, String?) -> String? = { _, _ -> "当前无法修改会话名称。" },
+    searchNavigation: SearchHitNavigation? = null,
+    searchSelectionSerial: Long = 0L,
 ) {
     BoxWithConstraints(
-        modifier = Modifier.fillMaxSize().background(ChatCanvas).testTag("chat-root"),
+        modifier = Modifier.fillMaxSize().background(desktopPalette.canvas).testTag("chat-root"),
     ) {
         val narrow = maxWidth < 790.dp
         var sidebarOpen by remember { mutableStateOf(!narrow) }
-        LaunchedEffect(narrow) {
+        LaunchedEffect(narrow, searchSelectionSerial) {
             if (narrow) sidebarOpen = false
         }
         val embeddedSidebar = sidebarOpen && !narrow
@@ -174,6 +171,7 @@ internal fun DesktopChatLayout(
             }
             ConversationPane(
                 profileId = profileId,
+                navigation = searchNavigation,
                 sessions = sessions,
                 chat = chat,
                 narrow = narrow,
@@ -206,7 +204,7 @@ internal fun DesktopChatLayout(
         if (sidebarOpen && narrow) {
             Box(
                 Modifier.fillMaxSize()
-                    .background(Color(0x550E0C14))
+                    .background(Color.Black.copy(alpha = .34f))
                     .clickable { sidebarOpen = false },
             )
             SessionSidebar(
@@ -245,13 +243,13 @@ private fun SessionSidebar(
     var pendingRename by remember { mutableStateOf<SessionInfo?>(null) }
     Surface(
         modifier = modifier,
-        color = ChatPanel,
+        color = desktopPalette.panel,
         elevation = if (elevated) 12.dp else 0.dp,
         shape = if (elevated) RoundedCornerShape(topEnd = 18.dp, bottomEnd = 18.dp) else RoundedCornerShape(0.dp),
     ) {
         Column(
             Modifier.fillMaxSize()
-                .then(if (!elevated) Modifier.border(width = 1.dp, color = ChatLine) else Modifier)
+                .then(if (!elevated) Modifier.border(width = 1.dp, color = desktopPalette.line) else Modifier)
                 .padding(start = SidebarInset, top = 14.dp, bottom = 14.dp),
         ) {
             Row(
@@ -275,10 +273,10 @@ private fun SessionSidebar(
                     enabled = canCreate,
                     modifier = Modifier.weight(1f).height(42.dp).testTag("new-session-button"),
                     colors = ButtonDefaults.buttonColors(
-                        backgroundColor = ChatPurple,
-                        contentColor = Color.White,
-                        disabledBackgroundColor = ChatPurple.copy(alpha = .35f),
-                        disabledContentColor = Color.White,
+                        backgroundColor = desktopPalette.accent,
+                        contentColor = desktopPalette.onAccent,
+                        disabledBackgroundColor = desktopPalette.accentSurface,
+                        disabledContentColor = desktopPalette.muted,
                     ),
                     shape = RoundedCornerShape(12.dp),
                     elevation = ButtonDefaults.elevation(defaultElevation = 0.dp, pressedElevation = 1.dp),
@@ -287,14 +285,14 @@ private fun SessionSidebar(
                 }
                 if (elevated) {
                     TextButton(onClick = onDismiss, modifier = Modifier.testTag("close-sidebar-button")) {
-                        Text("关闭", color = ChatMuted, fontSize = 12.sp)
+                        Text("关闭", color = desktopPalette.muted, fontSize = 12.sp)
                     }
                 }
             }
             Spacer(Modifier.height(14.dp))
             if (sessions.isEmpty()) {
                 Box(Modifier.weight(1f).fillMaxWidth().padding(end = SidebarInset), contentAlignment = Alignment.Center) {
-                    Text("还没有对话", color = ChatMuted, fontSize = 13.sp)
+                    Text("还没有对话", color = desktopPalette.muted, fontSize = 13.sp)
                 }
             } else {
                 Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -309,7 +307,7 @@ private fun SessionSidebar(
                             Row(
                                 modifier = Modifier.fillMaxWidth()
                                     .clip(RoundedCornerShape(11.dp))
-                                    .background(if (selected) ChatPurpleLight else Color.Transparent)
+                                    .background(if (selected) desktopPalette.accentSurface else Color.Transparent)
                                     .clickable { onSelectSession(session.id); onDismiss() }
                                     .padding(start = 11.dp, end = 4.dp, top = 6.dp, bottom = 6.dp)
                                     .testTag("session-item-$index"),
@@ -318,14 +316,14 @@ private fun SessionSidebar(
                                 Column(Modifier.weight(1f).padding(vertical = 4.dp)) {
                                     Text(
                                         session.title.ifBlank { "新会话" },
-                                        color = if (selected) ChatPurple else ChatInk,
+                                        color = if (selected) desktopPalette.accent else desktopPalette.ink,
                                         fontSize = 13.sp,
                                         maxLines = 2,
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                     if (session.entryCount > 0) {
                                         Spacer(Modifier.height(3.dp))
-                                        Text("${session.entryCount} 轮", color = ChatMuted, fontSize = 11.sp)
+                                        Text("${session.entryCount} 轮", color = desktopPalette.muted, fontSize = 11.sp)
                                     }
                                 }
                                 Box {
@@ -335,7 +333,7 @@ private fun SessionSidebar(
                                             .semantics { contentDescription = "会话 ${session.title.ifBlank { "新会话" }} 菜单" }
                                             .testTag("session-menu-${session.id}"),
                                         contentPadding = PaddingValues(0.dp),
-                                    ) { Text("⋯", color = ChatMuted, fontSize = 18.sp) }
+                                    ) { Text("⋯", color = desktopPalette.muted, fontSize = 18.sp) }
                                     DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
                                         DropdownMenuItem(
                                             onClick = {
@@ -465,14 +463,15 @@ private fun SessionListScrollbar(state: LazyListState, modifier: Modifier) {
     val hovered by interaction.collectIsHoveredAsState()
     val dragged by interaction.collectIsDraggedAsState()
     val highlighted = hovered || dragged
-    val style = remember(highlighted) {
+    val palette = desktopPalette
+    val style = remember(highlighted, palette) {
         ScrollbarStyle(
             minimalHeight = 24.dp,
             thickness = SidebarInset,
             shape = SessionThumbShape(if (highlighted) 6.dp else 4.dp),
             hoverDurationMillis = 0,
-            unhoverColor = Color(0xFFA49FAF),
-            hoverColor = Color(0xFF797284),
+            unhoverColor = palette.scrollbar,
+            hoverColor = palette.scrollbarHover,
         )
     }
 
@@ -544,7 +543,7 @@ private fun SessionScrollArrow(
         contentAlignment = Alignment.Center,
     ) {
         if (highlighted || focused) {
-            Text(symbol, fontSize = 9.sp, color = if (enabled) ChatMuted else ChatMuted.copy(alpha = .35f))
+            Text(symbol, fontSize = 9.sp, color = if (enabled) desktopPalette.muted else desktopPalette.muted.copy(alpha = .35f))
         }
     }
 }
@@ -553,6 +552,7 @@ private fun SessionScrollArrow(
 @Composable
 private fun ConversationPane(
     profileId: String,
+    navigation: SearchHitNavigation?,
     sessions: List<SessionInfo>,
     chat: Chat,
     narrow: Boolean,
@@ -581,6 +581,8 @@ private fun ConversationPane(
     modifier: Modifier = Modifier,
 ) {
     val selectedTitle = sessions.firstOrNull { it.selected }?.title?.ifBlank { "新会话" } ?: "新会话"
+    val currentTopActions by rememberUpdatedState(topActions)
+    val toolbarActions = remember { movableContentOf { currentTopActions() } }
     val isExternalDragOver = remember { mutableStateOf(false) }
     val addImagesState = rememberUpdatedState(onAddImages)
     val dragTarget = remember {
@@ -612,7 +614,7 @@ private fun ConversationPane(
     }
     Box(
         modifier.fillMaxSize()
-            .background(ChatCanvas)
+            .background(desktopPalette.canvas)
             .dragAndDropTarget(
                 shouldStartDragAndDrop = { event ->
                     when (val nativeEvent = event.nativeEvent) {
@@ -625,191 +627,207 @@ private fun ConversationPane(
             ),
     ) {
       Column(Modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier.fillMaxWidth().heightIn(min = 62.dp).padding(horizontal = 22.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TextButton(
-                onClick = onToggleSidebar,
-                modifier = Modifier.sizeIn(minWidth = 40.dp, minHeight = 40.dp)
-                    .semantics { contentDescription = if (sidebarOpen) "收起最近对话" else "打开最近对话" }
-                    .testTag("sidebar-toggle"),
-                contentPadding = PaddingValues(0.dp),
-            ) {
-                Text(if (sidebarOpen) "‹" else "☰", color = ChatMuted, fontSize = 19.sp)
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val compact = maxWidth < 640.dp
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth().heightIn(min = if (compact) 40.dp else 62.dp)
+                        .padding(horizontal = if (compact) 12.dp else 22.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(
+                        onClick = onToggleSidebar,
+                        modifier = Modifier.sizeIn(minWidth = 40.dp, minHeight = 40.dp)
+                            .semantics { contentDescription = if (sidebarOpen) "收起最近对话" else "打开最近对话" }
+                            .testTag("sidebar-toggle"),
+                        contentPadding = PaddingValues(0.dp),
+                    ) {
+                        Text(if (sidebarOpen) "‹" else "☰", color = desktopPalette.muted, fontSize = 19.sp)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            selectedTitle,
+                            color = desktopPalette.ink,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (!narrow && !embeddedSidebar && !sidebarOpen) {
+                        TextButton(
+                            onClick = onNewSession,
+                            enabled = canCreate,
+                            modifier = Modifier.testTag("new-session-toolbar-button"),
+                        ) { Text("＋ 新会话", color = desktopPalette.accent, fontSize = 13.sp) }
+                    }
+                    if (!compact) toolbarActions()
+                }
+                if (compact) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically) { toolbarActions() }
+                }
             }
-            Spacer(Modifier.width(8.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    selectedTitle,
-                    color = ChatInk,
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            if (!narrow && !embeddedSidebar && !sidebarOpen) {
-                TextButton(
-                    onClick = onNewSession,
-                    enabled = canCreate,
-                    modifier = Modifier.testTag("new-session-toolbar-button"),
-                ) { Text("＋ 新会话", color = ChatPurple, fontSize = 13.sp) }
-            }
-            topActions()
         }
-        Spacer(Modifier.fillMaxWidth().height(1.dp).background(ChatLine))
+        Spacer(Modifier.fillMaxWidth().height(1.dp).background(desktopPalette.line))
 
         MessageViewport(
             profileId = profileId,
             session = chat.session,
             entryCount = chat.entries.size,
+            navigation = navigation,
             modifier = Modifier.weight(1f).fillMaxWidth(),
         ) {
             if (chat.entries.isEmpty()) {
                 item {
                     Box(Modifier.fillMaxWidth().heightIn(min = 280.dp), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("开始一段对话", color = ChatInk, fontSize = 17.sp)
+                            Text("开始一段对话", color = desktopPalette.ink, fontSize = 17.sp)
                             Spacer(Modifier.height(7.dp))
-                            Text("在下方输入消息。", color = ChatMuted, fontSize = 13.sp)
+                            Text("在下方输入消息。", color = desktopPalette.muted, fontSize = 13.sp)
                             Spacer(Modifier.height(12.dp))
                             OutlinedButton(
                                 onClick = onNewSession,
                                 enabled = canCreate,
                                 modifier = Modifier.testTag("empty-new-session-button"),
                                 shape = RoundedCornerShape(11.dp),
-                            ) { Text("新建会话", color = ChatPurple, fontSize = 13.sp) }
+                            ) { Text("新建会话", color = desktopPalette.accent, fontSize = 13.sp) }
                         }
                     }
                 }
             }
             itemsIndexed(chat.entries, key = { index, _ -> "${chat.session}-$index" }) { index, entry ->
-                Column(Modifier.fillMaxWidth().testTag("message-entry-$index"), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                    if (entry.question.isNotBlank() || entry.attachmentDisplayName != null || entry.attachmentReferences.isNotEmpty()) {
-                        BoxWithConstraints(Modifier.fillMaxWidth()) {
-                            Surface(
-                                modifier = Modifier.align(Alignment.CenterEnd)
-                                    .widthIn(max = minOf(720.dp, maxWidth * .82f))
-                                    .testTag("message-user-$index"),
-                                color = ChatPurpleLight,
-                                shape = RoundedCornerShape(18.dp, 18.dp, 5.dp, 18.dp),
-                            ) {
-                                Column(Modifier.padding(horizontal = 15.dp, vertical = 11.dp)) {
-                                    val references = entry.attachmentReferences.ifEmpty {
-                                        listOfNotNull(entry.attachmentReference)
-                                    }
-                                    references.forEachIndexed { attachmentIndex, reference ->
-                                        val path = runCatching { Path.of(reference) }.getOrNull()
-                                        MessageAttachmentPreview(
-                                            path = path,
-                                            displayName = path?.fileName?.toString()
-                                                ?: if (attachmentIndex == 0) entry.attachmentDisplayName.orEmpty() else "图片",
-                                        )
-                                        if (attachmentIndex < references.lastIndex) Spacer(Modifier.height(5.dp))
-                                    }
-                                    if (references.isEmpty() && entry.attachmentDisplayName != null) {
-                                        Text("图片 · ${entry.attachmentDisplayName}", color = ChatMuted, fontSize = 11.sp)
-                                    }
-                                    if (references.isNotEmpty() && entry.question.isNotBlank()) {
-                                        Spacer(Modifier.height(5.dp))
-                                    }
-                                    if (entry.question.isNotBlank()) {
-                                        CopyableMessage(entry.question) { Text(entry.question, color = ChatInk, fontSize = 14.sp) }
+                SearchHitEntry(index) {
+                    Column(Modifier.fillMaxWidth().testTag("message-entry-$index"), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                        if (entry.question.isNotBlank() || entry.attachmentDisplayName != null || entry.attachmentReferences.isNotEmpty()) {
+                            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                                Surface(
+                                    modifier = Modifier.align(Alignment.CenterEnd)
+                                        .widthIn(max = minOf(720.dp, maxWidth * .82f))
+                                        .testTag("message-user-$index"),
+                                    color = desktopPalette.accentSurface,
+                                    shape = RoundedCornerShape(18.dp, 18.dp, 5.dp, 18.dp),
+                                ) {
+                                    Column(Modifier.padding(horizontal = 15.dp, vertical = 11.dp)) {
+                                        val references = entry.attachmentReferences.ifEmpty {
+                                            listOfNotNull(entry.attachmentReference)
+                                        }
+                                        references.forEachIndexed { attachmentIndex, reference ->
+                                            val path = runCatching { Path.of(reference) }.getOrNull()
+                                            MessageAttachmentPreview(
+                                                path = path,
+                                                displayName = path?.fileName?.toString()
+                                                    ?: if (attachmentIndex == 0) entry.attachmentDisplayName.orEmpty() else "图片",
+                                            )
+                                            if (attachmentIndex < references.lastIndex) Spacer(Modifier.height(5.dp))
+                                        }
+                                        if (references.isEmpty() && entry.attachmentDisplayName != null) {
+                                            Text("图片 · ${entry.attachmentDisplayName}", color = desktopPalette.muted, fontSize = 11.sp)
+                                        }
+                                        if (references.isNotEmpty() && entry.question.isNotBlank()) {
+                                            Spacer(Modifier.height(5.dp))
+                                        }
+                                        if (entry.question.isNotBlank()) {
+                                            CopyableMessage(entry.question) {
+                                                SearchHitText(entry.question, isAnswer = false, color = desktopPalette.ink, fontSize = 14.sp)
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    val renderedState = remember(chat.session, index) {
-                        mutableStateOf(false)
-                    }
-                    val renderCallback by rememberUpdatedState(onMessageRendered)
-                    LaunchedEffect(renderedState.value) {
-                        if (renderedState.value) renderCallback?.invoke(chat.session, index)
-                    }
-                    BoxWithConstraints(Modifier.fillMaxWidth()) {
-                        Surface(
-                            modifier = Modifier.align(Alignment.CenterStart)
-                                .widthIn(max = minOf(760.dp, maxWidth * .86f))
-                                .drawWithContent {
-                                    drawContent()
-                                    if (!renderedState.value && (entry.answer.isNotEmpty() || entry.replyAttachments.isNotEmpty())) {
-                                        renderedState.value = true
+                        val renderedState = remember(chat.session, index) {
+                            mutableStateOf(false)
+                        }
+                        val renderCallback by rememberUpdatedState(onMessageRendered)
+                        LaunchedEffect(renderedState.value) {
+                            if (renderedState.value) renderCallback?.invoke(chat.session, index)
+                        }
+                        BoxWithConstraints(Modifier.fillMaxWidth()) {
+                            Surface(
+                                modifier = Modifier.align(Alignment.CenterStart)
+                                    .widthIn(max = minOf(760.dp, maxWidth * .86f))
+                                    .drawWithContent {
+                                        drawContent()
+                                        if (!renderedState.value && (entry.answer.isNotEmpty() || entry.replyAttachments.isNotEmpty())) {
+                                            renderedState.value = true
+                                        }
                                     }
-                                }
-                                .testTag("message-assistant-$index"),
-                            color = ChatAssistant,
-                            shape = RoundedCornerShape(5.dp, 18.dp, 18.dp, 18.dp),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, ChatLine),
-                        ) {
-                            Column(Modifier.padding(horizontal = 15.dp, vertical = 12.dp)) {
-                                if (entry.answer.isNotEmpty()) {
-                                    CopyableMessage(entry.answer) { assistantContent(entry) }
-                                } else {
-                                    assistantContent(entry)
-                                }
-                                if (entry.status != "已完成") {
-                                    Spacer(Modifier.height(7.dp))
-                                    val entryProgress = progress?.takeIf { it.entryIndex == index }
-                                    var elapsedSeconds by remember(chat.session, index) {
-                                        mutableIntStateOf(0)
+                                    .testTag("message-assistant-$index"),
+                                color = desktopPalette.panel,
+                                contentColor = desktopPalette.ink,
+                                shape = RoundedCornerShape(5.dp, 18.dp, 18.dp, 18.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, desktopPalette.line),
+                            ) {
+                                Column(Modifier.padding(horizontal = 15.dp, vertical = 12.dp)) {
+                                    if (entry.answer.isNotEmpty()) {
+                                        CopyableMessage(entry.answer) { assistantContent(entry) }
+                                    } else {
+                                        assistantContent(entry)
                                     }
-                                    LaunchedEffect(chat.session, index, entryProgress?.stage, entryProgress?.stageStartedAtNanos, entry.status) {
-                                        if (entry.status == "发送中" && entryProgress != null && entryProgress.stage.isNotBlank()) {
-                                            while (true) {
-                                                elapsedSeconds = ((System.nanoTime() - entryProgress.stageStartedAtNanos)
-                                                    .coerceAtLeast(0L) / 1_000_000_000L).toInt()
-                                                delay(1000)
+                                    if (entry.status != "已完成") {
+                                        Spacer(Modifier.height(7.dp))
+                                        val entryProgress = progress?.takeIf { it.entryIndex == index }
+                                        var elapsedSeconds by remember(chat.session, index) {
+                                            mutableIntStateOf(0)
+                                        }
+                                        LaunchedEffect(chat.session, index, entryProgress?.stage, entryProgress?.stageStartedAtNanos, entry.status) {
+                                            if (entry.status == "发送中" && entryProgress != null && entryProgress.stage.isNotBlank()) {
+                                                while (true) {
+                                                    elapsedSeconds = ((System.nanoTime() - entryProgress.stageStartedAtNanos)
+                                                        .coerceAtLeast(0L) / 1_000_000_000L).toInt()
+                                                    delay(1000)
+                                                }
                                             }
                                         }
-                                    }
-                                    val failed = entry.status.startsWith("发送失败：") ||
-                                        entry.status.startsWith("未发送：") ||
-                                        entry.status == "上次回复未确认"
-                                    val active = entry.status == "发送中" && entryProgress != null
-                                    var detailsExpanded by remember(chat.session, index) {
-                                        mutableStateOf(false)
-                                    }
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        if (active) CircularProgressIndicator(
-                                            modifier = Modifier.size(12.dp).testTag("message-progress-$index"),
-                                            color = ChatPurple,
-                                            strokeWidth = 1.5.dp,
-                                        )
-                                        if (active) Spacer(Modifier.width(6.dp))
-                                        Text(
-                                            when {
-                                                active -> "${entryProgress!!.stage} · ${elapsedSeconds} 秒"
-                                                failed -> entryProgress?.failureSummary ?: failureSummary(entry.status)
-                                                else -> entry.status
-                                            },
-                                            color = ChatMuted,
-                                            fontSize = 11.sp,
-                                        )
-                                        if (failed) {
-                                            TextButton(
-                                                onClick = { detailsExpanded = !detailsExpanded },
-                                                contentPadding = PaddingValues(horizontal = 5.dp, vertical = 0.dp),
-                                                modifier = Modifier.testTag("failure-details-toggle-$index"),
-                                            ) { Text(if (detailsExpanded) "收起详情" else "查看详情", color = ChatPurple, fontSize = 11.sp) }
+                                        val failed = entry.status.startsWith("发送失败：") ||
+                                            entry.status.startsWith("未发送：") ||
+                                            entry.status == "上次回复未确认"
+                                        val active = entry.status == "发送中" && entryProgress != null
+                                        var detailsExpanded by remember(chat.session, index) {
+                                            mutableStateOf(false)
                                         }
-                                        if (canRetry && !active && failed) {
-                                            Spacer(Modifier.width(6.dp))
-                                            TextButton(
-                                                onClick = { onRetry(entry) },
-                                                contentPadding = PaddingValues(horizontal = 5.dp, vertical = 0.dp),
-                                                modifier = Modifier.testTag("retry-message-$index"),
-                                            ) { Text("重试", color = ChatPurple, fontSize = 12.sp) }
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            if (active) CircularProgressIndicator(
+                                                modifier = Modifier.size(12.dp).testTag("message-progress-$index"),
+                                                color = desktopPalette.accent,
+                                                strokeWidth = 1.5.dp,
+                                            )
+                                            if (active) Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                when {
+                                                    active -> "${entryProgress!!.stage} · ${elapsedSeconds} 秒"
+                                                    failed -> entryProgress?.failureSummary ?: failureSummary(entry.status)
+                                                    else -> entry.status
+                                                },
+                                                color = desktopPalette.muted,
+                                                fontSize = 11.sp,
+                                            )
+                                            if (failed) {
+                                                TextButton(
+                                                    onClick = { detailsExpanded = !detailsExpanded },
+                                                    contentPadding = PaddingValues(horizontal = 5.dp, vertical = 0.dp),
+                                                    modifier = Modifier.testTag("failure-details-toggle-$index"),
+                                                ) { Text(if (detailsExpanded) "收起详情" else "查看详情", color = desktopPalette.accent, fontSize = 11.sp) }
+                                            }
+                                            if (canRetry && !active && failed) {
+                                                Spacer(Modifier.width(6.dp))
+                                                TextButton(
+                                                    onClick = { onRetry(entry) },
+                                                    contentPadding = PaddingValues(horizontal = 5.dp, vertical = 0.dp),
+                                                    modifier = Modifier.testTag("retry-message-$index"),
+                                                ) { Text("重试", color = desktopPalette.accent, fontSize = 12.sp) }
+                                            }
                                         }
-                                    }
-                                    if (failed && detailsExpanded) {
-                                        Text(
-                                            entry.status.substringAfter('：', entry.status),
-                                            color = ChatMuted,
-                                            fontSize = 11.sp,
-                                            modifier = Modifier.fillMaxWidth().testTag("failure-details-$index"),
-                                        )
+                                        if (failed && detailsExpanded) {
+                                            Text(
+                                                entry.status.substringAfter('：', entry.status),
+                                                color = desktopPalette.muted,
+                                                fontSize = 11.sp,
+                                                modifier = Modifier.fillMaxWidth().testTag("failure-details-$index"),
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -837,13 +855,13 @@ private fun ConversationPane(
       }
       if (isExternalDragOver.value) {
           Box(
-              Modifier.fillMaxSize().background(ChatPurple.copy(alpha = .12f)).testTag("external-drop-overlay"),
+              Modifier.fillMaxSize().background(desktopPalette.accent.copy(alpha = .12f)).testTag("external-drop-overlay"),
               contentAlignment = Alignment.Center,
           ) {
-              Surface(color = ChatPanel, shape = RoundedCornerShape(14.dp), elevation = 4.dp) {
+              Surface(color = desktopPalette.panel, shape = RoundedCornerShape(14.dp), elevation = 4.dp) {
                   Text(
                       "松开以添加图片",
-                      color = ChatPurple,
+                      color = desktopPalette.accent,
                       fontSize = 15.sp,
                       modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
                   )
@@ -876,7 +894,7 @@ private fun CopyableMessage(text: String, content: @Composable () -> Unit) {
         onClick = { messageClipboard.setText(AnnotatedString(text)) },
         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
         modifier = Modifier.height(28.dp),
-    ) { Text("复制正文", color = ChatPurple, fontSize = 11.sp) }
+    ) { Text("复制正文", color = desktopPalette.accent, fontSize = 11.sp) }
     if (clipboardBusy) Text("剪贴板占用中，请再试一次。", color = MaterialTheme.colors.error, fontSize = 11.sp)
 }
 
@@ -925,19 +943,23 @@ internal fun Composer(
 ) {
     Surface(
         modifier = modifier.testTag("composer"),
-        color = ChatPanel,
+        color = desktopPalette.panel,
         shape = RoundedCornerShape(18.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, ChatLine),
+        border = androidx.compose.foundation.BorderStroke(1.dp, desktopPalette.line),
         elevation = 1.dp,
     ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-            selectedImages.forEachIndexed { index, path ->
-                SelectedImagePreview(
-                    path = path,
-                    onRemove = { onRemoveImagePath?.invoke(path) ?: onRemoveImage() },
-                    removeTag = if (index == 0) "remove-image-button" else "remove-image-button-$index",
-                )
-                Spacer(Modifier.height(8.dp))
+            if (selectedImages.isNotEmpty()) {
+                Column(Modifier.heightIn(max = 156.dp).verticalScroll(rememberScrollState())) {
+                    selectedImages.forEachIndexed { index, path ->
+                        SelectedImagePreview(
+                            path = path,
+                            onRemove = { onRemoveImagePath?.invoke(path) ?: onRemoveImage() },
+                            removeTag = if (index == 0) "remove-image-button" else "remove-image-button-$index",
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
+                }
             }
             Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
                 OutlinedButton(
@@ -945,7 +967,7 @@ internal fun Composer(
                     modifier = Modifier.size(39.dp).testTag("choose-image-button"),
                     contentPadding = PaddingValues(0.dp),
                     shape = CircleShape,
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = ChatPurple),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = desktopPalette.accent),
                 ) { Text("＋", fontSize = 21.sp) }
                 BasicTextField(
                     value = draft,
@@ -974,14 +996,14 @@ internal fun Composer(
                             } else false
                         }
                         .testTag("composer-field"),
-                    textStyle = TextStyle(color = ChatInk, fontSize = 14.sp, lineHeight = 20.sp),
-                    cursorBrush = androidx.compose.ui.graphics.SolidColor(ChatPurple),
+                    textStyle = TextStyle(color = desktopPalette.ink, fontSize = 14.sp, lineHeight = 20.sp),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(desktopPalette.accent),
                     maxLines = 4,
                     decorationBox = { inner ->
                         Box {
                             if (draft.text.isEmpty()) Text(
                                 if (selectedImages.isEmpty()) "输入消息…（Enter 发送，Shift+Enter 换行）" else "添加图片说明…",
-                                color = ChatMuted,
+                                color = desktopPalette.muted,
                                 fontSize = 13.sp,
                             )
                             inner()
@@ -994,10 +1016,10 @@ internal fun Composer(
                     modifier = Modifier.height(39.dp).widthIn(min = 78.dp).testTag("send-button"),
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(
-                        backgroundColor = ChatPurple,
-                        contentColor = Color.White,
-                        disabledBackgroundColor = ChatPurple.copy(alpha = .35f),
-                        disabledContentColor = Color.White,
+                        backgroundColor = desktopPalette.accent,
+                        contentColor = desktopPalette.onAccent,
+                        disabledBackgroundColor = desktopPalette.accentSurface,
+                        disabledContentColor = desktopPalette.muted,
                     ),
                     elevation = ButtonDefaults.elevation(defaultElevation = 0.dp, pressedElevation = 1.dp),
                 ) { Text("发送", fontSize = 13.sp) }
@@ -1013,11 +1035,11 @@ private fun SelectedImagePreview(path: Path, onRemove: () -> Unit, removeTag: St
         bitmap = withContext(Dispatchers.IO) { readBoundedImagePreview(path) }
     }
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(ChatCanvas).padding(7.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(desktopPalette.canvas).padding(7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
-            Modifier.size(56.dp).clip(RoundedCornerShape(8.dp)).background(Color(0xFFECE9F1)),
+            Modifier.size(56.dp).clip(RoundedCornerShape(8.dp)).background(desktopPalette.thumbnail),
             contentAlignment = Alignment.Center,
         ) {
             val image = bitmap
@@ -1026,17 +1048,17 @@ private fun SelectedImagePreview(path: Path, onRemove: () -> Unit, removeTag: St
                 contentDescription = "待发送图片预览",
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,
-            ) else Text("图片", color = ChatMuted, fontSize = 11.sp)
+            ) else Text("图片", color = desktopPalette.muted, fontSize = 11.sp)
         }
         Text(
             path.fileName?.toString().orEmpty(),
             modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
-            color = ChatInk,
+            color = desktopPalette.ink,
             fontSize = 12.sp,
             maxLines = 1,
         )
         TextButton(onClick = onRemove, modifier = Modifier.testTag(removeTag)) {
-            Text("移除", color = ChatMuted, fontSize = 12.sp)
+            Text("移除", color = desktopPalette.muted, fontSize = 12.sp)
         }
     }
 }
@@ -1048,11 +1070,11 @@ private fun MessageAttachmentPreview(path: Path?, displayName: String) {
         bitmap = path?.let { withContext(Dispatchers.IO) { readBoundedImagePreview(it) } }
     }
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(9.dp)).background(ChatCanvas).padding(5.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(9.dp)).background(desktopPalette.canvas).padding(5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
-            Modifier.size(40.dp).clip(RoundedCornerShape(6.dp)).background(Color(0xFFECE9F1)),
+            Modifier.size(40.dp).clip(RoundedCornerShape(6.dp)).background(desktopPalette.thumbnail),
             contentAlignment = Alignment.Center,
         ) {
             val image = bitmap
@@ -1061,12 +1083,12 @@ private fun MessageAttachmentPreview(path: Path?, displayName: String) {
                 contentDescription = "图片附件预览",
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,
-            ) else Text("图片", color = ChatMuted, fontSize = 10.sp)
+            ) else Text("图片", color = desktopPalette.muted, fontSize = 10.sp)
         }
         Text(
             displayName.ifBlank { "图片" },
             modifier = Modifier.weight(1f).padding(start = 8.dp),
-            color = ChatMuted,
+            color = desktopPalette.muted,
             fontSize = 11.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,

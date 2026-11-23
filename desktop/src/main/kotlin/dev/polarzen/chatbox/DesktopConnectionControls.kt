@@ -34,11 +34,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import java.awt.Desktop
@@ -58,7 +58,7 @@ internal fun DesktopConnectionControls(connection: DesktopConnection) {
     val activeKey = connection.keyList.keys.firstOrNull { it.id == connection.keyList.activeId }
     val statusColor = when {
         connection.verifying -> MaterialTheme.colors.primary
-        connection.connected -> Color(0xFF278454)
+        connection.connected -> desktopPalette.success
         else -> MaterialTheme.colors.error
     }
     val statusText = when {
@@ -416,6 +416,10 @@ private fun ConnectionSettingsDialog(
     var addressDraft by remember(connection.profileId, connection.address) { mutableStateOf(connection.address) }
     var localError by remember { mutableStateOf(false) }
     val selectedProfile = connection.profiles.firstOrNull { it.id == connection.profileId }
+    val addressCaption = MaterialTheme.typography.caption.copy(
+        color = desktopPalette.accent,
+        textDecoration = TextDecoration.Underline,
+    )
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -428,7 +432,7 @@ private fun ConnectionSettingsDialog(
                         connection.connected -> "连接已验证"
                         else -> "未连接"
                     },
-                    color = if (connection.connected) Color(0xFF278454) else MaterialTheme.colors.onSurface,
+                    color = if (connection.connected) desktopPalette.success else MaterialTheme.colors.onSurface,
                     style = MaterialTheme.typography.subtitle1,
                 )
                 if (connection.error != null) {
@@ -452,7 +456,7 @@ private fun ConnectionSettingsDialog(
                             )
                             Column {
                                 Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                if (profile.address.isNotBlank()) Text(profile.address, style = MaterialTheme.typography.caption,
+                                if (profile.address.isNotBlank()) Text(profile.address, style = addressCaption,
                                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
@@ -471,7 +475,7 @@ private fun ConnectionSettingsDialog(
                             )
                             Column {
                                 Text("AstrBot Launcher · ${instance.identity.take(8)}")
-                                Text(instance.url, style = MaterialTheme.typography.caption)
+                                Text(instance.url, style = addressCaption)
                             }
                         }
                     }

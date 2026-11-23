@@ -1,22 +1,29 @@
 package dev.polarzen.chatbox
 
 import androidx.compose.material.AlertDialog
-import androidx.compose.material.MaterialTheme
+import androidx.compose.material.Icon
+import androidx.compose.material.IconButton
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.input.key.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
@@ -87,23 +94,52 @@ fun main(args: Array<String>) {
     val keys = NamedKeys(dataDir, credentials)
     val replyImageCache = ReplyImageCache(dataDir.resolve("reply-images"))
     try {
+        val appearanceStore = DesktopAppearanceStore(dataDir)
         application {
+            var appearance by remember { mutableStateOf(appearanceStore.load()) }
+            var appearanceError by remember { mutableStateOf<String?>(null) }
+            val historySearchOpen = remember { mutableStateOf(false) }
             Window(
                 onCloseRequest = ::exitApplication,
                 title = "chatbox",
+                onPreviewKeyEvent = { event ->
+                    if (event.opensHistorySearch() && lockAcquired && store != null) {
+                        historySearchOpen.value = true
+                        true
+                    } else false
+                },
                 state = rememberWindowState(size = DpSize(1000.dp, 760.dp)),
             ) {
+                DesktopWindowEffects(window, appearance) { appearanceError = it }
                 LaunchedEffect(window) {
                     window.minimumSize = Dimension(480, 400)
                 }
-                MaterialTheme {
+                DesktopTheme(appearance.dark) {
                     Surface(Modifier.fillMaxSize()) {
                         when {
                             !lockAcquired && lockFailure == null -> Text("Chatbox 已在运行，请使用已打开的窗口。", Modifier.padding(16.dp))
                             !lockAcquired -> Text("无法锁定本地聊天历史文件，请检查数据目录权限。", Modifier.padding(16.dp))
                             store == null -> Text("无法读取本地聊天历史。请先备份历史文件，再检查数据目录。", Modifier.padding(16.dp))
-                            else -> DesktopScreen(store, keys, replyImageCache)
+                            else -> DesktopScreen(store, keys, replyImageCache, window, historySearchOpen) {
+                                DesktopAppearanceControls(
+                                    appearance,
+                                    onPreview = { appearance = it },
+                                    onCommit = { updated ->
+                                        appearance = updated
+                                        if (runCatching { appearanceStore.save(updated) }.isFailure) {
+                                            appearanceError = "无法保存窗口外观设置。"
+                                        }
+                                    },
+                                )
+                            }
                         }
+                    }
+                    appearanceError?.let { message ->
+                        AlertDialog(
+                            onDismissRequest = { appearanceError = null },
+                            text = { Text(message) },
+                            confirmButton = { TextButton(onClick = { appearanceError = null }) { Text("关闭") } },
+                        )
                     }
                 }
             }
@@ -129,6 +165,13 @@ private data class SendOperation(
     val cancellation: AtomicBoolean = AtomicBoolean(false),
 )
 
+private fun SendOperation.visibleChat(stored: Chat): Chat {
+    if (entryIndex !in stored.entries.indices) return stored
+    return stored.copy(entries = stored.entries.toMutableList().also { entries ->
+        entries[entryIndex] = entries[entryIndex].copy(answer = answer, replyAttachments = replyAttachments)
+    })
+}
+
 private data class RetryConfirmation(val key: SessionKey, val entry: Entry)
 private data class TimedEntryKey(val key: SessionKey, val index: Int)
 private data class ProgressStage(val label: String, val failureLabel: String)
@@ -139,9 +182,19 @@ private data class SourceImageValidation(val valid: List<Path>, val rejected: Li
 
 internal data class SourceImageAddition(val paths: List<Path>, val notice: String?)
 
+private fun KeyEvent.opensHistorySearch(): Boolean =
+    type == KeyEventType.KeyDown && key == Key.K && isCtrlPressed
+
 /** Production screen shared with the desktop UI harness. */
 @Composable
-internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache: ReplyImageCache) {
+internal fun DesktopScreen(
+    store: DesktopStore,
+    keys: NamedKeys,
+    replyImageCache: ReplyImageCache,
+    parentWindow: java.awt.Window? = null,
+    historySearchOpen: MutableState<Boolean> = remember { mutableStateOf(false) },
+    appearanceActions: @Composable () -> Unit = {},
+) {
     val replyAudioCache = remember(replyImageCache) { ReplyAudioCache(replyImageCache.directory.resolveSibling("reply-audio")) }
     val connection = rememberDesktopConnection(store, keys)
     val sessionsRevision = remember { mutableIntStateOf(0) }
@@ -149,6 +202,11 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
     val selectedImages = remember { mutableStateMapOf<SessionKey, List<Path>>() }
     val deletedSessionKeys = remember { ConcurrentHashMap.newKeySet<SessionKey>() }
     val chats = remember { mutableStateMapOf<SessionKey, Chat>() }
+    val unsavedReplies = remember { mutableStateMapOf<SessionKey, Chat>() }
+    fun latestChat(key: SessionKey): Chat {
+        val persisted = store.sessionContent(key.profileId, key.sessionId)
+        return unsavedReplies[key] ?: persisted
+    }
     val notices = remember { mutableStateMapOf<SessionKey, String>() }
     var sending by remember { mutableStateOf<SendOperation?>(null) }
     val activeOperationId = remember { AtomicInteger(0) }
@@ -165,6 +223,9 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
     var fetchingAttachments by remember { mutableStateOf<Set<ReplyAttachmentKey>>(emptySet()) }
 
     val profileId = connection.profileId
+    var searchOpen by historySearchOpen
+    var searchSerial by remember { mutableStateOf(0L) }
+    var searchDestination by remember(profileId) { mutableStateOf<Pair<SessionKey, SearchHitNavigation>?>(null) }
     val selectedProfile = connection.profiles.firstOrNull { it.id == profileId }
     val sessions = remember(profileId, connection.profiles, sessionsRevision.intValue) {
         profileId.takeIf(String::isNotBlank)?.let { runCatching { store.sessions(it) }.getOrDefault(emptyList()) }
@@ -178,17 +239,7 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
     val storedChat = if (profileId.isNotBlank() && selectedSessionId.isNotBlank()) {
         chats[currentKey] ?: runCatching { store.sessionContent(profileId, selectedSessionId) }.getOrDefault(Chat(selectedSessionId))
     } else Chat("")
-    val liveOperation = sending?.takeIf { it.key == currentKey }
-    val chat = liveOperation?.let { operation ->
-        if (operation.entryIndex !in storedChat.entries.indices) storedChat
-        else storedChat.copy(entries = storedChat.entries.toMutableList().also { entries ->
-            val storedEntry = entries[operation.entryIndex]
-            entries[operation.entryIndex] = storedEntry.copy(
-                answer = operation.answer,
-                replyAttachments = operation.replyAttachments,
-            )
-        })
-    } ?: storedChat
+    val chat = sending?.takeIf { it.key == currentKey }?.visibleChat(storedChat) ?: storedChat
     val draft = drafts[currentKey] ?: TextFieldValue()
     val currentImages = selectedImages[currentKey].orEmpty()
     val isOffline = selectedProfile?.offlineOnly == true
@@ -215,7 +266,7 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
                 isMultiSelectionEnabled = true
                 fileFilter = FileNameExtensionFilter("PNG / JPEG 图片", "png", "jpg", "jpeg")
             }
-            if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
+            if (chooser.showOpenDialog(parentWindow) == JFileChooser.APPROVE_OPTION) {
                 val selected = chooser.selectedFiles.takeIf { it.isNotEmpty() }
                     ?.toList()
                     ?: listOfNotNull(chooser.selectedFile)
@@ -315,7 +366,7 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
             attachmentDisplayName = validatedImages.firstOrNull()?.fileName?.toString(),
             attachmentReferences = references,
         )
-        val current = runCatching { store.sessionContent(targetKey.profileId, targetKey.sessionId) }
+        val current = runCatching { latestChat(targetKey) }
             .getOrElse {
                 notices[targetKey] = "无法读取本地会话，消息未发送。"
                 return
@@ -330,6 +381,7 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
             return
         }
 
+        unsavedReplies.remove(targetKey)
         chats[targetKey] = pending
         sessionsRevision.intValue++
         notices.remove(targetKey)
@@ -466,6 +518,7 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
             if (failure != null && operationIsActive()) invalidateOnFailure(target, failure)
             SwingUtilities.invokeLater {
                 if (!operationIsActive()) return@invokeLater
+                if (saved.isFailure) unsavedReplies[targetKey] = completed
                 chats[targetKey] = completed
                 sessionsRevision.intValue++
                 val operation = sending
@@ -493,138 +546,203 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
         }
     }
 
+    fun selectSearchHit(hit: HistoryHit, query: String): Boolean {
+        val key = SessionKey(hit.profileId, hit.sessionId)
+        val selected = runCatching {
+            synchronized(store) {
+                if (hit.profileId != connection.profileId || hit.profileId != store.activeProfileId) return@synchronized null
+                val stored = latestChat(key)
+                val visible = sending?.takeIf { it.key == key }?.visibleChat(stored) ?: stored
+                val source = when (hit.side) {
+                    HistorySide.TITLE -> store.sessions(key.profileId).find { it.id == key.sessionId }?.title
+                    HistorySide.USER -> visible.entries.getOrNull(hit.entryIndex)?.question
+                    HistorySide.ASSISTANT -> visible.entries.getOrNull(hit.entryIndex)?.answer
+                }
+                if (query.isBlank() || source == null || hit.start < 0 || hit.endExclusive > source.length ||
+                    hit.endExclusive - hit.start != query.length ||
+                    !source.regionMatches(hit.start, query, 0, query.length, ignoreCase = true)
+                ) return@synchronized null
+                if (store.profile(key.profileId)?.currentSession != key.sessionId) store.selectSession(key.profileId, key.sessionId)
+                stored
+            }
+        }.getOrNull()
+        if (selected == null) {
+            notices[currentKey] = "搜索结果已变更或无法打开，请重新选择。"
+            sessionsRevision.intValue++
+            return false
+        }
+        chats[key] = selected
+        searchSerial++
+        searchDestination = if (hit.side == HistorySide.TITLE) null else key to SearchHitNavigation(
+            searchSerial, hit.entryIndex, hit.side == HistorySide.ASSISTANT, hit.start, hit.endExclusive,
+        )
+        sessionsRevision.intValue++
+        return true
+    }
+
     val canCreate = profileId.isNotBlank() && selectedProfile != null && !selectedProfile.offlineOnly
     val canSend = selectedSessionId.isNotBlank() && !isBusy && !isOffline && connection.connected && !connection.verifying &&
         (draft.text.isNotBlank() || currentImages.isNotEmpty())
     val canRetry = !isBusy && !isOffline && connection.connected && !connection.verifying
 
-    MaterialTheme {
-        Surface(Modifier.fillMaxSize()) {
-            DesktopChatLayout(
-                profileId = profileId,
-                sessions = sessions,
-                chat = chat,
-                onSelectSession = { sessionId ->
-                    if (profileId.isNotBlank()) {
-                        runCatching {
-                            store.selectSession(profileId, sessionId)
-                            val key = SessionKey(profileId, sessionId)
-                            val selected = chats[key].takeIf { sending?.key == key }
-                                ?: store.sessionContent(profileId, sessionId)
-                            chats[key] = selected
-                            sessionsRevision.intValue++
-                        }.onFailure { notices[currentKey] = "无法打开所选会话。" }
-                    }
-                },
-                onDeleteSession = { sessionId ->
-                    if (profileId.isNotBlank() && sessions.any { it.id == sessionId }) {
+    Surface(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
+        if (event.opensHistorySearch()) {
+            searchOpen = true
+            true
+        } else false
+    }) {
+        DesktopChatLayout(
+            searchSelectionSerial = searchSerial,
+            searchNavigation = searchDestination?.takeIf { it.first == currentKey }?.second,
+            profileId = profileId,
+            sessions = sessions,
+            chat = chat,
+            onSelectSession = { sessionId ->
+                if (profileId.isNotBlank()) {
+                    runCatching {
+                        store.selectSession(profileId, sessionId)
+                        searchDestination = null
                         val key = SessionKey(profileId, sessionId)
-                        runCatching { store.deleteSession(profileId, sessionId) }
-                            .onSuccess {
-                                deletedSessionKeys.add(key)
-                                sending?.takeIf { it.key == key }?.let { operation ->
-                                    operation.cancellation.set(true)
-                                    activeOperationId.compareAndSet(operation.id, 0)
-                                    sending = null
-                                }
-                                if (retryConfirmation?.key == key) retryConfirmation = null
-                                chats.remove(key)
-                                selectedImages.remove(key)
-                                drafts.remove(key)
-                                notices.remove(key)
-                                fetchingAttachments = fetchingAttachments.filterNot { it.profileId == key.profileId && it.sessionId == key.sessionId }.toSet()
-                                attachmentFailures = attachmentFailures.filterKeys { it.profileId != key.profileId || it.sessionId != key.sessionId }
-                                cacheGeneration = cacheGeneration.filterKeys { it.profileId != key.profileId || it.sessionId != key.sessionId }
-                                timingByEntry.keys.removeIf { it.key == key }
-                                failedProgressByEntry.keys.removeIf { it.key == key }
-                                sessionsRevision.intValue++
+                        chats[key] = latestChat(key)
+                        sessionsRevision.intValue++
+                    }.onFailure { notices[currentKey] = "无法打开所选会话。" }
+                }
+            },
+            onDeleteSession = { sessionId ->
+                if (profileId.isNotBlank() && sessions.any { it.id == sessionId }) {
+                    val key = SessionKey(profileId, sessionId)
+                    runCatching { store.deleteSession(profileId, sessionId) }
+                        .onSuccess {
+                            deletedSessionKeys.add(key)
+                        if (searchDestination?.first == key) searchDestination = null
+                            sending?.takeIf { it.key == key }?.let { operation ->
+                                operation.cancellation.set(true)
+                                activeOperationId.compareAndSet(operation.id, 0)
+                                sending = null
                             }
-                            .onFailure { notices[currentKey] = "删除会话失败：${safeHistoryFailureMessage(it, "删除")}" }
-                    }
-                },
-                onRenameSession = { sessionId, name ->
-                    runCatching { store.renameSession(profileId, sessionId, name) }
-                        .onSuccess { sessionsRevision.intValue++ }
-                        .exceptionOrNull()?.let { safeHistoryFailureMessage(it, "写入") }
-                },
-                onNewSession = {
-                    if (canCreate) {
-                        runCatching {
-                            val created = store.createSession(profileId)
-                            chats[SessionKey(profileId, created.session)] = created
+                            if (retryConfirmation?.key == key) retryConfirmation = null
+                            chats.remove(key)
+                            unsavedReplies.remove(key)
+                            selectedImages.remove(key)
+                            drafts.remove(key)
+                            notices.remove(key)
+                            fetchingAttachments = fetchingAttachments.filterNot { it.profileId == key.profileId && it.sessionId == key.sessionId }.toSet()
+                            attachmentFailures = attachmentFailures.filterKeys { it.profileId != key.profileId || it.sessionId != key.sessionId }
+                            cacheGeneration = cacheGeneration.filterKeys { it.profileId != key.profileId || it.sessionId != key.sessionId }
+                            timingByEntry.keys.removeIf { it.key == key }
+                            failedProgressByEntry.keys.removeIf { it.key == key }
                             sessionsRevision.intValue++
-                            retryConfirmation = null
-                        }.onFailure { notices[currentKey] = "无法创建新会话。" }
-                    }
-                },
-                canCreate = canCreate,
-                topActions = { DesktopConnectionControls(connection) },
-                draft = draft,
-                onDraft = { value -> drafts[currentKey] = value },
-                selectedImage = currentImages.firstOrNull(),
-                selectedImages = currentImages,
-                onChooseImage = ::chooseImages,
-                onAddImages = { files -> addValidatedImages(currentKey, files) },
-                onRemoveImage = { selectedImages.remove(currentKey) },
-                onRemoveImagePath = { path ->
-                    val remaining = selectedImages[currentKey].orEmpty().filterNot { it == path }
-                    if (remaining.isEmpty()) selectedImages.remove(currentKey) else selectedImages[currentKey] = remaining
-                },
-                onSend = { dispatch(draft.text, currentImages) },
-                canSend = canSend,
-                notice = notices[currentKey],
-                onRetry = { entry ->
-                    if (canRetry && chat.entries.any { it === entry || it == entry }) {
-                        retryConfirmation = RetryConfirmation(currentKey, entry)
-                    }
-                },
-                canRetry = canRetry,
-                assistantContent = { item ->
-                    DesktopReplyContent(
-                        profileId = currentKey.profileId,
-                        sessionId = currentKey.sessionId,
-                        answer = item.answer,
-                        attachments = item.replyAttachments,
-                        imageCache = replyImageCache,
-                        audioCache = replyAudioCache,
-                        cacheGeneration = cacheGeneration,
-                        failures = attachmentFailures,
-                        retrying = fetchingAttachments,
-                        retryEnabled = canRetry,
-                        onRetry = ::retryReplyAttachment,
-                    )
-                },
-                onMessageRendered = { sessionId, entryIndex ->
-                    if (profileId.isNotBlank() && sessionId == currentKey.sessionId) {
-                        timingByEntry.remove(TimedEntryKey(currentKey, entryIndex))?.firstDrawn()
-                    }
-                },
-                progress = currentProgress,
-            )
-
-            val pendingRetry = retryConfirmation?.takeIf { it.key == currentKey }
-            if (pendingRetry != null) {
-                AlertDialog(
-                    onDismissRequest = { retryConfirmation = null },
-                    title = { Text("重新发送？") },
-                    text = { Text("此条消息可能已到达 AstrBot，继续可能重复执行。") },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            retryConfirmation = null
-                            val references = pendingRetry.entry.attachmentReferences.ifEmpty {
-                                listOfNotNull(pendingRetry.entry.attachmentReference)
-                            }
-                            val images = references.mapNotNull { runCatching { Path.of(it) }.getOrNull() }
-                            if (images.size != references.size) {
-                                notices[pendingRetry.key] = "无法读取原始图片，请确认文件仍然存在。"
-                            } else {
-                                dispatch(pendingRetry.entry.question, images, pendingRetry.entry, pendingRetry.key)
-                            }
-                        }, enabled = canRetry) { Text("确认重发") }
-                    },
-                    dismissButton = { TextButton(onClick = { retryConfirmation = null }) { Text("取消") } },
+                        }
+                        .onFailure { notices[currentKey] = "删除会话失败：${safeHistoryFailureMessage(it, "删除")}" }
+                }
+            },
+            onRenameSession = { sessionId, name ->
+                runCatching { store.renameSession(profileId, sessionId, name) }
+                    .onSuccess { sessionsRevision.intValue++ }
+                    .exceptionOrNull()?.let { safeHistoryFailureMessage(it, "写入") }
+            },
+            onNewSession = {
+                if (canCreate) {
+                    runCatching {
+                        val created = store.createSession(profileId)
+                        searchDestination = null
+                        chats[SessionKey(profileId, created.session)] = created
+                        sessionsRevision.intValue++
+                        retryConfirmation = null
+                    }.onFailure { notices[currentKey] = "无法创建新会话。" }
+                }
+            },
+            canCreate = canCreate,
+            topActions = {
+                IconButton(
+                    onClick = { searchOpen = true },
+                    modifier = Modifier.size(36.dp).testTag("history-search-open"),
+                ) { Icon(Icons.Filled.Search, contentDescription = "搜索聊天记录 (Ctrl+K)") }
+                appearanceActions()
+                DesktopConnectionControls(connection)
+            },
+            draft = draft,
+            onDraft = { value -> drafts[currentKey] = value },
+            selectedImage = currentImages.firstOrNull(),
+            selectedImages = currentImages,
+            onChooseImage = ::chooseImages,
+            onAddImages = { files -> addValidatedImages(currentKey, files) },
+            onRemoveImage = { selectedImages.remove(currentKey) },
+            onRemoveImagePath = { path ->
+                val remaining = selectedImages[currentKey].orEmpty().filterNot { it == path }
+                if (remaining.isEmpty()) selectedImages.remove(currentKey) else selectedImages[currentKey] = remaining
+            },
+            onSend = { dispatch(draft.text, currentImages) },
+            canSend = canSend,
+            notice = notices[currentKey],
+            onRetry = { entry ->
+                if (canRetry && chat.entries.any { it === entry || it == entry }) {
+                    retryConfirmation = RetryConfirmation(currentKey, entry)
+                }
+            },
+            canRetry = canRetry,
+            assistantContent = { item ->
+                DesktopReplyContent(
+                    profileId = currentKey.profileId,
+                    sessionId = currentKey.sessionId,
+                    answer = item.answer,
+                    attachments = item.replyAttachments,
+                    imageCache = replyImageCache,
+                    audioCache = replyAudioCache,
+                    cacheGeneration = cacheGeneration,
+                    failures = attachmentFailures,
+                    retrying = fetchingAttachments,
+                    retryEnabled = canRetry,
+                    onRetry = ::retryReplyAttachment,
                 )
+            },
+            onMessageRendered = { sessionId, entryIndex ->
+                if (profileId.isNotBlank() && sessionId == currentKey.sessionId) {
+                    timingByEntry.remove(TimedEntryKey(currentKey, entryIndex))?.firstDrawn()
+                }
+            },
+            progress = currentProgress,
+        )
+
+        if (searchOpen) {
+            val overrides = buildMap {
+                for ((key, reply) in unsavedReplies) {
+                    if (key.profileId == profileId) put(key.sessionId, reply)
+                }
+                sending?.takeIf { it.key.profileId == profileId }?.let { operation ->
+                    chats[operation.key]?.let { pending ->
+                        put(operation.key.sessionId, operation.visibleChat(pending))
+                    }
+                }
             }
+            DesktopHistorySearch(
+                store, profileId, sessionsRevision.intValue, overrides,
+                onDismiss = { searchOpen = false },
+                onSelectHit = ::selectSearchHit,
+            )
+        }
+        val pendingRetry = retryConfirmation?.takeIf { it.key == currentKey }
+        if (pendingRetry != null) {
+            AlertDialog(
+                onDismissRequest = { retryConfirmation = null },
+                title = { Text("重新发送？") },
+                text = { Text("此条消息可能已到达 AstrBot，继续可能重复执行。") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        retryConfirmation = null
+                        val references = pendingRetry.entry.attachmentReferences.ifEmpty {
+                            listOfNotNull(pendingRetry.entry.attachmentReference)
+                        }
+                        val images = references.mapNotNull { runCatching { Path.of(it) }.getOrNull() }
+                        if (images.size != references.size) {
+                            notices[pendingRetry.key] = "无法读取原始图片，请确认文件仍然存在。"
+                        } else {
+                            dispatch(pendingRetry.entry.question, images, pendingRetry.entry, pendingRetry.key)
+                        }
+                    }, enabled = canRetry) { Text("确认重发") }
+                },
+                dismissButton = { TextButton(onClick = { retryConfirmation = null }) { Text("取消") } },
+            )
         }
     }
 }
