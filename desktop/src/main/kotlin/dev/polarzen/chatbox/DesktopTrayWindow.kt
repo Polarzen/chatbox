@@ -88,24 +88,29 @@ internal class DesktopTrayWindow(
 
     private fun foregroundWindow(): Foreground {
         if (!frame.isShowing || frame.extendedState and Frame.ICONIFIED != 0) return Foreground.OTHER
-        return onWindows {
-            val main = Native.getWindowPointer(frame)
-            val active = trayUser32.GetForegroundWindow()
-            if (active == main) return@onWindows Foreground.MAIN
-            var owner = active
-            while (owner != null) {
-                owner = trayUser32.GetWindow(owner, GW_OWNER)
-                if (owner == main) return@onWindows Foreground.OWNED
-            }
-            Foreground.OTHER
-        } ?: run {
+        if (!Platform.isWindows()) {
             val active = KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow
-            when {
+            return when {
                 active === frame -> Foreground.MAIN
                 generateSequence(active) { it.owner }.any { it === frame } -> Foreground.OWNED
                 else -> Foreground.OTHER
             }
         }
+        return onWindows {
+            val main = Native.getWindowPointer(frame)
+            val active = trayUser32.GetForegroundWindow() ?: return@onWindows Foreground.OTHER
+            if (active == main) return@onWindows Foreground.MAIN
+            var owner: Pointer? = active
+            while (owner != null) {
+                owner = trayUser32.GetWindow(owner, GW_OWNER)
+                if (owner == main) return@onWindows Foreground.OWNED
+            }
+            val owned = Window.getWindows().any { candidate ->
+                candidate.isShowing && generateSequence(candidate.owner) { it.owner }.any { it === frame } &&
+                    Native.getWindowPointer(candidate) == active
+            }
+            if (owned) Foreground.OWNED else Foreground.OTHER
+        } ?: Foreground.OTHER
     }
 
     private fun visibleDialog(owner: Window): Dialog? {

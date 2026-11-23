@@ -103,11 +103,20 @@ class DesktopShellApplicationTest {
         val target = ReplyDestination(SessionKey("profile", "session"), 1)
         var attempts = 0
         val notifier = DesktopReplyNotifier({ true }, tray::isForeground) { attempts++; false }
-        fun active() = KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow
+        val nativeForeground = if (com.sun.jna.Platform.isWindows()) {
+            com.sun.jna.NativeLibrary.getInstance("user32").getFunction("GetForegroundWindow")
+        } else null
+        fun active(window: java.awt.Window): Boolean = if (nativeForeground != null) {
+            window.isShowing && nativeForeground.invokePointer(emptyArray()) == com.sun.jna.Native.getWindowPointer(window)
+        } else {
+            KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow === window
+        }
         fun awaitActive(window: java.awt.Window): Boolean {
             val deadline = System.nanoTime() + 2_000_000_000L
             while (System.nanoTime() < deadline) {
-                if (active() === window) return true
+                var matches = false
+                EventQueue.invokeAndWait { matches = active(window) }
+                if (matches) return true
                 Thread.sleep(20)
             }
             return false
@@ -134,7 +143,7 @@ class DesktopShellApplicationTest {
             assertTrue(notifier.eligible())
             assertFalse(notifier.show(target))
             assertEquals(1, attempts)
-            assertSame(other, active())
+            EventQueue.invokeAndWait { assertTrue("Pinned Chatbox took foreground", active(other)) }
         } finally {
             EventQueue.invokeAndWait { owned.dispose(); main.dispose(); other.dispose() }
         }
