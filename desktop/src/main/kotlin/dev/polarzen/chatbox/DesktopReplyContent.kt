@@ -60,9 +60,10 @@ internal fun DesktopReplyContent(
             val offset = attachment?.textOffset?.coerceIn(cursor, answer.length) ?: answer.length
             if (offset > cursor) {
                 val prefix = if (textLabelShown) "" else "助手："
-                val body = prefix + answer.substring(cursor, offset)
-                key(profileId, sessionId, cursor) {
-                    SelectableReplyText(body)
+                val bodyOffset = cursor
+                val body = prefix + answer.substring(bodyOffset, offset)
+                key(profileId, sessionId, bodyOffset) {
+                    SelectableReplyText(body, bodyOffset, prefix.length)
                 }
                 textLabelShown = true
             }
@@ -83,10 +84,10 @@ internal fun DesktopReplyContent(
 }
 
 @Composable
-private fun SelectableReplyText(text: String) {
+private fun SelectableReplyText(text: String, bodyOffset: Int, prefixLength: Int) {
     val parent = LocalSelectionRegistrar.current
     if (parent == null) {
-        Text(text)
+        SearchHitText(text, isAnswer = true, bodyOffset = bodyOffset, prefixLength = prefixLength)
         return
     }
     // Compose 1.7.3 calls onTextLayout immediately before notifying the registrar.
@@ -108,7 +109,8 @@ private fun SelectableReplyText(text: String) {
         }
     }
     CompositionLocalProvider(LocalSelectionRegistrar provides registrar) {
-        Text(text, onTextLayout = { registrar.recordLayout(it.layoutInput.text.text) })
+        SearchHitText(text, isAnswer = true, bodyOffset = bodyOffset, prefixLength = prefixLength,
+            onTextLayout = { registrar.recordLayout(it.layoutInput.text.text) })
     }
 }
 

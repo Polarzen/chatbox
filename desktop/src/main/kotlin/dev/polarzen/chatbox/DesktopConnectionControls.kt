@@ -34,7 +34,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -58,7 +57,7 @@ internal fun DesktopConnectionControls(connection: DesktopConnection) {
     val activeKey = connection.keyList.keys.firstOrNull { it.id == connection.keyList.activeId }
     val statusColor = when {
         connection.verifying -> MaterialTheme.colors.primary
-        connection.connected -> Color(0xFF278454)
+        connection.connected -> desktopPalette.success
         else -> MaterialTheme.colors.error
     }
     val statusText = when {
@@ -428,7 +427,7 @@ private fun ConnectionSettingsDialog(
                         connection.connected -> "连接已验证"
                         else -> "未连接"
                     },
-                    color = if (connection.connected) Color(0xFF278454) else MaterialTheme.colors.onSurface,
+                    color = if (connection.connected) desktopPalette.success else MaterialTheme.colors.onSurface,
                     style = MaterialTheme.typography.subtitle1,
                 )
                 if (connection.error != null) {
