@@ -782,7 +782,23 @@ class DesktopUiAcceptanceTest {
             wheelUntil(-3f) { isDisplayed("return-to-latest") }
             wheelUntil(3f) { atImageTail() }
             assertEquals(composer, bounds("composer"))
-            println("UI_CASE V019_READING PASS paragraph=$middle anchorY=${anchor.top} viewport=${viewport.height} batches=2 image=true completion=true copy=true")
+            wheelUntil(-3f) { isDisplayed("return-to-latest") && paragraphBox(108).top > viewport.bottom + viewport.height }
+            val nextQuestion = "延迟的下一条问题"
+            val previousCount = saved.sessionContent(profileA, session).entries.size
+            rule.onNodeWithTag("composer-field").performTextClearance()
+            sendText(nextQuestion)
+            awaitUi("sending from older text reveals the new turn") {
+                rule.onNodeWithText(nextQuestion).assertIsDisplayed()
+                rule.onNodeWithText("本地服务已收到，正在继续", substring = true).assertIsDisplayed()
+                rule.onNodeWithTag("return-to-latest").assertDoesNotExist()
+                true
+            }
+            awaitUi("new turn completes in the same conversation") {
+                store.sessionContent(profileA, session).entries.let {
+                    it.size == previousCount + 1 && it.last().question == nextQuestion && it.last().status == "已完成"
+                }
+            }
+            println("UI_CASE V019_READING PASS paragraph=$middle anchorY=${anchor.top} viewport=${viewport.height} batches=2 image=true completion=true copy=true newTurnVisible=true")
         } finally {
             for (stage in listOf("text", "image", "end")) releaseStream(stream, stage)
             rule.waitUntil(2_000) {
