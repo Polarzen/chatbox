@@ -878,6 +878,7 @@ private fun ConversationPane(
                                         val failed = entry.status.startsWith("发送失败：") ||
                                             entry.status.startsWith("未发送：") ||
                                             entry.status == "上次回复未确认"
+                                        val blockRetry = entry.blocksWhaleTaskRetry(profileId)
                                         val active = entry.status == "发送中" && entryProgress != null
                                         var detailsExpanded by remember(chat.session, index) {
                                             mutableStateOf(false)
@@ -892,6 +893,7 @@ private fun ConversationPane(
                                             Text(
                                                 when {
                                                     active -> "${entryProgress!!.stage} · ${elapsedSeconds} 秒"
+                                                    blockRetry -> WHALE_TASK_CHECK_STATUS
                                                     failed -> entryProgress?.failureSummary ?: failureSummary(entry.status)
                                                     else -> entry.status
                                                 },
@@ -905,7 +907,7 @@ private fun ConversationPane(
                                                     modifier = Modifier.testTag("failure-details-toggle-$index"),
                                                 ) { Text(if (detailsExpanded) "收起详情" else "查看详情", color = desktopPalette.accent, fontSize = 11.sp) }
                                             }
-                                            if (canRetry && !active && failed) {
+                                            if (canRetry && !active && failed && !blockRetry) {
                                                 Spacer(Modifier.width(6.dp))
                                                 TextButton(
                                                     onClick = { onRetry(entry) },
@@ -1018,6 +1020,16 @@ private fun droppedFilePaths(event: DragAndDropEvent): List<File> {
         return emptyList()
     }
     return files.orEmpty().mapNotNull { it as? File }
+}
+
+internal const val WHALE_TASK_CHECK_STATUS = "命令可能已执行，请先用 /task list 或 /task status 核对。"
+
+internal fun Entry.blocksWhaleTaskRetry(profileId: String): Boolean {
+    if (status != "上次回复未确认" || !profileId.startsWith("launcher:")) return false
+    val command = question.trimStart()
+    if (!isWhaleTaskCommand(command)) return false
+    val verb = command.substring(5).trimStart().takeWhile { !it.isWhitespace() }
+    return verb !in setOf("", "help", "list", "status", "result")
 }
 
 private fun failureSummary(status: String): String = when {

@@ -53,6 +53,8 @@ import javax.swing.filechooser.FileNameExtensionFilter
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.concurrent.thread
@@ -132,6 +134,7 @@ fun main(args: Array<String>) {
                             else -> DesktopScreen(
                                 store, keys, replyImageCache, window, historySearchOpen,
                                 closeRequested = closeRequested,
+                                isClosing = { closeRequested },
                                 onCloseResult = { ready -> if (ready) exitApplication() else closeRequested = false },
                             ) {
                                 DesktopAppearanceControls(
@@ -206,6 +209,7 @@ internal fun DesktopScreen(
     historySearchOpen: MutableState<Boolean> = remember { mutableStateOf(false) },
     closeRequested: Boolean = false,
     onCloseResult: (Boolean) -> Unit = {},
+    isClosing: () -> Boolean = { closeRequested },
     appearanceActions: @Composable () -> Unit = {},
 ) {
     val replyAudioCache = remember(replyImageCache) { ReplyAudioCache(replyImageCache.directory.resolveSibling("reply-audio")) }
@@ -265,6 +269,26 @@ internal fun DesktopScreen(
         sessions.firstOrNull { it.selected }?.id
             ?: sessions.firstOrNull()?.id.orEmpty()
     val currentKey = SessionKey(profileId, selectedSessionId)
+    val whaleGeneration = if (profileId.startsWith("launcher:") && connection.connected &&
+        !connection.verifying && !closeRequested
+    ) connection.snapshot()?.bindingGeneration else null
+    val whaleActive = remember(currentKey, whaleGeneration) { AtomicBoolean(true) }
+    var whaleSession by remember(whaleActive) { mutableStateOf<WhaleTaskSession?>(null) }
+    var whaleLoginTarget by remember(whaleActive) { mutableStateOf<DesktopSendTarget?>(null) }
+    var whaleLoginForRetry by remember(whaleActive) { mutableStateOf(false) }
+    DisposableEffect(whaleActive) {
+        onDispose {
+            whaleActive.set(false)
+            whaleSession = null
+            whaleLoginTarget = null
+        }
+    }
+    fun whaleTargetCurrent(target: DesktopSendTarget): Boolean =
+        !isClosing() && whaleActive.get() && whaleGeneration == target.bindingGeneration &&
+            connection.snapshot()?.bindingGeneration == whaleGeneration &&
+            store.activeProfileId == currentKey.profileId &&
+            store.profile(currentKey.profileId)?.currentSession == currentKey.sessionId
+
     val storedChat = chats[currentKey] ?: remember(currentKey, sessionsRevision.intValue) {
         if (profileId.isNotBlank() && selectedSessionId.isNotBlank()) {
             runCatching { store.sessionContent(profileId, selectedSessionId) }.getOrDefault(Chat(selectedSessionId))
@@ -363,7 +387,7 @@ internal fun DesktopScreen(
 
     fun startRequest(
         clickedAtNanos: Long, targetKey: SessionKey, target: DesktopSendTarget, entry: Entry,
-        pending: Chat, attachments: List<Path>,
+        pending: Chat, attachments: List<Path>, taskSession: WhaleTaskSession?,
     ) {
         unsavedReplies.remove(targetKey)
         chats[targetKey] = pending
@@ -429,10 +453,29 @@ internal fun DesktopScreen(
 
             val result = runCatching {
                 check(operationIsActive()) { "会话已删除。" }
-                target.checkTarget()
-                check(operationIsActive()) { "会话已删除。" }
-                requestStarted = true
-                if (attachments.isEmpty()) {
+                if (taskSession == null) {
+                    target.checkTarget()
+                    check(operationIsActive()) { "会话已删除。" }
+                }
+                fun receiveText(delta: String) {
+                    if (!operationIsActive()) return
+                    answer = delta
+                    SwingUtilities.invokeLater {
+                        if (operationIsActive() && sending?.id == operationId) sending = sending?.copy(answer = delta)
+                    }
+                }
+                if (taskSession != null) {
+                    sendWhaleTask(
+                        target, taskSession, query, onEvent = ::observeTransportEvent, onText = ::receiveText,
+                        beforeRequest = {
+                            check(operationIsActive() && whaleTargetCurrent(target) && whaleSession === taskSession) {
+                                "鲸鱼任务登录目标已切换。"
+                            }
+                            requestStarted = true
+                        },
+                    )
+                } else if (attachments.isEmpty()) {
+                    requestStarted = true
                     sendToAstrBot(
                         target.address,
                         target.token,
@@ -443,17 +486,10 @@ internal fun DesktopScreen(
                         onReplyImage = { id, offset -> receiveAttachment(ReplyAttachmentType.IMAGE, id, offset) },
                         onReplyAudio = { id, offset -> receiveAttachment(ReplyAttachmentType.AUDIO, id, offset) },
                         onEvent = ::observeTransportEvent,
-                        onText = { delta ->
-                            if (!operationIsActive()) return@sendToAstrBot
-                            answer = delta
-                            SwingUtilities.invokeLater {
-                                if (!operationIsActive()) return@invokeLater
-                                val active = sending
-                                if (active?.id == operationId) sending = active.copy(answer = delta)
-                            }
-                        },
+                        onText = ::receiveText,
                     )
                 } else {
+                    requestStarted = true
                     sendAttachmentsToAstrBot(
                         target.address,
                         target.token,
@@ -465,15 +501,7 @@ internal fun DesktopScreen(
                         onReplyImage = { id, offset -> receiveAttachment(ReplyAttachmentType.IMAGE, id, offset) },
                         onReplyAudio = { id, offset -> receiveAttachment(ReplyAttachmentType.AUDIO, id, offset) },
                         onEvent = ::observeTransportEvent,
-                        onText = { delta ->
-                            if (!operationIsActive()) return@sendAttachmentsToAstrBot
-                            answer = delta
-                            SwingUtilities.invokeLater {
-                                if (!operationIsActive()) return@invokeLater
-                                val active = sending
-                                if (active?.id == operationId) sending = active.copy(answer = delta)
-                            }
-                        },
+                        onText = ::receiveText,
                     )
                 }
             }
@@ -490,14 +518,20 @@ internal fun DesktopScreen(
             val completed = pending.copy(entries = pending.entries.dropLast(1) + entry.copy(
                 answer = answer,
                 replyAttachments = attachments,
-                status = if (result.isSuccess) "已完成" else
-                    (if (requestStarted) "发送失败：" else "未发送：") + observedFailureStage + "：" +
-                        safeFailureMessage(failure!!, observedFailureStage),
+                status = when {
+                    result.isSuccess -> "已完成"
+                    failure is WhaleTaskOutcomeUnknownException -> "上次回复未确认"
+                    else -> (if (requestStarted) "发送失败：" else "未发送：") + observedFailureStage + "：" +
+                        safeFailureMessage(failure!!, observedFailureStage)
+                },
             ))
             val saved = runCatching { store.saveSessionContent(targetKey.profileId, completed) }
-            if (failure != null && operationIsActive()) invalidateOnFailure(target, failure)
+            if (failure != null && taskSession == null && operationIsActive()) invalidateOnFailure(target, failure)
             SwingUtilities.invokeLater {
                 if (!operationIsActive()) return@invokeLater
+                if (failure is WhaleTaskLoginRequiredException && taskSession != null &&
+                    whaleTargetCurrent(target) && whaleSession === taskSession
+                ) whaleSession = null
                 if (saved.isFailure) unsavedReplies[targetKey] = completed
                 chats[targetKey] = completed
                 sessionsRevision.intValue++
@@ -531,6 +565,10 @@ internal fun DesktopScreen(
         if (targetKey != currentKey || editor == null || closeRequested || sending != null || preparing != null ||
             composer.recordingKey == targetKey || (retryEntry == null && editor.field.composition != null)
         ) return
+        if (retryEntry?.blocksWhaleTaskRetry(targetKey.profileId) == true) {
+            notices[targetKey] = WHALE_TASK_CHECK_STATUS
+            return
+        }
         if (isOffline) {
             notices[targetKey] = "离线历史不可发送。请选择已验证的服务配置。"
             return
@@ -563,7 +601,28 @@ internal fun DesktopScreen(
                     return@launch
                 }
                 val revision = editor.revision
-                val query = retryEntry?.question ?: committed.text.trim()
+                val original = retryEntry?.question ?: committed.text
+                val taskText = original.trimStart()
+                val task = target.profileId.startsWith("launcher:") && isWhaleTaskCommand(taskText)
+                val query = if (task) taskText else retryEntry?.question ?: original.trim()
+                val taskSession = if (task) {
+                    if (!whaleTargetCurrent(target)) {
+                        notices[targetKey] = "连接或会话已切换，请确认后重试。"
+                        return@launch
+                    }
+                    val hasAttachments = if (retryEntry == null) committed.attachments.isNotEmpty() else
+                        retryEntry.attachmentReferences.isNotEmpty() || retryEntry.attachmentReference != null ||
+                            retryEntry.attachmentDisplayName != null
+                    if (hasAttachments) {
+                        notices[targetKey] = "鲸鱼任务仅支持文字，请移除图片或语音后发送。"
+                        return@launch
+                    }
+                    whaleSession ?: run {
+                        whaleLoginForRetry = retryEntry != null
+                        whaleLoginTarget = target
+                        return@launch
+                    }
+                } else null
                 val paths = if (retryEntry == null) committed.attachments else try {
                     retryEntry.attachmentReferences.ifEmpty { listOfNotNull(retryEntry.attachmentReference) }.map { Path.of(it) }
                 } catch (_: InvalidPathException) {
@@ -603,7 +662,7 @@ internal fun DesktopScreen(
                 }
                 if (targetKey in deletedSessionKeys) return@launch
                 if (retryEntry == null) composer.consumed(targetKey, revision)
-                startRequest(clickedAtNanos, targetKey, target, entry, pending, paths)
+                startRequest(clickedAtNanos, targetKey, target, entry, pending, paths, taskSession)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -729,6 +788,12 @@ internal fun DesktopScreen(
                     onClick = { searchOpen = true },
                     modifier = Modifier.size(36.dp).testTag("history-search-open"),
                 ) { Icon(Icons.Filled.Search, contentDescription = "搜索聊天记录 (Ctrl+K)") }
+                if (whaleSession != null) {
+                    TextButton(onClick = {
+                        whaleSession = null
+                        notices[currentKey] = "已退出鲸鱼任务。"
+                    }, enabled = !isBusy) { Text("退出鲸鱼任务") }
+                }
                 appearanceActions()
                 DesktopConnectionControls(connection)
             },
@@ -779,6 +844,30 @@ internal fun DesktopScreen(
             },
             progress = currentProgress,
         )
+
+        whaleLoginTarget?.let { target ->
+            WhaleTaskLoginDialog(
+                target.address,
+                onDismiss = { whaleLoginTarget = null },
+                login = { username, password, totp ->
+                    val session = withContext(Dispatchers.IO) {
+                        val loginContext = currentCoroutineContext()
+                        loginWhaleTasks(target, username, password, totp, beforeRequest = {
+                            loginContext.ensureActive()
+                            check(whaleLoginTarget === target && whaleTargetCurrent(target)) {
+                                "鲸鱼任务登录目标已切换。"
+                            }
+                        })
+                    }
+                    if (whaleTargetCurrent(target) && whaleLoginTarget === target) {
+                        whaleSession = session
+                        whaleLoginTarget = null
+                        notices[currentKey] = if (whaleLoginForRetry) "登录成功，请再次点击重发并确认。"
+                            else "登录成功，请再次点击发送。"
+                    }
+                },
+            )
+        }
 
         if (closeRequested || closeError != null) {
             AlertDialog(
@@ -969,11 +1058,20 @@ private fun shouldInvalidateConnection(error: Throwable): Boolean = when (error.
 }
 
 /** Convert only known protocol failures to display text; never reflect arbitrary server or secret text. */
-private fun safeFailureMessage(
+internal fun safeFailureMessage(
     error: Throwable,
     failedStage: String? = null,
     fallback: String = "连接或服务错误；回复状态未确认。",
 ): String {
+    if (error is WhaleTaskOutcomeUnknownException) return WHALE_TASK_CHECK_STATUS
+    if (error is WhaleTaskLoginRequiredException) return "鲸鱼任务登录已失效，请重新登录后重试。"
+    when (error.message) {
+        "找不到任务接口，请检查 AstrBot 和任务插件版本。",
+        "任务插件返回的会话编号无效。",
+        "任务接口返回 HTTP 503。" -> return "任务接口尚不可用，请检查鲸鱼任务插件是否已启用并重载。"
+        "当前 Dashboard 账号无权使用此任务会话，请检查插件绑定。" ->
+            return "当前账号无权使用鲸鱼任务，请检查插件的管理账号绑定。"
+    }
     if (error is SocketTimeoutException) return when {
         failedStage?.startsWith("上传语音") == true -> "语音上传超时。"
         failedStage?.startsWith("上传图片") == true -> "图片上传超时。"
@@ -1008,6 +1106,9 @@ private fun safeAttachmentFailureMessage(error: Throwable, type: ReplyAttachment
 }
 
 private val SAFE_FAILURES = setOf(
+    "鲸鱼任务登录目标已切换。",
+    "任务请求中断，命令可能已执行，请先核对状态。",
+    "无法连接本机 Dashboard，请检查 Launcher。",
     "密钥无效或已撤销。",
     "权限不足，请检查聊天权限。",
     "缺少文件上传权限，请为 API 密钥启用 file 权限。",

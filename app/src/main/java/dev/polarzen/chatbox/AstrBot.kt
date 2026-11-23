@@ -369,121 +369,131 @@ private fun sendToAstrBotPayload(
                 else -> "服务器返回 HTTP $status。"
             }
         }
-        check(c.contentType?.substringBefore(';')?.trim()?.equals("text/event-stream", true) == true) {
-            "服务未返回对话事件流，请检查接口地址。"
-        }
-        onEvent(AstrBotTransportEvent.StreamReady)
-        var done = false
-        var emittedFirstContent = false
-        var completedText = ""
-        var pendingText = ""
-        var pendingMedia: ReplyMedia? = null
-        var pendingCount = 0
-        fun replyOffset(): Int = completedText.length + pendingText.length
-        fun emitFirstContent() {
-            if (!emittedFirstContent) {
-                emittedFirstContent = true
-                onEvent(AstrBotTransportEvent.FirstContent)
-            }
-        }
-        fun emitMedia(media: ReplyMedia, id: String?) {
-            emitFirstContent()
-            when (media) {
-                ReplyMedia.IMAGE -> onReplyImage(id, replyOffset())
-                ReplyMedia.AUDIO -> onReplyAudio(id, replyOffset())
-            }
-        }
-        fun flushMissing() {
-            val media = pendingMedia ?: return
-            val count = pendingCount
-            pendingCount = 0
-            pendingMedia = null
-            repeat(count) { emitMedia(media, null) }
-        }
-        fun readReplyFrames() = c.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
-            readSse(reader) { raw ->
-                val frame = JSONObject(raw)
-                val type = frame.optString("type")
-                val chain = frame.optString("chain_type")
-                val hiddenPlain = type == "plain" && chain in
-                    setOf("reasoning", "tool_call", "tool_call_result", "agent_stats")
-                when (type) {
-                    "plain" -> {
-                        if (hiddenPlain) {
-                            completedText += pendingText
-                            pendingText = ""
-                        } else {
-                            flushMissing()
-                            val value = frame.opt("data") as? String ?: ""
-                            if (frame.optBoolean("streaming")) pendingText += value
-                            else {
-                                pendingText = value
-                                completedText += pendingText
-                                pendingText = ""
-                            }
-                            if ((completedText + pendingText).isNotEmpty()) emitFirstContent()
-                            onText(completedText + pendingText)
-                        }
-                    }
-                    "image", "record" -> {
-                        val media = if (type == "image") ReplyMedia.IMAGE else ReplyMedia.AUDIO
-                        val value = frame.opt("data") as? String ?: ""
-                        completedText += pendingText
-                        pendingText = ""
-                        // Consecutive image hints may be followed by a batch of saved images.
-                        if (pendingMedia != media || media == ReplyMedia.AUDIO || !value.startsWith(media.marker)) {
-                            flushMissing()
-                        }
-                        if (value.startsWith(media.marker)) {
-                            pendingMedia = media
-                            pendingCount++
-                            if (media == ReplyMedia.AUDIO) emitFirstContent()
-                        }
-                    }
-                    "attachment_saved" -> {
-                        completedText += pendingText
-                        pendingText = ""
-                        val data = frame.optJSONObject("data")
-                        val media = when (data?.optString("type")) {
-                            "image" -> ReplyMedia.IMAGE
-                            "record" -> ReplyMedia.AUDIO
-                            else -> null
-                        }
-                        if (pendingMedia != media) flushMissing()
-                        val id = (data?.opt("id") as? String)?.takeIf { it.isNotBlank() }
-                        if (media != null && (id != null || media == ReplyMedia.AUDIO)) {
-                            if (pendingCount > 0) {
-                                pendingCount--
-                                if (pendingCount == 0) pendingMedia = null
-                            }
-                            emitMedia(media, id)
-                        } else flushMissing()
-                    }
-                    "complete", "file", "video", "actionrow" -> {
-                        flushMissing()
-                        completedText += pendingText
-                        pendingText = ""
-                    }
-                    "error" -> error("AstrBot 报告对话失败，请在服务端检查配置。")
-                    "end" -> {
-                        flushMissing()
-                        done = true
-                    }
-                }
-                !done
-            }
-        }
-        try {
-            readReplyFrames()
-        } catch (failure: Exception) {
-            runCatching { flushMissing() }.onFailure { failure.addSuppressed(it) }
-            throw failure
-        }
-        flushMissing()
-        onText(completedText + pendingText)
-        check(done) { "回复流意外中断，可能已在服务端执行。请勿直接重复发送。" }
-        onEvent(AstrBotTransportEvent.Completed)
+        readAstrBotReply(c, onReplyImage, onReplyAudio, onEvent, onText)
     } finally {
         c.disconnect()
     }
+}
+
+internal fun readAstrBotReply(
+    c: HttpURLConnection,
+    onReplyImage: (String?, Int) -> Unit = { _, _ -> },
+    onReplyAudio: (String?, Int) -> Unit = { _, _ -> },
+    onEvent: (AstrBotTransportEvent) -> Unit,
+    onText: (String) -> Unit,
+) {
+    check(c.contentType?.substringBefore(';')?.trim()?.equals("text/event-stream", true) == true) {
+        "服务未返回对话事件流，请检查接口地址。"
+    }
+    onEvent(AstrBotTransportEvent.StreamReady)
+    var done = false
+    var emittedFirstContent = false
+    var completedText = ""
+    var pendingText = ""
+    var pendingMedia: ReplyMedia? = null
+    var pendingCount = 0
+    fun replyOffset(): Int = completedText.length + pendingText.length
+    fun emitFirstContent() {
+        if (!emittedFirstContent) {
+            emittedFirstContent = true
+            onEvent(AstrBotTransportEvent.FirstContent)
+        }
+    }
+    fun emitMedia(media: ReplyMedia, id: String?) {
+        emitFirstContent()
+        when (media) {
+            ReplyMedia.IMAGE -> onReplyImage(id, replyOffset())
+            ReplyMedia.AUDIO -> onReplyAudio(id, replyOffset())
+        }
+    }
+    fun flushMissing() {
+        val media = pendingMedia ?: return
+        val count = pendingCount
+        pendingCount = 0
+        pendingMedia = null
+        repeat(count) { emitMedia(media, null) }
+    }
+    fun readReplyFrames() = c.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
+        readSse(reader) { raw ->
+            val frame = JSONObject(raw)
+            val type = frame.optString("type")
+            val chain = frame.optString("chain_type")
+            val hiddenPlain = type == "plain" && chain in
+                setOf("reasoning", "tool_call", "tool_call_result", "agent_stats")
+            when (type) {
+                "plain" -> {
+                    if (hiddenPlain) {
+                        completedText += pendingText
+                        pendingText = ""
+                    } else {
+                        flushMissing()
+                        val value = frame.opt("data") as? String ?: ""
+                        if (frame.optBoolean("streaming")) pendingText += value
+                        else {
+                            pendingText = value
+                            completedText += pendingText
+                            pendingText = ""
+                        }
+                        if ((completedText + pendingText).isNotEmpty()) emitFirstContent()
+                        onText(completedText + pendingText)
+                    }
+                }
+                "image", "record" -> {
+                    val media = if (type == "image") ReplyMedia.IMAGE else ReplyMedia.AUDIO
+                    val value = frame.opt("data") as? String ?: ""
+                    completedText += pendingText
+                    pendingText = ""
+                    // Consecutive image hints may be followed by a batch of saved images.
+                    if (pendingMedia != media || media == ReplyMedia.AUDIO || !value.startsWith(media.marker)) {
+                        flushMissing()
+                    }
+                    if (value.startsWith(media.marker)) {
+                        pendingMedia = media
+                        pendingCount++
+                        if (media == ReplyMedia.AUDIO) emitFirstContent()
+                    }
+                }
+                "attachment_saved" -> {
+                    completedText += pendingText
+                    pendingText = ""
+                    val data = frame.optJSONObject("data")
+                    val media = when (data?.optString("type")) {
+                        "image" -> ReplyMedia.IMAGE
+                        "record" -> ReplyMedia.AUDIO
+                        else -> null
+                    }
+                    if (pendingMedia != media) flushMissing()
+                    val id = (data?.opt("id") as? String)?.takeIf { it.isNotBlank() }
+                    if (media != null && (id != null || media == ReplyMedia.AUDIO)) {
+                        if (pendingCount > 0) {
+                            pendingCount--
+                            if (pendingCount == 0) pendingMedia = null
+                        }
+                        emitMedia(media, id)
+                    } else flushMissing()
+                }
+                "complete", "file", "video", "actionrow" -> {
+                    flushMissing()
+                    completedText += pendingText
+                    pendingText = ""
+                }
+                "error" -> error("AstrBot 报告对话失败，请在服务端检查配置。")
+                "end" -> {
+                    flushMissing()
+                    done = true
+                }
+            }
+            !done
+        }
+    }
+    try {
+        readReplyFrames()
+    } catch (failure: Exception) {
+        runCatching { flushMissing() }.onFailure { failure.addSuppressed(it) }
+        throw failure
+    }
+    flushMissing()
+    onText(completedText + pendingText)
+    check(done) { "回复流意外中断，可能已在服务端执行。请勿直接重复发送。" }
+    onEvent(AstrBotTransportEvent.Completed)
 }

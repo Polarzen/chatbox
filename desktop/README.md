@@ -29,6 +29,8 @@ MSI 生成于 `desktop/build/compose/binaries/main/msi/`。从源码启动可运
 
 首次使用时，点击「添加密钥」，填写本地名称和 AstrBot OpenAPI Key。已配置多把密钥时，点开顶栏密钥菜单，再点目标名称即可验证并切换。验证失败时可以继续使用原先已连接的密钥。「管理密钥」提供改名、权限信息和移除操作。名称用于本机识别，AstrBot WebUI 的 OpenAPI 设置列出服务端授予的权限。普通文字聊天需要 `chat`，图片上传与下载还需要 `file`；运行管理员命令需要服务端登记的管理员身份和 `chat:admin`。
 
+在已验证的本机 Launcher 配置中打开会话，以纯文字发送 `/task help`。首次使用时，按提示登录 AstrBot 管理面板。若已启用两步验证，输入当前验证码。登录后回到原草稿，再次发送即可查看命令帮助。发送 `/task list` 可查看任务列表。普通消息继续使用原有 OpenAPI Key。切换会话后，按提示重新登录管理面板。
+
 把资源管理器中的 PNG 或 JPEG 拖到聊天区或输入区，或点击「＋」选图。发送前可以逐张移除图片、补充说明。按 Enter 发送，按 Shift+Enter 换行。回复气泡显示图片上传进度、等待服务器响应和等待首段回复的时间。
 
 桌面客户端可接收、显示服务端回复中的图片；生成图片由服务端图像提供方或插件决定，例如 [Chatbox Draw 插件说明](../integrations/astrbot_plugin_chatbox_draw/README.md)。详见 [0.1.5 增量验收报告](../docs/CHATBOX_015_IMAGE_GENERATION_ACCEPTANCE.md)。
