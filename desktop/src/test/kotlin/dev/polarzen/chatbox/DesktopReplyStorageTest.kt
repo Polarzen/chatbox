@@ -10,7 +10,7 @@ import java.nio.file.Files
 import javax.imageio.ImageIO
 
 class DesktopReplyStorageTest {
-    @Test fun replyImagesRoundTripInOrderAndOldOrMalformedOptionalFieldsAreHarmless() {
+    @Test fun mixedReplyAttachmentsRoundTripInOrderAndOldOrMalformedOptionalFieldsAreHarmless() {
         val temp = Files.createTempDirectory("chatbox-reply-history-")
         try {
             val file = temp.resolve("history.json")
@@ -20,11 +20,12 @@ class DesktopReplyStorageTest {
                 question = "question",
                 answer = "answer",
                 status = "已完成",
-                replyImages = listOf(
-                    ReplyImage("first", 0),
-                    ReplyImage(null, 3),
-                    ReplyImage("last", 6),
-                    ReplyImage("past-end", 100),
+                replyAttachments = listOf(
+                    ReplyAttachment("first", 0, ReplyAttachmentType.AUDIO),
+                    ReplyAttachment("shared", 3, ReplyAttachmentType.IMAGE),
+                    ReplyAttachment("shared", 3, ReplyAttachmentType.AUDIO),
+                    ReplyAttachment(null, 3, ReplyAttachmentType.AUDIO),
+                    ReplyAttachment("past-end", 100, ReplyAttachmentType.IMAGE),
                 ),
             )))
             store.save(server, original)
@@ -32,8 +33,12 @@ class DesktopReplyStorageTest {
             val restored = DesktopStore(file).read(server).entries.single()
             assertEquals("answer", restored.answer)
             assertEquals(listOf(
-                ReplyImage("first", 0), ReplyImage(null, 3), ReplyImage("last", 6), ReplyImage("past-end", 6),
-            ), restored.replyImages)
+                ReplyAttachment("first", 0, ReplyAttachmentType.AUDIO),
+                ReplyAttachment("shared", 3, ReplyAttachmentType.IMAGE),
+                ReplyAttachment("shared", 3, ReplyAttachmentType.AUDIO),
+                ReplyAttachment(null, 3, ReplyAttachmentType.AUDIO),
+                ReplyAttachment("past-end", 6, ReplyAttachmentType.IMAGE),
+            ), restored.replyAttachments)
 
             val oldState = JSONObject(Files.readString(file))
             val oldEntry = oldState.getJSONArray("profiles").getJSONObject(0)
@@ -42,16 +47,17 @@ class DesktopReplyStorageTest {
             Files.writeString(file, oldState.toString())
             val oldHistoryEntry = DesktopStore(file).read(server).entries.single()
             assertEquals("answer", oldHistoryEntry.answer)
-            assertTrue(oldHistoryEntry.replyImages.isEmpty())
+            assertTrue(oldHistoryEntry.replyAttachments.isEmpty())
 
             oldEntry.put("replyImages", JSONArray()
                 .put(JSONObject().put("attachmentId", 4).put("textOffset", 1))
                 .put(JSONObject().put("attachmentId", "valid").put("textOffset", -10))
+                .put(JSONObject().put("type", "unknown").put("attachmentId", "other").put("textOffset", 2))
                 .put("malformed row"))
             Files.writeString(file, oldState.toString())
             val malformed = DesktopStore(file).read(server).entries.single()
             assertEquals("answer", malformed.answer)
-            assertEquals(listOf(ReplyImage("valid", 0)), malformed.replyImages)
+            assertEquals(listOf(ReplyAttachment("valid", 0, ReplyAttachmentType.IMAGE)), malformed.replyAttachments)
         } finally {
             temp.toFile().deleteRecursively()
         }

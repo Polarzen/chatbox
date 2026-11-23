@@ -23,6 +23,7 @@ import androidx.compose.foundation.ScrollbarStyle
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.AlertDialog
 import androidx.compose.material.Button
 import androidx.compose.material.ButtonDefaults
@@ -35,6 +36,7 @@ import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -66,11 +68,14 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.TextFieldValue
@@ -574,7 +579,7 @@ private fun ConversationPane(
             if (chat.entries.isEmpty()) listState.scrollToItem(0)
             else listState.scrollToItem(chat.entries.lastIndex, scrollOffset = Int.MAX_VALUE)
         }
-        LaunchedEffect(chat.session, lastEntry?.answer, lastEntry?.replyImages, lastEntry?.status) {
+        LaunchedEffect(chat.session, lastEntry?.answer, lastEntry?.replyAttachments, lastEntry?.status) {
             val layout = listState.layoutInfo
             val lastVisibleIndex = layout.visibleItemsInfo.lastOrNull()?.index
             if (chat.entries.isNotEmpty() && lastVisibleIndex == layout.totalItemsCount - 1) {
@@ -635,7 +640,9 @@ private fun ConversationPane(
                                     if (references.isNotEmpty() && entry.question.isNotBlank()) {
                                         Spacer(Modifier.height(5.dp))
                                     }
-                                    if (entry.question.isNotBlank()) Text(entry.question, color = ChatInk, fontSize = 14.sp)
+                                    if (entry.question.isNotBlank()) {
+                                        CopyableMessage(entry.question) { Text(entry.question, color = ChatInk, fontSize = 14.sp) }
+                                    }
                                 }
                             }
                         }
@@ -653,7 +660,7 @@ private fun ConversationPane(
                                 .widthIn(max = minOf(760.dp, maxWidth * .86f))
                                 .drawWithContent {
                                     drawContent()
-                                    if (!renderedState.value && (entry.answer.isNotEmpty() || entry.replyImages.isNotEmpty())) {
+                                    if (!renderedState.value && (entry.answer.isNotEmpty() || entry.replyAttachments.isNotEmpty())) {
                                         renderedState.value = true
                                     }
                                 }
@@ -663,7 +670,11 @@ private fun ConversationPane(
                             border = androidx.compose.foundation.BorderStroke(1.dp, ChatLine),
                         ) {
                             Column(Modifier.padding(horizontal = 15.dp, vertical = 12.dp)) {
-                                assistantContent(entry)
+                                if (entry.answer.isNotEmpty()) {
+                                    CopyableMessage(entry.answer) { assistantContent(entry) }
+                                } else {
+                                    assistantContent(entry)
+                                }
                                 if (entry.status != "已完成") {
                                     Spacer(Modifier.height(7.dp))
                                     val entryProgress = progress?.takeIf { it.entryIndex == index }
@@ -766,6 +777,33 @@ private fun ConversationPane(
           }
       }
     }
+}
+
+@Composable
+private fun CopyableMessage(text: String, content: @Composable () -> Unit) {
+    val clipboard = LocalClipboardManager.current
+    var clipboardBusy by remember { mutableStateOf(false) }
+    val messageClipboard = remember(clipboard) {
+        object : ClipboardManager by clipboard {
+            override fun setText(annotatedString: AnnotatedString) {
+                try {
+                    clipboard.setText(annotatedString)
+                    clipboardBusy = false
+                } catch (_: IllegalStateException) {
+                    clipboardBusy = true
+                }
+            }
+        }
+    }
+    CompositionLocalProvider(LocalClipboardManager provides messageClipboard) {
+        SelectionContainer(content = content)
+    }
+    TextButton(
+        onClick = { messageClipboard.setText(AnnotatedString(text)) },
+        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+        modifier = Modifier.height(28.dp),
+    ) { Text("复制正文", color = ChatPurple, fontSize = 11.sp) }
+    if (clipboardBusy) Text("剪贴板占用中，请再试一次。", color = MaterialTheme.colors.error, fontSize = 11.sp)
 }
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalComposeUiApi::class)

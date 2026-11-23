@@ -1,14 +1,12 @@
 # chatbox Windows 桌面版
 
-Windows 桌面版使用 AstrBot OpenAPI 收发文字和图片。每个服务配置可以保留多个会话，桌面端和 Android 各自保存本机历史。
+Windows 桌面版使用 AstrBot OpenAPI 收发文字和图片，也可播放服务端返回的 WAV 语音附件。每个服务配置可以保留多个会话，桌面端和 Android 各自保存本机历史。
 
 ## 安装与构建
 
-Windows 0.1.7 安装包及校验文件见正式发布页。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.7/Chatbox-0.1.7.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.7/SHA256SUMS.txt) · [v0.1.7 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.7)
+Windows 0.1.8 安装包为 `Chatbox-0.1.8.msi`（55,472,128 字节）。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.8/Chatbox-0.1.8.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.8/SHA256SUMS.txt) · [v0.1.8 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.8)
 
-在 PowerShell 中运行 `Get-FileHash .\Chatbox-0.1.7.msi -Algorithm SHA256`，确认结果与 `SHA256SUMS.txt` 中的 `c1622a874510d58c9bf03a7a6e90c226be8a0ae74e52ed5ef89f41ea6580aac2` 一致。从 0.1.5 或 0.1.6 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。安装完成后从开始菜单打开 Chatbox。0.1.1 用户先阅读[旧卸载器升级说明](#从-011-升级)。
-
-托管 Windows 已验证从 0.1.5 原目录升级，日常机器已验证从 0.1.6 原目录升级。安装版现场验收覆盖会话列表、冷启动恢复和资源管理器混合拖放。[0.1.7 验收记录](../docs/WINDOWS_017_RELEASE_ACCEPTANCE.md) · [0.1.5 历史发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.5)
+在 PowerShell 中运行 `Get-FileHash .\Chatbox-0.1.8.msi -Algorithm SHA256`，确认结果与 `SHA256SUMS.txt` 中的 `0dd2baa59acf736d42ed5e161f857102e88d07e8897d2d78aaf696fc8ec8b0f8` 一致。从 0.1.5、0.1.6 或 0.1.7 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。安装完成后从开始菜单打开 Chatbox。0.1.1 用户先阅读[旧卸载器升级说明](#从-011-升级)。
 
 如需自行构建，在 Windows 安装 JDK 17 和 WiX Toolset 3.x，然后在仓库根目录运行下列命令。
 
@@ -27,6 +25,8 @@ MSI 生成于 `desktop/build/compose/binaries/main/msi/`。从源码启动可运
 
 桌面客户端可接收、显示服务端回复中的图片；生成图片由服务端图像提供方或插件决定，例如 [Chatbox Draw 插件说明](../integrations/astrbot_plugin_chatbox_draw/README.md)。详见 [0.1.5 增量验收报告](../docs/CHATBOX_015_IMAGE_GENERATION_ACCEPTANCE.md)。
 
+如果回复包含支持的 WAV 语音附件，下载后可点击「播放语音」，播放期间可点击「停止播放」。点击消息下的「复制正文」可将整段文字复制到 Windows 剪贴板。只需部分文字时，可选中文字后按 Ctrl+C。
+
 Chatbox 按实例 UUID 找回上次选择的 Launcher 实例，确认当前回环地址后使用已保存的凭据重连。旧版按完整 URL 查找本地历史，地址大小写或端口变化可能使旧对话从界面消失。新版向 `/api/v1/chat/sessions` 核对原用户名和会话 UUID，匹配的旧会话可继续聊天，其余旧记录保留供离线打开。
 
 新建的会话排在左栏顶部。点击会话标题原位切换，长列表可用细滚动条或鼠标滚轮浏览。滚动条的鼠标操作区域宽 14 dp，列表无需滚动时自动隐藏滚动条。展开行末的「⋯」，选择「删除会话」并确认，即可删除该服务配置下的一段本机聊天记录。窄窗口可从顶栏展开历史栏。
@@ -44,6 +44,8 @@ Chatbox 按实例 UUID 找回上次选择的 Launcher 实例，确认当前回�
 0.1.1 的卸载程序可能递归清理整个安装目录。从 0.1.2 起，新 MSI 已移除自身的递归清理动作，但升级仍会调用已安装的旧版卸载程序。检测到 0.1.1 的旧清理设置时，新安装包会阻止升级。若安装目录与源码、下载文件或其他数据共用，请保留现有安装，避免直接卸载旧版。管理员需先备份共享目录，将旧清理目标重定向到独立空目录，并核实它不是重解析点（包括符号链接和目录联接），再按安装器提示继续升级。
 
 ## 历史验收记录
+
+0.1.7 发布时，托管 Windows 已验证从 0.1.5 原目录升级，日常机器已验证从 0.1.6 原目录升级。安装版现场验收覆盖会话列表、冷启动恢复和资源管理器混合拖放。[0.1.7 验收记录](../docs/WINDOWS_017_RELEASE_ACCEPTANCE.md) · [0.1.5 历史发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.5)
 
 0.1.4 修复了从 0.1.3 升级时 JVM 文件漏装导致应用无法启动的问题。[0.1.4 及更早版本验收报告](../docs/WINDOWS_V1_ACCEPTANCE.md) · [0.1.5 增量验收报告](../docs/CHATBOX_015_IMAGE_GENERATION_ACCEPTANCE.md) · [0.1.6 候选版验收记录](../docs/WINDOWS_016_RELEASE_ACCEPTANCE.md)
 

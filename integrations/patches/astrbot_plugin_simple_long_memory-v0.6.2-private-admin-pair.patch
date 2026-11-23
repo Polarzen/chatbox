@@ -1,0 +1,2007 @@
+diff --git a/_conf_schema.json b/_conf_schema.json
+index 6ca946c..4e40c47 100644
+--- a/_conf_schema.json
++++ b/_conf_schema.json
+@@ -52,6 +52,21 @@
+     "default": true,
+     "hint": "同一平台实例内，个人记忆跟随本人跨群聊和私聊召回；关闭后仅本会话可见。保留旧配置键，不控制群公共记忆或 global 记忆"
+   },
++  "private_admin_memory_pair": {
++    "description": "私聊自动召回配对管理员的个人记忆",
++    "type": "list",
++    "items": {
++      "type": "string"
++    },
++    "default": [],
++    "hint": "填写两个不同的 platform_id:sender_id，双方都须在 AstrBot 管理员名单中，并开启按人跨会话共享。留空即关闭。"
++  },
++  "private_admin_shared_store": {
++    "description": "配对管理员共用私聊个人记忆库",
++    "type": "bool",
++    "default": false,
++    "hint": "同一人的两个管理员账号在私聊中共用个人记忆。相同内容只存一次。需要配置管理员配对并开启按人跨会话共享。"
++  },
+   "share_group_across_groups": {
+     "description": "跨群聊共用",
+     "type": "bool",
+diff --git a/main.py b/main.py
+index 41a97c3..d64d18e 100644
+--- a/main.py
++++ b/main.py
+@@ -499,6 +499,7 @@ class MemoryPlugin(Star):
+                 kv_put=self.put_kv_data,
+                 kv_get=self.get_kv_data,
+                 kv_delete=self.delete_kv_data,
++                get_admin_ids=lambda: self.context.get_config().get("admins_id"),
+             )
+             self.memory_mgr.initialize()
+         except Exception as e:
+@@ -1923,14 +1924,14 @@ class MemoryPlugin(Star):
+ 
+     async def _run_memory_test(self, event: AstrMessageEvent) -> str:
+         """执行一次记忆写入-读取测试并返回报告"""
+-        test_content = "memory_test_probe_这是一条测试记忆"
+         test_domain = "facts"
+         uri = str(MemoryURI.generate(test_domain))
++        test_content = f"memory_test_probe_{uri}_这是一条测试记忆"
+         report = ["[记忆读写测试]"]
+ 
+         # 写入测试
+         try:
+-            await self.memory_mgr.store_memory(
++            uri = await self.memory_mgr.store_memory(
+                 event=event,
+                 content=test_content,
+                 domain=test_domain,
+@@ -1953,7 +1954,7 @@ class MemoryPlugin(Star):
+                 top_k=3,
+                 source="command_test",
+             )
+-            hit = any("memory_test_probe" in r.get("text", "") for r in results)
++            hit = any(r.get("metadata", {}).get("uri") == uri for r in results)
+             report.append(
+                 f"  召回: {'命中' if hit else '未命中'} (返回 {len(results)} 条)"
+             )
+@@ -2173,7 +2174,7 @@ class MemoryPlugin(Star):
+         domain = normalize_domain(mem_type_lower)
+         uri = str(MemoryURI.generate(domain))
+ 
+-        await self.memory_mgr.store_memory(
++        uri = await self.memory_mgr.store_memory(
+             event=event,
+             content=content,
+             domain=domain,
+@@ -2214,6 +2215,8 @@ class MemoryPlugin(Star):
+             return f"Error: memory not found or not yours: {uri}"
+ 
+         old_meta = old_memory.get("metadata", {})
++        if "private_admin_pool" in old_meta and not self.memory_mgr._is_memory_visible(event, old_memory):
++            return f"Error: memory not found or not yours: {uri}"
+ 
+         target_user_id = old_meta.get("owner_user_id") or old_meta.get("user_id")
+         if err := authorize_memory_mutation(event, target_user_id=target_user_id):
+@@ -2237,6 +2240,7 @@ class MemoryPlugin(Star):
+                 new_content=content,
+                 new_disclosure=new_disclosure,
+                 updated_by="admin" if event.is_admin() else "user",
++                **({"event": event} if "private_admin_pool" in old_meta else {}),
+             )
+         except Exception as e:
+             return f"Error: failed to update memory: {e}"
+diff --git a/maintenance/agents/curator.py b/maintenance/agents/curator.py
+index dd1ee60..8b64a44 100644
+--- a/maintenance/agents/curator.py
++++ b/maintenance/agents/curator.py
+@@ -17,11 +17,15 @@ from ..prompts import CURATOR_EXTRACTION_PROMPT, build_prompt
+ 
+ try:  # 正常插件加载（包内相对导入）
+     from ...extraction_utils import validate_extracted_memories
+-    from ...memory_protocol import UMOInfo, build_session_id, validate_owner_ids
++    from ...memory_protocol import (
++        MaintenanceEvent, UMOInfo, build_session_id, maintenance_sender_ids, validate_owner_ids,
++    )
+     from ...prompts import sanitize_memory_content
+ except ImportError:  # 测试环境：仓库根作为顶层目录直接在 sys.path
+     from extraction_utils import validate_extracted_memories
+-    from memory_protocol import UMOInfo, build_session_id, validate_owner_ids
++    from memory_protocol import (
++        MaintenanceEvent, UMOInfo, build_session_id, maintenance_sender_ids, validate_owner_ids,
++    )
+     from prompts import sanitize_memory_content
+ 
+ 
+@@ -105,9 +109,9 @@ class CuratorAgent:
+         if not parsed_umo.is_valid or parsed_umo.platform_id != block.platform_id:
+             logger.warning("[简单长期记忆] 整理师跳过无效 UMO，不提交提取进度")
+             return "failed"
+-        sender_ids = list(getattr(block, "sender_ids", []))
+-        if parsed_umo.session_type == "private" and not sender_ids:
+-            sender_ids = [parsed_umo.session_id]
++        sender_ids = maintenance_sender_ids(
++            parsed_umo, list(getattr(block, "sender_ids", [])), self._config
++        )
+         old_memories = await self._retrieve_old_memories(block, parsed_umo)
+         old_uris = {m["uri"] for m in old_memories}
+         existing_text = (
+@@ -181,6 +185,9 @@ class CuratorAgent:
+         updates = self._parse_updates(parsed_json.get("updates"), old_uris)
+         for op in updates:
+             op["_extract_block"] = block.key
++            if self._config.get("private_admin_shared_store") is True:
++                op["umo"] = block.umo
++                op["sender_ids"] = sender_ids
+         result["create"].extend(creates)
+         result["update"].extend(updates)
+         note = str(parsed_json.get("notes") or "").strip()
+@@ -242,12 +249,20 @@ class CuratorAgent:
+                 except Exception:
+                     meta = {}
+             if meta.get("memory_scope") == "personal":
+-                sender_ids = list(getattr(block, "sender_ids", []))
+-                if parsed_umo.session_type == "private" and not sender_ids:
+-                    sender_ids = [parsed_umo.session_id]
++                sender_ids = maintenance_sender_ids(
++                    parsed_umo, list(getattr(block, "sender_ids", [])), self._config
++                )
+                 allowed = {f"{parsed_umo.platform_id}_{sid}" for sid in sender_ids}
+                 owners = meta.get("owner_user_ids") or [meta.get("owner_user_id")]
+-                if not isinstance(owners, list) or not set(owners).issubset(allowed):
++                if meta.get("private_admin_pool"):
++                    if len(sender_ids) != 1:
++                        continue
++                    event = MaintenanceEvent(
++                        block.umo, sender_ids[0], self._memory_mgr._get_admin_ids
++                    )
++                    if not self._memory_mgr._is_memory_visible(event, {"metadata": meta}):
++                        continue
++                elif not isinstance(owners, list) or not set(owners).issubset(allowed):
+                     continue
+             uri = str(meta.get("uri") or "")
+             if not uri:
+diff --git a/maintenance/links.py b/maintenance/links.py
+index f18a7fb..f31c855 100644
+--- a/maintenance/links.py
++++ b/maintenance/links.py
+@@ -226,6 +226,26 @@ class MemoryLinkManager:
+             logger.debug(f"[简单长期记忆] 查询入边关联失败: {e}")
+             return []
+ 
++    async def redirect_uri(self, old_uri: str, new_uri: str) -> None:
++        """Move all edges to a surviving URI, preserving provenance and excluding self-links."""
++        from sqlalchemy import text as sa_text
++
++        params = {"old": old_uri, "new": new_uri}
++        storage = self._vec_db.document_storage
++        async with storage.get_session() as session, session.begin():
++            await session.execute(sa_text(
++                "INSERT OR IGNORE INTO memory_links "
++                "(source_uri,target_uri,relation_type,reason,confidence,created_by,created_at) "
++                "SELECT CASE WHEN source_uri=:old THEN :new ELSE source_uri END,"
++                "CASE WHEN target_uri=:old THEN :new ELSE target_uri END,"
++                "relation_type,reason,confidence,created_by,created_at FROM memory_links "
++                "WHERE (source_uri=:old OR target_uri=:old) AND source_uri!=target_uri "
++                "AND source_uri!=:new AND target_uri!=:new"
++            ), params)
++            await session.execute(sa_text(
++                "DELETE FROM memory_links WHERE source_uri=:old OR target_uri=:old"
++            ), params)
++
+     async def delete_links_for_uris(self, uris: list[str]) -> int:
+         """级联删除涉及指定 URI 的所有关联边。"""
+         uris = [u for u in uris if u]
+diff --git a/maintenance/runner.py b/maintenance/runner.py
+index f7af9bc..1bcf4c5 100644
+--- a/maintenance/runner.py
++++ b/maintenance/runner.py
+@@ -28,16 +28,20 @@ from .llm import MaintenanceLLM
+ try:  # 正常插件加载（包内相对导入）
+     from ..extraction_utils import normalize_extracted_scope
+     from ..memory_protocol import (
++        MaintenanceEvent as _MaintenanceEvent,
+         MemoryScope,
+         UMOInfo,
++        maintenance_sender_ids,
+         normalize_memory_scope,
+         validate_owner_ids,
+     )
+ except ImportError:  # 测试环境：仓库根作为顶层目录直接在 sys.path
+     from extraction_utils import normalize_extracted_scope
+     from memory_protocol import (
++        MaintenanceEvent as _MaintenanceEvent,
+         MemoryScope,
+         UMOInfo,
++        maintenance_sender_ids,
+         normalize_memory_scope,
+         validate_owner_ids,
+     )
+@@ -139,17 +143,6 @@ class MaintenanceReport:
+         }
+ 
+ 
+-class _MaintenanceEvent:
+-    """后台提取用最小事件 shim：无真实消息事件，只提供 store_memory 所需字段。"""
+-
+-    def __init__(self, umo: str, sender_id: str = "") -> None:
+-        self.unified_msg_origin = umo
+-        self._sender_id = sender_id
+-
+-    def get_sender_id(self) -> str:
+-        return self._sender_id
+-
+-
+ class MaintenanceRunner:
+     """后台整理执行管线。"""
+ 
+@@ -1115,8 +1108,10 @@ class MaintenanceRunner:
+         subjects = [str(s) for s in (op.get("subjects") or []) if s]
+         subject = str(op.get("subject") or "") or (subjects[0] if subjects else "")
+         allowed_sender_ids = list(op.get("sender_ids") or [])
+-        if parsed.session_type == "private" and "sender_ids" not in op:
+-            allowed_sender_ids = [parsed.session_id]
++        if "sender_ids" not in op:
++            allowed_sender_ids = maintenance_sender_ids(
++                parsed, allowed_sender_ids, getattr(self._memory_mgr, "config", {})
++            )
+         if scope == MemoryScope.PERSONAL:
+             try:
+                 subjects = validate_owner_ids(
+@@ -1131,7 +1126,11 @@ class MaintenanceRunner:
+         if not sender_id:
+             logger.warning("[简单长期记忆] create 操作缺少可归属的 sender: umo=%s", umo)
+             return False
+-        event = _MaintenanceEvent(umo=umo, sender_id=sender_id)
++        event = _MaintenanceEvent(
++            umo=umo, sender_id=sender_id,
++            get_admin_ids=getattr(self._memory_mgr, "_get_admin_ids", None)
++            if allowed_sender_ids == [sender_id] else None,
++        )
+         is_personal = scope == MemoryScope.PERSONAL
+         try:
+             extra = {"created_by": "maintenance_curator"}
+@@ -1217,6 +1216,10 @@ class MaintenanceRunner:
+         if not old_docs:
+             if done:
+                 return True
++            if extraction_id and getattr(self._memory_mgr, "config", {}).get("private_admin_shared_store"):
++                alias = await self._memory_mgr._pool_alias_document(uri)
++                if alias and alias["metadata"].get("memory_content") == new_content.strip():
++                    return True
+             logger.warning(f"[简单长期记忆] update 找不到记忆: {uri}")
+             return False
+ 
+@@ -1229,6 +1232,13 @@ class MaintenanceRunner:
+             except Exception:
+                 raw_meta = {}
+         old_metadata = raw_meta if isinstance(raw_meta, dict) else {}
++        if extraction_id and old_metadata.get("private_admin_pool"):
++            sender_ids = op.get("sender_ids", [])
++            if len(sender_ids) != 1:
++                return False
++            event = _MaintenanceEvent(op.get("umo", ""), sender_ids[0], self._memory_mgr._get_admin_ids)
++            if not self._memory_mgr._is_memory_visible(event, {"metadata": old_metadata}):
++                return False
+         if extraction_id:
+             old_metadata = {**old_metadata, "extraction_id": extraction_id}
+         try:
+diff --git a/memory_manager.py b/memory_manager.py
+index 5772ae3..ebde1e0 100644
+--- a/memory_manager.py
++++ b/memory_manager.py
+@@ -18,6 +18,7 @@ import math
+ import time
+ import uuid
+ from collections.abc import Callable
++from contextlib import nullcontext
+ from datetime import datetime, timedelta, timezone
+ from typing import TYPE_CHECKING, Any
+ 
+@@ -219,6 +220,7 @@ class MemoryManager:
+         kv_put: KVPutFn | None = None,
+         kv_get: KVGetFn | None = None,
+         kv_delete: KVDeleteFn | None = None,
++        get_admin_ids: Callable[[], list[str] | None] | None = None,
+     ):
+         self.kb_mgr = kb_mgr
+         self.config = config
+@@ -230,6 +232,8 @@ class MemoryManager:
+         self._kv_put = kv_put
+         self._kv_get = kv_get
+         self._kv_delete = kv_delete
++        self._get_admin_ids = get_admin_ids
++        self._private_pool_lock = asyncio.Lock()
+         # 关联表管理器（connect_kb 后初始化）
+         self._link_manager: MemoryLinkManager | None = None
+         self._last_active_memory_stats: dict[str, Any] = {}
+@@ -796,22 +800,103 @@ class MemoryManager:
+         parsed = UMOInfo.parse(event.unified_msg_origin)
+         return build_user_id(parsed.platform_id, event.get_sender_id())
+ 
++    def _private_admin_peer(self, event: AstrMessageEvent) -> tuple[str, str] | None:
++        pair = self.config.get("private_admin_memory_pair")
++        if not isinstance(pair, list) or len(pair) != 2:
++            return None
++        if not self.config.get("global_memory", True) or not self._get_admin_ids:
++            return None
++        identities = []
++        for value in pair:
++            if not isinstance(value, str) or value.count(":") != 1:
++                return None
++            platform, sender = value.split(":")
++            if any(not part or part != part.strip() for part in (platform, sender)):
++                return None
++            if any(char in value for char in "*?[]"):
++                return None
++            identities.append((platform, sender))
++        parsed = UMOInfo.parse(event.unified_msg_origin)
++        if not parsed.is_valid or parsed.session_type != "private":
++            return None
++        try:
++            current = (event.get_platform_id(), event.get_sender_id())
++            if (
++                parsed.platform_id != current[0]
++                or identities[0] == identities[1]
++                or current not in identities
++                or event.is_admin() is not True
++            ):
++                return None
++            admins = self._get_admin_ids()
++            if not isinstance(admins, list) or not all(
++                sender in admins for _, sender in identities
++            ):
++                return None
++        except Exception:
++            return None
++        return identities[1] if current == identities[0] else identities[0]
++
++    def _private_admin_pool(self, event: AstrMessageEvent) -> str | None:
++        if self.config.get("private_admin_shared_store") is not True:
++            return None
++        if event.unified_msg_origin.split(":", 2)[1:2] != ["FriendMessage"]:
++            return None
++        if not self._private_admin_peer(event):
++            return None
++        pair = sorted(self.config["private_admin_memory_pair"])
++        payload = json.dumps(pair, ensure_ascii=False, separators=(",", ":"))
++        return "private-admin-pair:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
++
++    @staticmethod
++    def _pool_filters(pool: str) -> dict[str, Any]:
++        return {
++            "private_admin_pool": pool,
++            "owner_user_id": pool,
++            "user_id": pool,
++            "memory_scope": MemoryScope.PERSONAL,
++            "visibility": MemoryVisibility.PRIVATE,
++            "is_memory_record": True,
++        }
++
++    async def _find_pool_content(self, kb: KBHelper, pool: str, content: str):
++        docs = await kb.vec_db.document_storage.get_documents(
++            metadata_filters={**self._pool_filters(pool), "deprecated": False,
++                              "memory_content": content},
++            limit=1,
++        )
++        return docs[0] if docs else None
++
++    async def _ensure_pool_document(self, kb: KBHelper, document: dict[str, Any]) -> str:
++        meta = _safe_parse_metadata(document["metadata"])
++        if kb is self._kb_helper:
++            await self._ensure_extraction_vector(document)
++        else:
++            await self._ensure_extraction_vector(document, kb)
++        if not await self._repair_kb_document_for_vector_doc(kb, document, meta["uri"]):
++            raise RuntimeError("Could not register the shared memory document")
++        return meta["uri"]
++
++    @staticmethod
++    def _is_private_peer_memory(meta: dict[str, Any], peer: tuple[str, str]) -> bool:
++        platform, sender = peer
++        owner = build_user_id(platform, sender)
++        return (
++            meta.get("memory_scope") == MemoryScope.PERSONAL
++            and meta.get("visibility") == MemoryVisibility.PRIVATE
++            and meta.get("platform_id") == platform
++            and meta.get("owner_user_id") == owner
++            and meta.get("owner_user_ids", [owner]) == [owner]
++            and meta.get("deprecated") is False
++            and meta.get("is_memory_record") is True
++        )
++
+     def _is_visible_shared_personal(
+         self, event: AstrMessageEvent, metadata: dict[str, Any]
+     ) -> bool:
+         """所有读取通道使用相同的归属与共享规则。"""
+         return self._is_memory_visible(event, {"metadata": metadata})
+ 
+-    def _filter_visible_shared_personal(
+-        self, event: AstrMessageEvent, memories: list[dict[str, Any]]
+-    ) -> list[dict[str, Any]]:
+-        visible = []
+-        for memory in memories:
+-            metadata = _safe_parse_metadata(memory.get("metadata", {}))
+-            if self._is_visible_shared_personal(event, metadata):
+-                visible.append(memory)
+-        return visible
+-
+     async def _shared_personal_documents(
+         self,
+         event: AstrMessageEvent,
+@@ -1090,16 +1175,55 @@ class MemoryManager:
+             "owner_session_id",
+             "visibility",
+             "speaker_id",
++            "private_admin_pool",
++            "private_admin_previous_uris",
+         }
+         if protected.intersection(extra_metadata or {}):
+             raise ValueError("extra_metadata must not override scope or ownership")
+         if memory_scope == MemoryScope.PERSONAL and len(owner_sender_ids) > 1:
+             visibility = MemoryVisibility.GROUP
+ 
+-        if uri is None:
+-            uri = str(MemoryURI.generate(domain))
+-
+-        extraction_id = (extra_metadata or {}).get("extraction_id")
++        pool = None
++        if (memory_scope == MemoryScope.PERSONAL
++                and visibility == MemoryVisibility.PRIVATE
++                and owner_sender_ids == [event.get_sender_id()]):
++            pool = self._private_admin_pool(event)
++        lock_buffer = self._rebuilding and self.config.get("private_admin_shared_store") is True
++        async with self._private_pool_lock if pool or lock_buffer else nullcontext():
++            if pool and self._private_admin_pool(event) != pool:
++                pool = None
++            if pool:
++                content = content.strip()
++            uri = uri or str(MemoryURI.generate(domain))
++            metadata = self._build_memory_metadata(
++                event,
++                domain=domain,
++                uri=uri,
++                version=1,
++                deprecated=False,
++                memory_type=memory_type,
++                disclosure=disclosure,
++                importance=importance,
++                memory_scope=memory_scope,
++                visibility=visibility,
++                subject=subject,
++                entities=entities,
++                topics=topics,
++                memory_content=content,
++                owner_sender_ids=owner_sender_ids,
++            )
++            if extra_metadata:
++                metadata.update(extra_metadata)
++            if pool:
++                metadata.update(user_id=pool, owner_user_id=pool, owner_user_ids=[pool],
++                                private_admin_pool=pool, memory_content=content)
++            return await self._store_memory_record(content, metadata)
++
++    async def _store_memory_record(self, content: str, metadata: dict[str, Any]) -> str:
++        uri = metadata["uri"]
++        domain = metadata["domain"]
++        pool = metadata.get("private_admin_pool")
++        extraction_id = metadata.get("extraction_id")
+         if extraction_id:
+             for item in self._pending_writes:
+                 if item.get("extraction_id") == extraction_id:
+@@ -1117,96 +1241,47 @@ class MemoryManager:
+                     limit=1,
+                 )
+                 if existing:
++                    if pool:
++                        return await self._ensure_pool_document(self._kb_helper, existing[0])
+                     await self._ensure_extraction_vector(existing[0])
+                     return str(
+                         _safe_parse_metadata(existing[0].get("metadata", {}))["uri"]
+                     )
+ 
+-        logger.debug(
+-            "[简单长期记忆] 存储开始: uri=%s, domain=%s, memory_type=%s, "
+-            "scope=%s, visibility=%s, importance=%s, content=%s",
+-            uri,
+-            domain,
+-            memory_type,
+-            memory_scope,
+-            visibility,
+-            importance,
+-            _debug_content_summary(content),
+-        )
++        if pool:
++            for item in self._pending_writes:
++                if item.get("private_admin_pool") == pool and item["content"].strip() == content:
++                    if self._kv_put:
++                        await self._kv_put("rebuild_pending_writes", self._pending_writes)
++                    return item["uri"]
++            if self._kb_helper:
++                duplicate = await self._find_pool_content(self._kb_helper, pool, content)
++                if duplicate:
++                    return await self._ensure_pool_document(self._kb_helper, duplicate)
+ 
+-        # 重建/迁移期间：暂存到本地缓冲区并持久化到 KV，完成后批量处理
++        # Buffered and immediate writes use the same source and ownership metadata.
+         if self._rebuilding:
+-            umo = event.unified_msg_origin
+-            parsed, owner_user_id, owner_session_id = self._event_scope_ids(
+-                event, owner_sender_ids[0]
+-            )
+-            owner_user_ids = self._build_owner_user_ids(
+-                parsed.platform_id, owner_sender_ids
+-            )
+-            item = {
+-                "content": content,
+-                "domain": domain,
+-                "uri": uri,
+-                "memory_type": memory_type,
+-                "disclosure": disclosure,
+-                "importance": importance,
+-                "user_id": owner_user_id,
+-                "owner_user_ids": owner_user_ids,
+-                "platform_id": parsed.platform_id,
+-                "sender_id": owner_sender_ids[0],
+-                "umo": umo,
+-                "session_type": parsed.session_type,
+-                "session_id": parsed.session_id,
+-                "memory_scope": memory_scope,
+-                "owner_user_id": owner_user_id,
+-                "owner_session_id": owner_session_id,
+-                "visibility": visibility,
+-                "speaker_id": event.get_sender_id(),
+-                "subject": subject,
+-                "entities": entities,
+-                "topics": topics,
+-            }
+-            if extra_metadata:
+-                item.update(extra_metadata)
+-            self._pending_writes.append(item)
+-            # 持久化缓冲区到 KV，防进程重启丢失
++            if pool:
++                collision = any(item["uri"] == uri for item in self._pending_writes)
++                if not collision and self._kb_helper:
++                    collision = bool(await self.vec_db.document_storage.get_documents(
++                        metadata_filters={"uri": uri}, limit=1
++                    ))
++                if collision:
++                    uri = metadata["uri"] = str(MemoryURI.generate(domain))
++            self._pending_writes.append({**metadata, "content": content})
+             if self._kv_put:
+                 await self._kv_put("rebuild_pending_writes", self._pending_writes)
+-            logger.debug(f"[简单长期记忆] 重建进行中，已缓冲记忆: {uri}")
+             return uri
+ 
+-        # URI 去重：同名 URI 已存在时，内容相同则跳过，内容不同则换新 URI
+         existing = await self.vec_db.document_storage.get_documents(
+             metadata_filters={"uri": uri}, limit=1
+         )
+         if existing:
+             old_text = existing[0].get("text", "")
+-            if old_text.strip() == content.strip():
+-                logger.debug(f"[简单长期记忆] 内容重复，跳过写入: {uri}")
++            if not pool and old_text.strip() == content.strip():
+                 return uri
+-            uri = str(MemoryURI.generate(domain))
+-            logger.debug(f"[简单长期记忆] URI 冲突且内容不同，已重新生成: {uri}")
+-
+-        metadata = self._build_memory_metadata(
+-            event,
+-            domain=domain,
+-            uri=uri,
+-            version=1,
+-            deprecated=False,
+-            memory_type=memory_type,
+-            disclosure=disclosure,
+-            importance=importance,
+-            memory_scope=memory_scope,
+-            visibility=visibility,
+-            subject=subject,
+-            entities=entities,
+-            topics=topics,
+-            memory_content=content,
+-            owner_sender_ids=owner_sender_ids,
+-        )
+-        # 调用方附加的 provenance 字段（如 created_by）；系统字段以显式赋值为准
+-        if extra_metadata:
+-            metadata.update(extra_metadata)
++            uri = metadata["uri"] = str(MemoryURI.generate(domain))
+ 
+         # 生成 KB 文档 ID 并关联到向量条目
+         doc_id = str(uuid.uuid4())
+@@ -1246,6 +1321,8 @@ class MemoryManager:
+                 doc_id,
+             )
+         except Exception as e:
++            if pool:
++                raise RuntimeError("Could not register the shared memory document") from e
+             logger.warning(f"[简单长期记忆] KB 文档注册失败（不影响记忆功能）: {e}")
+ 
+         logger.debug(
+@@ -1256,34 +1333,84 @@ class MemoryManager:
+         )
+         return uri
+ 
+-    async def _ensure_extraction_vector(self, document: dict[str, Any]) -> None:
++    async def _ensure_extraction_vector(
++        self, document: dict[str, Any], kb: KBHelper | None = None
++    ) -> None:
+         # AstrBot commits the document before its vector; a retry can see either
+         # a missing vector or one that was added in memory but not saved to disk.
+-        storage = self.vec_db.embedding_storage
++        vec_db = kb.vec_db if kb is not None else self.vec_db
++        storage = vec_db.embedding_storage
+         doc_id = int(document["id"])
++        meta = _safe_parse_metadata(document["metadata"])
+         prepared = self._prepare_faiss_index(storage.index)
+         vector, status, detail = self._reconstruct_faiss_vector(
+             storage.index, doc_id, prepared
+         )
+         if status in {"index_unavailable", "faiss_unavailable"}:
+             raise RuntimeError(f"Cannot verify extraction vector: {detail}")
+-        if vector is None:
++        if vector is None or meta.get("private_admin_refresh_vector"):
+             import numpy as np
+ 
+-            embedding = await self.vec_db.embedding_provider.get_embedding(
++            embedding = await vec_db.embedding_provider.get_embedding(
+                 document["text"]
+             )
+             await storage.delete([doc_id])
+             await storage.insert(np.asarray(embedding, dtype=np.float32), doc_id)
++            if meta.get("private_admin_refresh_vector"):
++                from sqlalchemy import text as sa_text
++
++                async with vec_db.document_storage.get_session() as session, session.begin():
++                    await session.execute(sa_text(
++                        "UPDATE documents SET metadata=json_remove(metadata,'$.private_admin_refresh_vector')"
++                        " WHERE id=:id"
++                    ), {"id": doc_id})
+         else:
+             await storage.save_index()
+ 
++    async def _absorb_pool_history(self, kb, source, target):
++        """Preserve old identifiers and add their recall counts once, including on retry."""
++        from sqlalchemy import text as sa_text
++
++        match = _safe_parse_metadata(target["metadata"])
++        aliases = list(match.get("private_admin_previous_uris", []))
++        if source["uri"] in aliases:
++            return
++        aliases = list(dict.fromkeys([*aliases, source["uri"], *source.get("private_admin_previous_uris", [])]))
++        async with kb.vec_db.document_storage.get_session() as session, session.begin():
++            changed = await session.execute(sa_text(
++                "UPDATE documents SET metadata=json_set(metadata,"
++                "'$.private_admin_previous_uris',json(:aliases),'$.recall_count',"
++                "coalesce(json_extract(metadata,'$.recall_count'),0)+:count)"
++                " WHERE json_extract(metadata,'$.kb_doc_id')=:doc"
++            ), {"aliases": json.dumps(aliases), "count": int(source.get("recall_count") or 0),
++                "doc": match["kb_doc_id"]})
++            if changed.rowcount != 1:
++                raise RuntimeError("Could not preserve shared memory history")
++
++    async def _update_pool_disclosure(self, doc, disclosure, updated_by):
++        from sqlalchemy import text as sa_text
++
++        meta = _safe_parse_metadata(doc["metadata"])
++        formatted = format_memory_content(meta["memory_content"], {**meta, "disclosure": disclosure})
++        async with self.vec_db.document_storage.get_session() as session, session.begin():
++            result = await session.execute(sa_text(
++                "UPDATE documents SET text=:body, metadata=json_set(metadata,"
++                "'$.disclosure',:disclosure,'$.version',coalesce(json_extract(metadata,'$.version'),1)+1,"
++                "'$.updated_at',:now,'$.updated_by',:actor,'$.private_admin_refresh_vector',1)"
++                " WHERE json_extract(metadata,'$.kb_doc_id')=:doc RETURNING id, text, metadata"
++            ), {"body": formatted, "disclosure": disclosure, "now": datetime.now(timezone.utc).isoformat(),
++                "actor": updated_by, "doc": meta["kb_doc_id"]})
++            row = result.mappings().one()
++        return await self._ensure_pool_document(self._kb_helper, dict(row))
++
+     async def replace_memory(
+         self,
+         old_metadata: dict[str, Any],
+         new_content: str,
+         new_disclosure: str | None = None,
+         updated_by: str = "user",
++        *,
++        event: AstrMessageEvent | None = None,
+     ) -> str:
+         """替换记忆内容，完整保留原始租户/作用域/归属元数据。
+ 
+@@ -1302,23 +1429,67 @@ class MemoryManager:
+         Raises:
+             RuntimeError: 写入新记录失败
+         """
++        pool = old_metadata.get("private_admin_pool")
++        async with self._private_pool_lock if pool else nullcontext():
++            if pool and event is not None and not self._is_memory_visible(event, {"metadata": old_metadata}):
++                raise ValueError("Shared memory is unavailable for this account")
++            if pool and self._rebuilding:
++                raise RuntimeError("Shared memory update is unavailable during index rebuild")
++            return await self._replace_record(old_metadata, new_content, new_disclosure, updated_by)
++
++    async def _replace_record(
++        self, old_metadata: dict[str, Any], new_content: str,
++        new_disclosure: str | None, updated_by: str,
++    ) -> str:
+         old_domain = old_metadata.get("domain", "facts")
+         old_uri = old_metadata.get("uri", "")
+         new_uri = str(MemoryURI.generate(old_domain))
+         new_doc_id = str(uuid.uuid4())
+-        existing_replacement = []
+-        if updated_by == "maintenance_curator" and old_metadata.get("extraction_id"):
+-            existing_replacement = await self.vec_db.document_storage.get_documents(
+-                metadata_filters={
+-                    "extraction_id": old_metadata["extraction_id"],
+-                    "is_memory_record": True,
+-                },
++        pool = old_metadata.get("private_admin_pool")
++        duplicate = None
++        if pool:
++            current = await self.vec_db.document_storage.get_documents(
++                metadata_filters={**self._pool_filters(pool), "uri": old_uri,
++                                  "kb_doc_id": old_metadata["kb_doc_id"], "deprecated": False},
+                 limit=1,
+             )
+-            if existing_replacement:
++            if not current:
++                raise ValueError("Shared memory changed before the update")
++            fresh = _safe_parse_metadata(current[0]["metadata"])
++            if updated_by == "maintenance_curator" and old_metadata.get("extraction_id"):
++                fresh = {**fresh, "extraction_id": old_metadata["extraction_id"]}
++            old_metadata = fresh
++            new_content = new_content.strip()
++            duplicate = await self._find_pool_content(self._kb_helper, pool, new_content)
++            if duplicate:
++                match = _safe_parse_metadata(duplicate["metadata"])
++                same_disclosure = new_disclosure is None or new_disclosure == match.get("disclosure")
++                if not same_disclosure:
++                    await self._update_pool_disclosure(duplicate, new_disclosure, updated_by)
++                else:
++                    await self._ensure_pool_document(self._kb_helper, duplicate)
++                if match["uri"] == old_uri:
++                    return old_uri
++
++        existing_replacement = [duplicate] if duplicate else []
++        if updated_by == "maintenance_curator" and old_metadata.get("extraction_id"):
++            if not existing_replacement:
++                existing_replacement = await self.vec_db.document_storage.get_documents(
++                    metadata_filters={
++                        "extraction_id": old_metadata["extraction_id"],
++                        "is_memory_record": True,
++                    },
++                    limit=1,
++                )
++            if existing_replacement and _safe_parse_metadata(
++                existing_replacement[0]["metadata"]
++            ).get("extraction_id") == old_metadata["extraction_id"]:
+                 await self._ensure_extraction_vector(existing_replacement[0])
+-                meta = _safe_parse_metadata(existing_replacement[0].get("metadata", {}))
+-                new_uri, new_doc_id = meta["uri"], meta["kb_doc_id"]
++        if existing_replacement:
++            match = _safe_parse_metadata(existing_replacement[0]["metadata"])
++            new_uri, new_doc_id = match["uri"], match["kb_doc_id"]
++            if pool:
++                await self._absorb_pool_history(self._kb_helper, old_metadata, existing_replacement[0])
+ 
+         logger.debug(
+             "[简单长期记忆] 替换开始: old_uri=%s, old_doc_id=%s, new_uri=%s, "
+@@ -1333,6 +1504,10 @@ class MemoryManager:
+         # 构建新 metadata：复制全部旧字段，只更新内容相关字段
+         new_metadata = {**old_metadata}
+         new_metadata["uri"] = new_uri
++        if pool:
++            new_metadata["private_admin_previous_uris"] = list(dict.fromkeys(
++                [*old_metadata.get("private_admin_previous_uris", []), old_uri]
++            ))
+         new_metadata["kb_doc_id"] = new_doc_id
+         new_metadata["memory_content"] = new_content
+         new_metadata["version"] = old_metadata.get("version", 1) + 1
+@@ -1362,9 +1537,8 @@ class MemoryManager:
+ 
+         # 注册 KB 文档
+         try:
+-            await self._register_kb_document(
+-                new_doc_id, new_uri, len(formatted_content)
+-            )
++            if not (pool and existing_replacement):
++                await self._register_kb_document(new_doc_id, new_uri, len(formatted_content))
+             await self._sync_kb_stats()
+             logger.debug(
+                 "[简单长期记忆] 替换新 KB 注册完成: new_uri=%s, new_doc_id=%s",
+@@ -1372,8 +1546,13 @@ class MemoryManager:
+                 new_doc_id,
+             )
+         except Exception as e:
++            if pool:
++                raise RuntimeError("Could not register the shared memory replacement") from e
+             logger.warning(f"[简单长期记忆] replace KB 文档注册失败: {e}")
+ 
++        if pool and self._link_manager:
++            await self._link_manager.redirect_uri(old_uri, new_uri)
++
+         # 删除旧记录（向量 + KB 文档）
+         # 删除旧向量失败时中止，避免数据不一致
+         old_doc_id = old_metadata.get("kb_doc_id", "")
+@@ -1391,6 +1570,8 @@ class MemoryManager:
+                 )
+             except Exception as e:
+                 logger.error(f"[简单长期记忆] replace 删除旧向量失败，中止操作: {e}")
++                if pool or existing_replacement:
++                    raise RuntimeError("Could not remove the previous memory record") from e
+                 # 尝试回滚：删除刚写入的新记录（向量 + KB 文档）
+                 try:
+                     await self.vec_db.delete_documents(
+@@ -1426,7 +1607,7 @@ class MemoryManager:
+                 except Exception as e:
+                     logger.warning(f"[简单长期记忆] replace 删除旧 KB 文档失败: {e}")
+         # 迁移关联边
+-        if self._link_manager and old_uri:
++        if self._link_manager and old_uri and not pool:
+             try:
+                 out_links = await self._link_manager.get_links_for_uri(
+                     old_uri, injectable_only=False, limit=0
+@@ -1435,6 +1616,8 @@ class MemoryManager:
+                     old_uri, injectable_only=False, limit=0
+                 )
+                 for link in out_links:
++                    if link["target_uri"] == new_uri:
++                        continue
+                     await self._link_manager.add_link(
+                         new_uri,
+                         link["target_uri"],
+@@ -1444,6 +1627,8 @@ class MemoryManager:
+                         created_by="replace",
+                     )
+                 for link in in_links:
++                    if link["source_uri"] == new_uri:
++                        continue
+                     await self._link_manager.add_link(
+                         link["source_uri"],
+                         new_uri,
+@@ -1568,6 +1753,16 @@ class MemoryManager:
+             top_k = self.config.get("max_memories_per_inject", 5)
+         fetch_k = max(top_k, min(top_k * 3, 20))
+ 
++        private_peer = (
++            self._private_admin_peer(event)
++            if (
++                source == "auto_inject"
++                and self.config.get("private_admin_shared_store") is not True
++                and not all_users
++                and memory_scope in (None, MemoryScope.PERSONAL)
++            )
++            else None
++        )
+         if all_users:
+             filters = {"is_memory_record": True, "deprecated": False}
+             if domain:
+@@ -1605,6 +1800,7 @@ class MemoryManager:
+                 global_memory=global_memory,
+                 domain=domain,
+                 memory_scope=memory_scope,
++                private_peer=private_peer,
+             )
+ 
+             logger.debug(
+@@ -1622,6 +1818,11 @@ class MemoryManager:
+                     trace_id=trace_id,
+                     final_top_k=top_k,
+                     event=event,
++                    private_peer=(
++                        private_peer
++                        if filters.get("visibility") == MemoryVisibility.PRIVATE
++                        else None
++                    ),
+                     deadline=deadline,
+                     retry_budget=retry_budget,
+                 )
+@@ -1638,7 +1839,9 @@ class MemoryManager:
+             )
+             channel_counts = [len(items) for items in results_list]
+             combined = [item for sublist in results_list for item in sublist]
+-            visible = self._filter_visible_shared_personal(event, combined)
++            visible = [
++                m for m in combined if self._is_memory_visible(event, m, private_peer)
++            ]
+             deduped = self._dedupe_memories(visible)
+             memories = deduped[:top_k]
+             logger.debug(
+@@ -1673,6 +1876,7 @@ class MemoryManager:
+                 m.get("metadata", {}).get("uri")
+                 for m in memories
+                 if m.get("metadata", {}).get("uri")
++                and (not private_peer or self._is_memory_visible(event, m))
+             ]
+             await self._run_recall_channel(
+                 self._bump_recall_stats(recalled_uris, trace_id=trace_id),
+@@ -1695,7 +1899,25 @@ class MemoryManager:
+                 if top_k and len(memories) > top_k:
+                     memories = memories[:top_k]
+         if not all_users:
+-            memories = [m for m in memories if self._is_memory_visible(event, m)]
++            # 再次核对管理员名单，防止在异步检索期间撤销授权后仍注入。
++            if private_peer and self._private_admin_peer(event) != private_peer:
++                private_peer = None
++            visible = []
++            for memory in memories:
++                if self._is_memory_visible(event, memory):
++                    visible.append(memory)
++                elif private_peer and self._is_private_peer_memory(
++                    _safe_parse_metadata(memory.get("metadata", {})), private_peer
++                ):
++                    visible.append({**memory, "_private_admin_peer": True})
++            memories = visible
++        for memory in memories:
++            meta = memory.get("metadata", {})
++            if meta.get("private_admin_pool"):
++                if event is not None and self._is_memory_visible(event, memory):
++                    memory["_private_admin_self"] = True
++                elif all_users:
++                    memory["_private_admin_admin_view"] = True
+         logger.debug(
+             "[简单长期记忆] 召回完成: trace_id=%s, source=%s, count=%s, "
+             "elapsed_ms=%s, memories=%s",
+@@ -1861,7 +2083,10 @@ class MemoryManager:
+             return None
+ 
+     def _is_memory_visible(
+-        self, event: AstrMessageEvent, memory: dict[str, Any]
++        self,
++        event: AstrMessageEvent,
++        memory: dict[str, Any],
++        private_peer: tuple[str, str] | None = None,
+     ) -> bool:
+         """检查记忆对当前事件是否可见。
+ 
+@@ -1871,12 +2096,18 @@ class MemoryManager:
+         parsed = UMOInfo.parse(event.unified_msg_origin)
+         if not parsed.is_valid or meta.get("deprecated", False):
+             return False
++        if "private_admin_pool" in meta:
++            pool = self._private_admin_pool(event)
++            return bool(pool and meta.get("owner_user_ids") == [pool]
++                        and self._matches_filters(meta, self._pool_filters(pool)))
+         scope = meta.get("memory_scope", MemoryScope.PERSONAL)
+         if scope == MemoryScope.GLOBAL:
+             return True
+         if scope == MemoryScope.PERSONAL:
+             current_user = self._current_owner_user_id(event)
+             owners = meta.get("owner_user_ids", [])
++            if private_peer and self._is_private_peer_memory(meta, private_peer):
++                return True
+             is_owner = meta.get("owner_user_id") == current_user
+             if meta.get("visibility") == MemoryVisibility.GROUP:
+                 is_owner = is_owner or (
+@@ -1907,6 +2138,7 @@ class MemoryManager:
+         global_memory: bool,
+         domain: str | None = None,
+         memory_scope: str | None = None,
++        private_peer: tuple[str, str] | None = None,
+     ) -> list[dict[str, Any]]:
+         parsed = UMOInfo.parse(event.unified_msg_origin)
+         if not parsed.is_valid or (
+@@ -1930,6 +2162,20 @@ class MemoryManager:
+             if domain:
+                 filters["domain"] = domain
+             filters_list.append(filters)
++            if scope == MemoryScope.PERSONAL and global_memory:
++                pool = self._private_admin_pool(event)
++                if pool:
++                    filters_list.append({**filters, **self._pool_filters(pool)})
++            if scope == MemoryScope.PERSONAL and global_memory and private_peer:
++                platform, sender = private_peer
++                filters_list.append(
++                    {
++                        **filters,
++                        "platform_id": platform,
++                        "owner_user_id": build_user_id(platform, sender),
++                        "visibility": MemoryVisibility.PRIVATE,
++                    }
++                )
+         return filters_list
+ 
+     async def _retrieve_with_filter(
+@@ -1942,6 +2188,7 @@ class MemoryManager:
+         event: AstrMessageEvent | None = None,
+         deadline: float | None = None,
+         retry_budget: list[int] | None = None,
++        private_peer: tuple[str, str] | None = None,
+     ) -> list[dict[str, Any]]:
+         started_at = time.monotonic()
+         logger.debug(
+@@ -2025,7 +2272,15 @@ class MemoryManager:
+             if len(channels) > 1
+             else dense_memories
+         )
+-        if event is not None:
++        if private_peer:
++            if event is None or self._private_admin_peer(event) != private_peer:
++                return []
++            memories = [
++                m
++                for m in memories
++                if self._is_private_peer_memory(m.get("metadata", {}), private_peer)
++            ]
++        elif event is not None:
+             memories = [m for m in memories if self._is_memory_visible(event, m)]
+         # 融合后统一 rerank（复用知识库配置的 rerank provider）
+         # 候选数不超过最终 top_k 时 rerank 不影响截断，且排序会被信号重排覆盖，直接跳过
+@@ -2319,6 +2574,35 @@ class MemoryManager:
+             deduped.append(mem)
+         return deduped
+ 
++    async def _pool_alias_document(
++        self, uri: str, pool: str | None = None
++    ) -> dict[str, Any] | None:
++        """Resolve an offline-migration alias only on an active marked personal row."""
++        from sqlalchemy import text as sa_text
++
++        filters = {
++            "is_memory_record": True, "deprecated": False,
++            "memory_scope": MemoryScope.PERSONAL, "visibility": MemoryVisibility.PRIVATE,
++        }
++        if pool:
++            filters.update(self._pool_filters(pool))
++        where, params = self._filters_to_sql(filters)
++        storage = self.vec_db.document_storage
++        if not hasattr(storage, "get_session"):
++            return None
++        async with storage.get_session() as session:
++            result = await session.execute(sa_text(
++                "SELECT text, metadata FROM documents WHERE " + where +
++                " AND json_extract(metadata,'$.private_admin_pool') = json_extract(metadata,'$.owner_user_id')"
++                " AND json_type(metadata,'$.private_admin_previous_uris') = 'array'"
++                " AND EXISTS (SELECT 1 FROM json_each(metadata,'$.private_admin_previous_uris')"
++                " WHERE value = :alias) ORDER BY id LIMIT 1"
++            ), {**params, "alias": uri})
++            row = result.first()
++        if row:
++            return {"text": row.text, "metadata": _safe_parse_metadata(row.metadata)}
++        return None
++
+     async def forget_memory(
+         self, event: AstrMessageEvent, uri: str, *, all_users: bool = False
+     ) -> int:
+@@ -2332,7 +2616,30 @@ class MemoryManager:
+             删除数。无权限和不存在都返回 0，避免泄漏跨用户 URI 存在性。
+         """
+         if all_users:
+-            return await self.forget_memory_by_uri(uri)
++            # The ordinary forget tool has a legacy administrator override. Resolve
++            # one target before deleting so it cannot bypass private pool visibility.
++            docs = await self.vec_db.document_storage.get_documents(
++                metadata_filters={"uri": uri}, limit=2,
++            )
++            if len(docs) > 1:
++                return 0
++            if not docs:
++                pool = self._private_admin_pool(event)
++                if not pool:
++                    return 0
++                doc = await self._pool_alias_document(uri, pool)
++                if not doc:
++                    return 0
++            else:
++                doc = docs[0]
++            meta = _safe_parse_metadata(doc["metadata"])
++            if "private_admin_pool" in meta and not self._is_memory_visible(event, doc):
++                return 0
++            canonical = meta["uri"]
++            filters = {"uri": canonical}
++            if meta.get("kb_doc_id"):
++                filters["kb_doc_id"] = meta["kb_doc_id"]
++            return await self._delete_by_filters(filters, canonical)
+ 
+         filters = self._build_user_filter(event)
+         filters["uri"] = uri
+@@ -2340,6 +2647,15 @@ class MemoryManager:
+         if deleted > 0:
+             return deleted
+ 
++        pool = self._private_admin_pool(event)
++        if pool:
++            doc = await self.get_memory_by_uri(event, uri)
++            if doc and doc["metadata"].get("private_admin_pool") == pool:
++                canonical = doc["metadata"]["uri"]
++                return await self._delete_by_filters(
++                    {**self._pool_filters(pool), "uri": canonical}, canonical
++                )
++
+         shared_docs = await self.vec_db.document_storage.get_documents(
+             metadata_filters={
+                 "uri": uri,
+@@ -2368,7 +2684,16 @@ class MemoryManager:
+         Returns:
+             实际删除的记录数
+         """
+-        return await self._delete_by_filters({"uri": uri}, uri)
++        deleted = await self._delete_by_filters({"uri": uri}, uri)
++        if deleted or self.config.get("private_admin_shared_store") is not True:
++            return deleted
++        alias = await self._pool_alias_document(uri)
++        if not alias:
++            return 0
++        meta = alias["metadata"]
++        canonical = meta["uri"]
++        filters = {**self._pool_filters(meta["private_admin_pool"]), "uri": canonical}
++        return await self._delete_by_filters(filters, canonical)
+ 
+     async def preview_admin_memory_removal(
+         self, uri: str, memory_scope: str, owner_id: str
+@@ -2609,7 +2934,12 @@ class MemoryManager:
+             include_deprecated=True,
+         )
+         scope = "全部" if all_users else filters.get("user_id", "unknown")
+-        return await self._clear_by_filters(filters, scope_label=scope)
++        deleted = await self._clear_by_filters(filters, scope_label=scope)
++        if not all_users and (pool := self._private_admin_pool(event)):
++            deleted += await self._clear_by_filters(
++                {**filters, **self._pool_filters(pool)}, scope_label=pool
++            )
++        return deleted
+ 
+     async def count_clear_memories(
+         self,
+@@ -2624,7 +2954,15 @@ class MemoryManager:
+             domain=domain,
+             include_deprecated=True,
+         )
+-        return await self.vec_db.count_documents(metadata_filter=filters)
++        return await self._count_owned_records(filters, event, all_users)
++
++    async def _count_owned_records(self, filters, event, all_users) -> int:
++        count = await self.vec_db.count_documents(metadata_filter=filters)
++        if not all_users and (pool := self._private_admin_pool(event)):
++            count += await self.vec_db.count_documents(
++                metadata_filter={**filters, **self._pool_filters(pool)}
++            )
++        return count
+ 
+     async def _clear_by_filters(
+         self, filters: dict[str, Any], *, scope_label: str
+@@ -2787,15 +3125,25 @@ class MemoryManager:
+             metadata_filters=filters,
+             limit=1,
+         )
+-        if not docs:
+-            return None
++        if docs:
++            doc = docs[0]
++            return {"text": doc.get("text", ""), "metadata": _safe_parse_metadata(doc["metadata"])}
+ 
+-        doc = docs[0]
+-        metadata = _safe_parse_metadata(doc.get("metadata", {}))
+-        return {
+-            "text": doc.get("text", ""),
+-            "metadata": metadata,
+-        }
++        if self.config.get("private_admin_shared_store") is not True:
++            return None
++        if all_users:
++            return await self._pool_alias_document(uri)
++        pool = self._private_admin_pool(event)
++        if not pool:
++            return None
++        docs = await self.vec_db.document_storage.get_documents(
++            metadata_filters={**self._pool_filters(pool), "uri": uri, "deprecated": False},
++            limit=1,
++        )
++        doc = docs[0] if docs else await self._pool_alias_document(uri, pool)
++        if doc and self._is_memory_visible(event, doc):
++            return {"text": doc.get("text", ""), "metadata": _safe_parse_metadata(doc["metadata"])}
++        return None
+ 
+     async def smart_update_memory(
+         self,
+@@ -2870,15 +3218,15 @@ class MemoryManager:
+         filters = self._build_query_filter(query_event, all_users=all_users)
+ 
+         # 总数
+-        total = await self.vec_db.count_documents(metadata_filter=filters)
++        total = await self._count_owned_records(filters, event, all_users)
+ 
+         # 永久记忆数
+         permanent_filters = {**filters, "memory_type": MemoryType.PERMANENT}
+-        permanent = await self.vec_db.count_documents(metadata_filter=permanent_filters)
++        permanent = await self._count_owned_records(permanent_filters, event, all_users)
+ 
+         # 普通记忆数
+         normal_filters = {**filters, "memory_type": MemoryType.NORMAL}
+-        normal = await self.vec_db.count_documents(metadata_filter=normal_filters)
++        normal = await self._count_owned_records(normal_filters, event, all_users)
+ 
+         # 已压缩数
+         compressed_filters = self._build_query_filter(
+@@ -2887,9 +3235,7 @@ class MemoryManager:
+             include_deprecated=True,
+         )
+         compressed_filters["compressed"] = True
+-        compressed = await self.vec_db.count_documents(
+-            metadata_filter=compressed_filters
+-        )
++        compressed = await self._count_owned_records(compressed_filters, event, all_users)
+ 
+         return {
+             "total": total,
+@@ -3161,11 +3507,16 @@ class MemoryManager:
+         Returns:
+             {"merged_uri": str, "deprecated_count": int, "success": bool}
+         """
++        async with self._private_pool_lock:
++            return await self._merge_records(source_uris, merged_content, reason, created_by)
++
++    async def _merge_records(self, source_uris, merged_content, reason, created_by):
+         if not source_uris or not merged_content:
+             return {"merged_uri": "", "deprecated_count": 0, "success": False}
+ 
+         try:
+             # 0. 预验证：所有源必须存在且未 deprecated，否则不做任何修改
++            source_metadata = []
+             for pre_uri in source_uris:
+                 pre_docs = await self.vec_db.document_storage.get_documents(
+                     metadata_filters={
+@@ -3181,51 +3532,56 @@ class MemoryManager:
+                     )
+                     return {"merged_uri": "", "deprecated_count": 0, "success": False}
+ 
+-            # 1. 新建合并后的记忆（使用第一条旧记忆的 metadata 作为模板）
+-            first_doc = await self.vec_db.document_storage.get_documents(
+-                metadata_filters={"uri": source_uris[0], "is_memory_record": True},
+-                limit=1,
+-            )
+-            if not first_doc:
+-                logger.warning(
+-                    f"[简单长期记忆] 合并失败：找不到源记忆 {source_uris[0]}"
+-                )
+-                return {"merged_uri": "", "deprecated_count": 0, "success": False}
++                source_metadata.append(_safe_parse_metadata(pre_docs[0]["metadata"]))
+ 
+-            first_meta = _safe_parse_metadata(first_doc[0].get("metadata", {}))
++            first_meta = source_metadata[0]
++            pools = {meta.get("private_admin_pool") for meta in source_metadata}
++            if len(pools) != 1:
++                return {"merged_uri": "", "deprecated_count": 0, "success": False}
++            pool = first_meta.get("private_admin_pool")
++            duplicate = None
++            if pool:
++                if self._rebuilding:
++                    return {"merged_uri": "", "deprecated_count": 0, "success": False}
++                merged_content = merged_content.strip()
++                duplicate = await self._find_pool_content(self._kb_helper, pool, merged_content)
+             new_uri = f"{first_meta.get('uri', '').split('://')[0]}://merged_{uuid.uuid4().hex[:12]}"
+ 
+-            # 构建新记忆的 metadata（继承旧记忆的域、作用域等）
+-            new_metadata = {
+-                **first_meta,
+-                "uri": new_uri,
+-                "memory_content": merged_content,
+-                "created_at": datetime.now(timezone.utc).isoformat(),
+-                "curated_at": datetime.now(timezone.utc).isoformat(),
+-                "curated_by": created_by,
+-                "created_by": created_by,
+-                "deprecated": False,
+-                "merged_from": source_uris,
+-                "merged_reason": reason,
+-            }
++            if duplicate:
++                new_uri = await self._ensure_pool_document(self._kb_helper, duplicate)
++                source_uris = [uri for uri in source_uris if uri != new_uri]
++            else:
++                # 构建新记忆的 metadata（继承旧记忆的域、作用域等）
++                new_metadata = {
++                    **first_meta,
++                    "uri": new_uri,
++                    "memory_content": merged_content,
++                    "created_at": datetime.now(timezone.utc).isoformat(),
++                    "curated_at": datetime.now(timezone.utc).isoformat(),
++                    "curated_by": created_by,
++                    "created_by": created_by,
++                    "deprecated": False,
++                    "merged_from": source_uris,
++                    "merged_reason": reason,
++                }
+ 
+-            # 写入新记忆（通过 vec_db.insert 自动生成 embedding）
+-            new_doc_id = str(uuid.uuid4())
+-            new_metadata["kb_doc_id"] = new_doc_id
+-            new_metadata["is_memory_record"] = True
+-            new_metadata["chunk_index"] = 0
+-            formatted = format_memory_content(merged_content, new_metadata)
+-            await self.vec_db.insert(
+-                content=formatted,
+-                metadata=new_metadata,
+-                id=new_doc_id,
+-            )
+-            # 注册 KB 文档（与其他写入路径一致）
+-            try:
+-                await self._register_kb_document(new_doc_id, new_uri, len(formatted))
+-                await self._sync_kb_stats()
+-            except Exception:
+-                pass
++                # 写入新记忆（通过 vec_db.insert 自动生成 embedding）
++                new_doc_id = str(uuid.uuid4())
++                new_metadata["kb_doc_id"] = new_doc_id
++                new_metadata["is_memory_record"] = True
++                new_metadata["chunk_index"] = 0
++                formatted = format_memory_content(merged_content, new_metadata)
++                await self.vec_db.insert(
++                    content=formatted,
++                    metadata=new_metadata,
++                    id=new_doc_id,
++                )
++                # 注册 KB 文档（与其他写入路径一致）
++                try:
++                    await self._register_kb_document(new_doc_id, new_uri, len(formatted))
++                    await self._sync_kb_stats()
++                except Exception:
++                    pass
+ 
+             # 2. 旧记忆标 deprecated（全部成功才报成功，否则回滚新记录）
+             deprecated_count = 0
+@@ -3235,16 +3591,6 @@ class MemoryManager:
+                     ok = await self.deprecate_memory(old_uri, reason="merged")
+                     if ok:
+                         deprecated_count += 1
+-                        # 3. 写 supersedes 边
+-                        if self._link_manager:
+-                            await self._link_manager.add_link(
+-                                source_uri=new_uri,
+-                                target_uri=old_uri,
+-                                relation_type="supersedes",
+-                                reason=reason,
+-                                confidence=1.0,
+-                                created_by=created_by,
+-                            )
+                     else:
+                         failed_uris.append(old_uri)
+                 except Exception as e:
+@@ -3258,12 +3604,13 @@ class MemoryManager:
+                 logger.warning(
+                     f"[简单长期记忆] 合并回滚: {len(failed_uris)} 条源未能 deprecated"
+                 )
+-                try:
+-                    await self.vec_db.delete_documents(
+-                        metadata_filters={"kb_doc_id": new_doc_id}
+-                    )
+-                except Exception:
+-                    pass
++                if not duplicate:
++                    try:
++                        await self.vec_db.delete_documents(
++                            metadata_filters={"kb_doc_id": new_doc_id}
++                        )
++                    except Exception:
++                        pass
+                 # 恢复已成功 deprecate 的源（去掉 deprecated 标记）
+                 for ok_uri in source_uris:
+                     if ok_uri not in failed_uris:
+@@ -3312,18 +3659,18 @@ class MemoryManager:
+                             logger.warning(
+                                 f"[简单长期记忆] 恢复源失败: {ok_uri}, {restore_err}"
+                             )
+-                # 清理回滚产生的 supersedes 边
+-                if self._link_manager:
+-                    try:
+-                        await self._link_manager.delete_links_for_uris([new_uri])
+-                    except Exception:
+-                        pass
+                 return {
+                     "merged_uri": "",
+                     "deprecated_count": 0,
+                     "success": False,
+                 }
+ 
++            if self._link_manager:
++                for old_uri in source_uris:
++                    await self._link_manager.add_link(
++                        source_uri=new_uri, target_uri=old_uri, relation_type="supersedes",
++                        reason=reason, confidence=1.0, created_by=created_by,
++                    )
+             logger.info(
+                 f"[简单长期记忆] 合并完成: {len(source_uris)} 条 → {new_uri}, "
+                 f"deprecated {deprecated_count} 条"
+@@ -4284,6 +4631,11 @@ class MemoryManager:
+         Returns:
+             成功写入的缓冲条数
+         """
++        shared_store = self.config.get("private_admin_shared_store") is True
++        async with self._private_pool_lock if shared_store else nullcontext():
++            return await self._flush_buffered_records(target_kb)
++
++    async def _flush_buffered_records(self, target_kb: KBHelper | None) -> int:
+         logger.debug(
+             "[简单长期记忆] 缓冲写入开始: pending=%s, target_kb=%s, target_kb_id=%s",
+             len(self._pending_writes),
+@@ -4308,7 +4660,20 @@ class MemoryManager:
+             content = item["content"]
+             uri = item.get("uri", "")
+             try:
++                pool = item.get("private_admin_pool")
++                if pool:
++                    content = content.strip()
++                    duplicate = await self._find_pool_content(write_kb, pool, content)
++                    if duplicate:
++                        canonical = await self._ensure_pool_document(write_kb, duplicate)
++                        if canonical != uri:
++                            await self._absorb_pool_history(write_kb, item, duplicate)
++                        flushed += 1
++                        continue
+                 existing_doc = await self._find_memory_doc_by_uri(write_kb, uri)
++                if pool and existing_doc:
++                    item["uri"] = uri = str(MemoryURI.generate(item["domain"]))
++                    existing_doc = None
+                 if existing_doc:
+                     if await self._repair_kb_document_for_vector_doc(
+                         write_kb,
+@@ -4320,37 +4685,38 @@ class MemoryManager:
+                     retry_pending.append(item)
+                     continue
+ 
+-                # 语义去重：召回相似记忆，高相似度则跳过
+-                memory_scope = normalize_memory_scope(
+-                    item.get("memory_scope", MemoryScope.PERSONAL)
+-                )
+-                filters: dict[str, Any] = {
+-                    "memory_scope": memory_scope,
+-                    "domain": item["domain"],
+-                    "is_memory_record": True,
+-                    "deprecated": False,
+-                }
+-                if memory_scope == MemoryScope.GLOBAL:
+-                    pass
+-                elif memory_scope == MemoryScope.GROUP:
+-                    filters["owner_session_id"] = item.get("owner_session_id", "")
+-                elif memory_scope == MemoryScope.CONVERSATION:
+-                    filters["umo"] = item["umo"]
+-                else:
+-                    filters["owner_user_id"] = item.get(
+-                        "owner_user_id", item["user_id"]
++                if not pool:
++                    # 语义去重：召回相似记忆，高相似度则跳过
++                    memory_scope = normalize_memory_scope(
++                        item.get("memory_scope", MemoryScope.PERSONAL)
+                     )
+-                candidates = await write_kb.vec_db.retrieve(
+-                    query=content,
+-                    k=1,
+-                    metadata_filters=filters,
+-                )
+-                if candidates and candidates[0].similarity >= SIMILARITY_THRESHOLD:
+-                    logger.debug(
+-                        f"[简单长期记忆] 缓冲写入去重跳过: {item['uri']}, "
+-                        f"相似度: {candidates[0].similarity:.2f}"
++                    filters: dict[str, Any] = {
++                        "memory_scope": memory_scope,
++                        "domain": item["domain"],
++                        "is_memory_record": True,
++                        "deprecated": False,
++                    }
++                    if memory_scope == MemoryScope.GLOBAL:
++                        pass
++                    elif memory_scope == MemoryScope.GROUP:
++                        filters["owner_session_id"] = item.get("owner_session_id", "")
++                    elif memory_scope == MemoryScope.CONVERSATION:
++                        filters["umo"] = item["umo"]
++                    else:
++                        filters["owner_user_id"] = item.get(
++                            "owner_user_id", item["user_id"]
++                        )
++                    candidates = await write_kb.vec_db.retrieve(
++                        query=content,
++                        k=1,
++                        metadata_filters=filters,
+                     )
+-                    continue
++                    if candidates and candidates[0].similarity >= SIMILARITY_THRESHOLD:
++                        logger.debug(
++                            f"[简单长期记忆] 缓冲写入去重跳过: {item['uri']}, "
++                            f"相似度: {candidates[0].similarity:.2f}"
++                        )
++                        continue
+ 
+                 # 构建完整 metadata 并写入
+                 now = datetime.now(timezone.utc).isoformat()
+@@ -4383,7 +4749,7 @@ class MemoryManager:
+                     "topics": item.get("topics", []),
+                     "memory_content": content,
+                 }
+-                for key in ("created_by", "extraction_id"):
++                for key in ("created_by", "extraction_id", "private_admin_pool"):
+                     if key in item:
+                         metadata[key] = item[key]
+ 
+diff --git a/memory_protocol.py b/memory_protocol.py
+index 1fb7ca0..a9e16b5 100644
+--- a/memory_protocol.py
++++ b/memory_protocol.py
+@@ -77,6 +77,33 @@ class UMOInfo:
+         return self.is_valid and self.session_type == "group"
+ 
+ 
++def maintenance_sender_ids(parsed: UMOInfo, sender_ids: list[str], config: dict) -> list[str]:
++    if sender_ids or parsed.session_type != "private":
++        return sender_ids
++    # WebChat conversation IDs identify threads. They cannot identify the human sender.
++    if config.get("private_admin_shared_store") is True and parsed.platform_id == "webchat":
++        return []
++    return [parsed.session_id]
++
++
++class MaintenanceEvent:
++    """Private extraction uses the verified speaker and current administrator membership."""
++
++    def __init__(self, umo: str, sender_id: str = "", get_admin_ids=None) -> None:
++        self.unified_msg_origin = umo
++        self._sender_id = sender_id
++        self._get_admin_ids = get_admin_ids
++
++    def get_sender_id(self) -> str:
++        return self._sender_id
++
++    def get_platform_id(self) -> str:
++        return UMOInfo.parse(self.unified_msg_origin).platform_id
++
++    def is_admin(self) -> bool:
++        return bool(self._get_admin_ids and self._sender_id in (self._get_admin_ids() or []))
++
++
+ @dataclass
+ class MemoryURI:
+     """记忆 URI
+@@ -450,16 +477,25 @@ def format_memory_for_injection(
+     groups = {
+         MemoryScope.GLOBAL: "Global memory for all chats",
+         MemoryScope.PERSONAL: "Personal memory about the current user",
++        "private_admin_peer": "另一位管理员的个人记忆",
++        "private_admin_admin_view": "Private personal memory from administrator search",
+         MemoryScope.GROUP: "Group memory for the current chat",
+         MemoryScope.CONVERSATION: "Current conversation memory",
+     }
+ 
++    grouped_memories: dict[str, list[dict[str, Any]]] = {}
++    for memory in memories:
++        scope = (
++            "private_admin_peer"
++            if memory.get("_private_admin_peer")
++            else MemoryMetadata.from_dict(memory.get("metadata", {})).memory_scope
++        )
++        if memory.get("_private_admin_admin_view"):
++            scope = "private_admin_admin_view"
++        grouped_memories.setdefault(scope, []).append(memory)
++
+     for scope, title in groups.items():
+-        scoped = [
+-            mem
+-            for mem in memories
+-            if MemoryMetadata.from_dict(mem.get("metadata", {})).memory_scope == scope
+-        ]
++        scoped = grouped_memories.get(scope)
+         if not scoped:
+             continue
+ 
+@@ -475,8 +511,14 @@ def format_memory_for_injection(
+             if not isinstance(raw_metadata, dict):
+                 raw_metadata = {}
+             content = _memory_display_text(mem, meta)
+-            status = _memory_status_label(
+-                raw_metadata, meta, timezone_name, viewer_user_id
++            status = (
++                meta.domain
++                if scope == "private_admin_peer"
++                else _memory_status_label(
++                    raw_metadata, meta, timezone_name,
++                    raw_metadata.get("private_admin_pool")
++                    if mem.get("_private_admin_self") else viewer_user_id,
++                )
+             )
+             memory_entry = f"\n- [{status}] {content}"
+ 
+diff --git a/tests/test_private_admin_pair.py b/tests/test_private_admin_pair.py
+new file mode 100644
+index 0000000..5a45656
+--- /dev/null
++++ b/tests/test_private_admin_pair.py
+@@ -0,0 +1,179 @@
++"""私聊配对只扩展自动注入，数据与管理员名单均为合成测试夹具。"""
++
++import json
++import unittest
++from types import SimpleNamespace
++from unittest.mock import AsyncMock
++
++from sqlalchemy import text
++from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
++
++from test_memory_commands import MemoryManager, plugin_main
++from test_memory_sharing import Event, memory
++
++
++QQ = ("qq_fixture", "1001")
++WEB = ("webchat", "chatbox_fixture")
++PAIR = [":".join(QQ), ":".join(WEB)]
++
++
++class AdminEvent(Event):
++    def __init__(self, identity, kind="FriendMessage", admin=True):
++        platform, sender = identity
++        super().__init__(f"{platform}:{kind}:{sender}", sender)
++        self.admin = admin
++
++    def is_admin(self):
++        return self.admin
++
++
++def record(identity, name, **override):
++    platform, sender = identity
++    owner = f"{platform}_{sender}"
++    doc = memory(
++        owner=owner, umo=f"{platform}:FriendMessage:{sender}",
++        sender_id=sender, user_id=owner, session_type="private", session_id=sender,
++        domain="facts", disclosure="coffee", uri=f"facts://{name}", **override,
++    )
++    doc["text"] = f"coffee fixture {name}"
++    return doc
++
++
++class PrivateAdminPairTests(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        self.admins = [QQ[1], WEB[1], "third_admin"]
++        self.manager = MemoryManager(
++            None, {"private_admin_memory_pair": list(PAIR), "global_memory": True,
++                   "recall_sparse_fusion": False},
++            get_admin_ids=lambda: self.admins,
++        )
++        self.manager._sparse_tokenize = False
++        self.engine = create_async_engine("sqlite+aiosqlite:///:memory:")
++        self.addAsyncCleanup(self.engine.dispose)
++        async with self.engine.begin() as conn:
++            await conn.execute(text(
++                "CREATE TABLE documents (id INTEGER PRIMARY KEY, text TEXT, metadata TEXT)"
++            ))
++        storage = SimpleNamespace(
++            get_session=lambda: AsyncSession(self.engine), get_documents=self.documents
++        )
++        self.manager._kb_helper = SimpleNamespace(vec_db=SimpleNamespace(
++            document_storage=storage, retrieve=AsyncMock(return_value=[]),
++            delete_documents=AsyncMock(),
++        ))
++
++    async def documents(self, metadata_filters, limit, offset=0):
++        where, params = self.manager._filters_to_sql(metadata_filters)
++        async with self.engine.connect() as conn:
++            rows = await conn.execute(text(
++                f"SELECT text, metadata FROM documents WHERE {where} LIMIT :lim OFFSET :off"
++            ), {**params, "lim": limit, "off": offset})
++            return [{"text": r.text, "metadata": json.loads(r.metadata)} for r in rows]
++
++    async def seed(self, *records):
++        async with self.engine.begin() as conn:
++            await conn.execute(text("INSERT INTO documents(text, metadata) VALUES (:t, :m)"),
++                               [{"t": r["text"], "m": json.dumps(r["metadata"])} for r in records])
++
++    async def test_auto_injection_is_bidirectional_and_attributes_the_peer(self):
++        await self.seed(record(QQ, "qq_record"), record(WEB, "web_record"))
++        plugin = SimpleNamespace(
++            memory_mgr=self.manager, config=self.manager.config, _background_tasks=set(),
++            _maybe_expire_stale_memories=AsyncMock(), _maybe_consolidate_memories=AsyncMock(),
++            _accumulate_request_snapshot=lambda *args: None, _get_display_timezone=lambda: "UTC",
++            _get_viewer_user_id=self.manager._current_owner_user_id,
++        )
++        for viewer, own, peer in ((QQ, "qq_record", "web_record"), (WEB, "web_record", "qq_record")):
++            with self.subTest(viewer=viewer):
++                request = SimpleNamespace(prompt="coffee", contexts=[])
++                await plugin_main.MemoryPlugin.inject_memories(plugin, AdminEvent(viewer), request)
++                content = request.contexts[0]["content"]
++                boundaries = content.split("[另一位管理员的个人记忆]")
++                self.assertEqual(len(boundaries), 2, content)
++                self.assertIn(f"coffee fixture {own}", boundaries[0])
++                self.assertNotIn(f"coffee fixture {peer}", boundaries[0])
++                self.assertIn(f"coffee fixture {peer}", boundaries[1])
++                changed = {d["metadata"]["uri"]: d["metadata"].get("recall_count", 0)
++                           for d in await self.documents({}, 10)}
++                self.assertEqual(changed[f"facts://{own}"], 1)
++                self.assertEqual(changed[f"facts://{peer}"], int(viewer == WEB))
++
++    async def test_auto_recall_rejects_unrelated_and_mixed_ownership_records(self):
++        event = AdminEvent(QQ)
++        web_owner = "_".join(WEB)
++        await self.seed(
++            record(WEB, "eligible"),
++            record(WEB, "multiple", owner_user_ids=[web_owner, "webchat_other"]),
++            record(WEB, "group_visible", visibility="group"),
++            record(WEB, "deprecated", deprecated=True),
++            record(WEB, "conversation", scope="conversation"),
++            record(WEB, "group", scope="group"),
++            record(WEB, "not_record", is_memory_record=False),
++            record(("third_platform", WEB[1]), "same_sender"),
++            record((WEB[0], "third_admin"), "unpaired_admin"),
++        )
++        found = await self.manager.recall_memories(event, "coffee", top_k=20, source="auto_inject")
++        self.assertEqual([d["metadata"]["uri"] for d in found], ["facts://eligible"])
++
++    async def test_revocation_during_dense_recall_discards_the_peer_result(self):
++        event = AdminEvent(QQ)
++        foreign = record(WEB, "revoked")
++        await self.seed(foreign)
++
++        async def retrieve(*, metadata_filters, **kwargs):
++            if metadata_filters.get("owner_user_id") != "_".join(WEB):
++                return []
++            self.admins.remove(WEB[1])
++            return [SimpleNamespace(data=foreign, similarity=1.0)]
++
++        self.manager.vec_db.retrieve = retrieve
++        results = await self.manager.recall_memories(event, "coffee", source="auto_inject")
++        self.assertNotIn(WEB[1], self.admins)
++        self.assertEqual(results, [])
++
++    async def test_invalid_pairs_events_and_revoked_membership_disable_auto_recall(self):
++        await self.seed(record(WEB, "peer"))
++        event = AdminEvent(QQ)
++        async def assert_no_peer(viewer):
++            records = await self.manager.recall_memories(viewer, "coffee", source="auto_inject")
++            self.assertEqual(records, [])
++
++        for pair in ([], PAIR[:1], [*PAIR, "qq_fixture:third_admin"], [PAIR[0]] * 2,
++                     [PAIR[0], "chatbox_fixture"], [PAIR[0], "webchat:*"], ":".join(WEB)):
++            with self.subTest(pair=pair):
++                self.manager.config["private_admin_memory_pair"] = pair
++                await assert_no_peer(event)
++        self.manager.config["private_admin_memory_pair"] = list(PAIR)
++        for viewer in (AdminEvent(QQ, "GroupMessage"), AdminEvent(QQ, "OtherMessage"),
++                       Event("invalid", QQ[1]), AdminEvent(QQ, admin=False),
++                       AdminEvent((QQ[0], "third_admin")), AdminEvent(("third_platform", QQ[1]))):
++            with self.subTest(viewer=viewer.unified_msg_origin):
++                await assert_no_peer(viewer)
++        self.manager.config["global_memory"] = False
++        await assert_no_peer(event)
++        self.manager.config["global_memory"] = True
++        for revoked in (QQ[1], WEB[1]):
++            with self.subTest(revoked=revoked):
++                self.admins.remove(revoked)
++                await assert_no_peer(event)
++                self.admins.append(revoked)
++
++    async def test_manual_lookup_deletion_and_new_writes_remain_owner_scoped(self):
++        event = AdminEvent(QQ)
++        foreign = record(WEB, "peer")
++        await self.seed(foreign)
++        mgr = self.manager
++        self.assertFalse(mgr._is_memory_visible(event, foreign))
++        filters = mgr._build_recall_filters(event, True, memory_scope="personal")
++        self.assertEqual([f["owner_user_id"] for f in filters], ["_".join(QQ)])
++        self.assertEqual(await mgr.recall_memories(event, "coffee"), [])
++        self.assertEqual(await mgr.list_memories(event), ([], 0, False))
++        self.assertIsNone(await mgr.get_memory_by_uri(event, "facts://peer"))
++        self.assertEqual(await mgr.forget_memory(event, "facts://peer"), 0)
++        for call in mgr.vec_db.delete_documents.await_args_list:
++            self.assertEqual(await self.documents(call.kwargs["metadata_filters"], 10), [])
++        mgr._rebuilding = True
++        await mgr.store_memory(event, "own preference", "facts")
++        self.assertEqual(mgr._pending_writes[0]["owner_user_ids"], ["_".join(QQ)])
++        with self.assertRaises(ValueError):
++            await mgr.store_memory(event, "foreign preference", "facts", owner_sender_id=WEB[1])
+diff --git a/tests/test_private_admin_pool.py b/tests/test_private_admin_pool.py
+new file mode 100644
+index 0000000..6dc9856
+--- /dev/null
++++ b/tests/test_private_admin_pool.py
+@@ -0,0 +1,220 @@
++"""Exercise the opt-in shared private store with two synthetic admin accounts."""
++
++import asyncio
++import json
++import tempfile
++import unittest
++import uuid
++from pathlib import Path
++from types import SimpleNamespace
++from unittest.mock import AsyncMock, patch
++
++import test_private_admin_pair as pair
++from test_memory_sharing import memory
++
++
++class PrivateAdminPoolTests(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
++        from astrbot.core.knowledge_base.kb_db_sqlite import KBSQLiteDatabase
++        from astrbot.core.knowledge_base.models import KnowledgeBase
++
++        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
++        provider = SimpleNamespace(
++            get_dim=lambda: 2, get_embedding=AsyncMock(return_value=[0.25, 0.75])
++        )
++        vec_db = FaissVecDB(str(directory / "doc.db"), str(directory / "index.faiss"), provider)
++        self.addAsyncCleanup(vec_db.close)
++        await vec_db.initialize()
++        self.catalog = KBSQLiteDatabase(str(directory / "catalog.db"))
++        self.addAsyncCleanup(self.catalog.close)
++        await self.catalog.initialize()
++        kb = KnowledgeBase(kb_name="fixture")
++        async with self.catalog.get_db() as session, session.begin():
++            session.add(kb)
++        self.admins = [pair.QQ[1], pair.WEB[1], "third_admin"]
++        config = {
++            "private_admin_memory_pair": list(pair.PAIR), "private_admin_shared_store": True,
++            "global_memory": True, "recall_sparse_fusion": False,
++        }
++        self.manager = pair.MemoryManager(None, config, get_admin_ids=lambda: self.admins)
++        self.manager._sparse_tokenize = False
++        self.manager._kb_helper = SimpleNamespace(
++            kb=kb, kb_db=self.catalog, vec_db=vec_db,
++            get_document=self.catalog.get_document_by_id, refresh_kb=AsyncMock(),
++        )
++        self.qq = pair.AdminEvent(pair.QQ)
++        self.web = pair.AdminEvent(pair.WEB)
++
++    async def documents(self, filters, limit):
++        rows = await self.manager.vec_db.document_storage.get_documents(
++            metadata_filters=filters, limit=limit
++        )
++        return [{**row, "metadata": json.loads(row["metadata"])} for row in rows]
++
++    async def seed(self, *records):
++        for record in records:
++            await self.manager.vec_db.insert(
++                content=record["text"], metadata=record["metadata"], id=str(uuid.uuid4())
++            )
++
++    async def store(self, event, body):
++        return await self.manager.store_memory(event, body, "facts", disclosure="coffee")
++
++    async def assert_readable_set(self, viewer, expected, unavailable=()):
++        expected = set(expected)
++        for source in ("auto_inject", "tool_recall"):
++            with self.subTest(viewer=viewer.unified_msg_origin, source=source):
++                recalled = await self.manager.recall_memories(viewer, "coffee", source=source)
++                self.assertCountEqual([doc["metadata"]["uri"] for doc in recalled], expected)
++
++        listed, total, truncated = await self.manager.list_memories(viewer)
++        self.assertEqual(total, len(expected))
++        self.assertFalse(truncated)
++        self.assertCountEqual([doc["metadata"]["uri"] for doc in listed], expected)
++        for uri in expected:
++            result = await self.manager.get_memory_by_uri(viewer, uri)
++            self.assertIsNotNone(result, uri)
++            self.assertEqual(result["metadata"]["uri"], uri)
++        for uri in unavailable:
++            self.assertIsNone(await self.manager.get_memory_by_uri(viewer, uri), uri)
++
++    async def test_matching_writes_share_one_document_and_distinct_bodies_survive(self):
++        first = await self.store(self.qq, "coffee with oat milk")
++        repeated = await self.store(self.web, "  coffee with oat milk\n")
++        distinct = await self.store(self.web, "coffee after breakfast")
++        self.assertEqual(first, repeated)
++        self.assertNotEqual(first, distinct)
++
++        active = await self.documents({"is_memory_record": True, "deprecated": False}, 10)
++        self.assertCountEqual([doc["metadata"]["uri"] for doc in active], [first, distinct])
++        by_uri = {doc["metadata"]["uri"]: doc for doc in active}
++        for uri, body, writer in (
++            (first, "coffee with oat milk", self.qq),
++            (distinct, "coffee after breakfast", self.web),
++        ):
++            doc = by_uri[uri]
++            self.assertIn(body, doc["text"])
++            self.assertEqual(doc["metadata"]["umo"], writer.unified_msg_origin)
++            self.assertEqual(doc["metadata"]["speaker_id"], writer.get_sender_id())
++        for viewer in (self.qq, self.web):
++            await self.assert_readable_set(viewer, [first, distinct])
++
++    async def test_simultaneous_writes_share_one_active_document(self):
++        left, right = await asyncio.gather(
++            self.store(self.qq, "coffee before noon"),
++            self.store(self.web, "coffee before noon"),
++        )
++        self.assertEqual(left, right)
++        active = await self.documents({"is_memory_record": True, "deprecated": False}, 10)
++        self.assertEqual([doc["metadata"]["uri"] for doc in active], [left])
++        for viewer in (self.qq, self.web):
++            await self.assert_readable_set(viewer, [left])
++
++    async def test_memory_store_tool_reports_the_persisted_uri_to_both_accounts(self):
++        plugin = SimpleNamespace(memory_mgr=self.manager)
++        responses = [
++            await pair.plugin_main.MemoryPlugin.tool_store(plugin, viewer, "coffee beans")
++            for viewer in (self.qq, self.web)
++        ]
++        active = await self.documents({"is_memory_record": True, "deprecated": False}, 10)
++        self.assertEqual(len(active), 1)
++        uri = active[0]["metadata"]["uri"]
++        self.assertEqual(responses, [f"Memory stored: {uri}"] * 2)
++
++    async def test_shared_record_requires_an_authorized_paired_private_event(self):
++        uri = await self.store(self.qq, "coffee beans")
++        for viewer in (
++            pair.AdminEvent(pair.WEB, admin=False),
++            pair.AdminEvent((pair.WEB[0], "outsider"), admin=False),
++            pair.AdminEvent((pair.WEB[0], "third_admin")),
++            pair.AdminEvent(("other_platform", pair.QQ[1])),
++            pair.AdminEvent(pair.QQ, kind="GroupMessage"),
++            pair.AdminEvent(pair.WEB, kind="GroupMessage"),
++        ):
++            with self.subTest(viewer=viewer.unified_msg_origin):
++                await self.assert_readable_set(viewer, [], unavailable=[uri])
++
++        await self.assert_readable_set(self.web, [uri])
++        self.admins.remove(pair.WEB[1])
++        await self.assert_readable_set(self.web, [], unavailable=[uri])
++
++    async def test_legacy_group_and_conversation_memories_stay_out_of_peer_store(self):
++        platform, sender = pair.WEB
++        owner = "_".join(pair.WEB)
++        group = f"{platform}:GroupMessage:fixture_room"
++        group_records = [
++            memory(scope=scope, owner=owner, umo=group, session_type="group",
++                   sender_id=sender, user_id=owner, visibility=visibility, domain="facts",
++                   disclosure="coffee", uri=f"facts://legacy_group_{scope}")
++            for scope, visibility in (("personal", "private"), ("group", "group"))
++        ]
++        conversation = pair.record(pair.WEB, "legacy_conversation", scope="conversation")
++        await self.seed(*group_records, conversation)
++        uris = [doc["metadata"]["uri"] for doc in [*group_records, conversation]]
++        await self.assert_readable_set(self.qq, [], unavailable=uris)
++
++    async def test_simultaneous_edits_of_one_uri_leave_one_active_successor(self):
++        uri = await self.store(self.qq, "coffee at noon")
++        snapshots = [await self.manager.get_memory_by_uri(viewer, uri) for viewer in (self.qq, self.web)]
++        bodies = ["coffee in the morning", "coffee at night"]
++        outcomes = await asyncio.gather(*(
++            self.manager.replace_memory(record["metadata"], body)
++            for record, body in zip(snapshots, bodies)
++        ), return_exceptions=True)
++        successes = {}
++        for outcome, body in zip(outcomes, bodies):
++            if isinstance(outcome, (ValueError, RuntimeError)):
++                self.assertTrue(str(outcome).strip())
++            else:
++                self.assertIsInstance(outcome, str)
++                successes[outcome] = body
++        self.assertTrue(successes)
++        active = await self.documents({"is_memory_record": True, "deprecated": False}, 10)
++        self.assertEqual(len(active), 1)
++        meta = active[0]["metadata"]
++        self.assertEqual(meta["memory_content"], successes[meta["uri"]])
++
++    async def test_edit_to_an_existing_body_preserves_the_existing_record(self):
++        first = await self.store(self.qq, "coffee at noon")
++        second = await self.store(self.web, "coffee at night")
++        old = await self.manager.get_memory_by_uri(self.web, first)
++        try:
++            result = await self.manager.replace_memory(old["metadata"], " coffee at night ")
++        except (ValueError, RuntimeError) as error:
++            self.assertTrue(str(error).strip())
++            expected = {first: "coffee at noon", second: "coffee at night"}
++        else:
++            self.assertEqual(result, second)
++            expected = {second: "coffee at night"}
++        active = await self.documents({"is_memory_record": True, "deprecated": False}, 10)
++        self.assertCountEqual(
++            [(row["metadata"]["uri"], row["metadata"]["memory_content"]) for row in active],
++            expected.items(),
++        )
++
++    async def test_duplicate_retry_restores_persisted_vector_and_catalog_entry(self):
++        vec_db = self.manager.vec_db
++        for target, method in (
++            (vec_db.embedding_storage, "insert"),
++            (vec_db.embedding_storage, "save_index"),
++            (self.manager, "_register_kb_document"),
++        ):
++            with self.subTest(interrupted=method):
++                body = f"coffee fixture for {method}"
++                with patch.object(target, method, side_effect=asyncio.CancelledError):
++                    with self.assertRaises(asyncio.CancelledError):
++                        await self.store(self.qq, body)
++                uri = await self.store(self.web, body)
++                rows = await self.documents({"memory_content": body, "deprecated": False}, 10)
++                self.assertEqual(len(rows), 1)
++                row = rows[0]
++                self.assertEqual(row["metadata"]["uri"], uri)
++                catalog_entry = await self.catalog.get_document_by_id(row["metadata"]["kb_doc_id"])
++                self.assertIsNotNone(catalog_entry)
++                self.assertEqual(catalog_entry.doc_name, uri)
++                persisted = vec_db.embedding_storage._read_index(vec_db.embedding_storage.path)
++                vector, status, _ = self.manager._reconstruct_faiss_vector(
++                    persisted, row["id"], self.manager._prepare_faiss_index(persisted)
++                )
++                self.assertEqual((status, vector), ("ok", [0.25, 0.75]))

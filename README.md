@@ -4,15 +4,17 @@ Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 
 
 ## Windows 下载
 
-Windows 0.1.7 安装包及校验文件见正式发布页。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.7/Chatbox-0.1.7.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.7/SHA256SUMS.txt) · [v0.1.7 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.7)
+Windows 0.1.8 安装包为 `Chatbox-0.1.8.msi`（55,472,128 字节）。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.8/Chatbox-0.1.8.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.8/SHA256SUMS.txt) · [v0.1.8 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.8)
 
-在 PowerShell 中运行 `Get-FileHash .\Chatbox-0.1.7.msi -Algorithm SHA256`，确认结果与 `SHA256SUMS.txt` 中的 `c1622a874510d58c9bf03a7a6e90c226be8a0ae74e52ed5ef89f41ea6580aac2` 一致。从 0.1.5 或 0.1.6 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。0.1.1 用户先阅读[旧卸载器升级说明](desktop/README.md#从-011-升级)。
+在 PowerShell 中运行 `Get-FileHash .\Chatbox-0.1.8.msi -Algorithm SHA256`，确认结果与 `SHA256SUMS.txt` 中的 `0dd2baa59acf736d42ed5e161f857102e88d07e8897d2d78aaf696fc8ec8b0f8` 一致。从 0.1.5、0.1.6 或 0.1.7 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。0.1.1 用户先阅读[旧卸载器升级说明](desktop/README.md#从-011-升级)。
 
-## Windows 0.1.7
+## Windows 0.1.8
+
+服务端返回支持的 WAV 语音附件时，可在回复气泡中点击「播放语音」或「停止播放」。点击「复制正文」可复制整段消息，也可选中部分文字后按 Ctrl+C。
 
 长会话列表使用细滚动条，鼠标操作区域宽 14 dp。列表无需滚动时自动隐藏滚动条。点击会话标题可原位切换，在行末菜单可删除会话。还可拖入多张图片，在回复气泡中查看上传与等待进度，或从顶栏切换 Launcher 实例、自部署服务和命名密钥。
 
-托管 Windows 已验证从 0.1.5 原目录升级，日常机器已验证从 0.1.6 原目录升级。安装版现场验收覆盖会话列表、冷启动恢复和资源管理器混合拖放。[0.1.7 验收记录](docs/WINDOWS_017_RELEASE_ACCEPTANCE.md) · [0.1.5 历史发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.5)
+0.1.7 发布时，托管 Windows 已验证从 0.1.5 原目录升级，日常机器已验证从 0.1.6 原目录升级。安装版现场验收覆盖会话列表、冷启动恢复和资源管理器混合拖放。[0.1.7 验收记录](docs/WINDOWS_017_RELEASE_ACCEPTANCE.md) · [0.1.5 历史发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.5)
 
 以下为 Kotlin + Jetpack Compose 实现的 Android 首版原型，仍待真实手机与服务端联合验收。
 

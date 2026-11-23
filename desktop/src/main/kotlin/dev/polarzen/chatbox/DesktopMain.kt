@@ -125,7 +125,7 @@ private data class SendOperation(
     val failureStage: String,
     val stageStartedAtNanos: Long,
     val answer: String = "",
-    val replyImages: List<ReplyImage> = emptyList(),
+    val replyAttachments: List<ReplyAttachment> = emptyList(),
     val cancellation: AtomicBoolean = AtomicBoolean(false),
 )
 
@@ -142,6 +142,7 @@ internal data class SourceImageAddition(val paths: List<Path>, val notice: Strin
 /** Production screen shared with the desktop UI harness. */
 @Composable
 internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache: ReplyImageCache) {
+    val replyAudioCache = remember(replyImageCache) { ReplyAudioCache(replyImageCache.directory.resolveSibling("reply-audio")) }
     val connection = rememberDesktopConnection(store, keys)
     val sessionsRevision = remember { mutableIntStateOf(0) }
     val drafts = remember { mutableStateMapOf<SessionKey, TextFieldValue>() }
@@ -159,9 +160,9 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
     }
     var retryConfirmation by remember { mutableStateOf<RetryConfirmation?>(null) }
     var nextOperationId by remember { mutableIntStateOf(0) }
-    var cacheGeneration by remember { mutableStateOf<Map<ReplyImageKey, Int>>(emptyMap()) }
-    var imageFailures by remember { mutableStateOf<Map<ReplyImageKey, String>>(emptyMap()) }
-    var retryingImages by remember { mutableStateOf<Set<ReplyImageKey>>(emptySet()) }
+    var cacheGeneration by remember { mutableStateOf<Map<ReplyAttachmentKey, Int>>(emptyMap()) }
+    var attachmentFailures by remember { mutableStateOf<Map<ReplyAttachmentKey, String>>(emptyMap()) }
+    var fetchingAttachments by remember { mutableStateOf<Set<ReplyAttachmentKey>>(emptySet()) }
 
     val profileId = connection.profileId
     val selectedProfile = connection.profiles.firstOrNull { it.id == profileId }
@@ -184,7 +185,7 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
             val storedEntry = entries[operation.entryIndex]
             entries[operation.entryIndex] = storedEntry.copy(
                 answer = operation.answer,
-                replyImages = operation.replyImages,
+                replyAttachments = operation.replyAttachments,
             )
         })
     } ?: storedChat
@@ -231,38 +232,49 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
         }
     }
 
-    fun retryReplyImage(sessionKey: SessionKey, attachmentId: String) {
-        if (sessionKey != currentKey || sessionKey in deletedSessionKeys || isBusy || isOffline || !connection.connected || connection.verifying) return
-        val target = runCatching { connection.snapshot() }.getOrNull()
-        if (target == null || target.profileId != sessionKey.profileId) {
-            notices[sessionKey] = "请先连接并验证当前服务，再获取回复图片。"
-            return
-        }
-        val imageKey = ReplyImageKey(sessionKey.profileId, sessionKey.sessionId, attachmentId)
-        if (imageKey in retryingImages) return
-        retryingImages = retryingImages + imageKey
-        thread(isDaemon = true, name = "chatbox-reply-image-retry") {
+    fun fetchReplyAttachment(target: DesktopSendTarget, key: ReplyAttachmentKey) {
+        val sessionKey = SessionKey(key.profileId, key.sessionId)
+        if (sessionKey in deletedSessionKeys || key in fetchingAttachments) return
+        fetchingAttachments = fetchingAttachments + key
+        thread(isDaemon = true, name = "chatbox-reply-attachment") {
             val result = runCatching {
                 target.checkTarget()
                 check(sessionKey !in deletedSessionKeys) { "会话已删除。" }
-                val bytes = downloadReplyImage(target.address, target.token, attachmentId, target.allowLoopbackHttp)
+                val bytes = when (key.type) {
+                    ReplyAttachmentType.IMAGE -> downloadReplyImage(target.address, target.token, key.attachmentId, target.allowLoopbackHttp)
+                    ReplyAttachmentType.AUDIO -> downloadReplyAudio(target.address, target.token, key.attachmentId, target.allowLoopbackHttp)
+                }
                 target.checkTarget()
                 check(sessionKey !in deletedSessionKeys) { "会话已删除。" }
-                replyImageCache.save(sessionKey.profileId, attachmentId, bytes)
+                when (key.type) {
+                    ReplyAttachmentType.IMAGE -> replyImageCache.save(key.profileId, key.attachmentId, bytes)
+                    ReplyAttachmentType.AUDIO -> replyAudioCache.save(key.profileId, key.attachmentId, bytes)
+                }
             }
             if (sessionKey !in deletedSessionKeys) result.exceptionOrNull()?.let { invalidateOnFailure(target, it) }
             SwingUtilities.invokeLater {
                 if (sessionKey in deletedSessionKeys) return@invokeLater
-                retryingImages = retryingImages - imageKey
+                fetchingAttachments = fetchingAttachments - key
                 val failure = result.exceptionOrNull()
                 if (failure == null) {
-                    imageFailures = imageFailures - imageKey
-                    cacheGeneration = cacheGeneration + (imageKey to ((cacheGeneration[imageKey] ?: 0) + 1))
+                    attachmentFailures = attachmentFailures - key
+                    cacheGeneration = cacheGeneration + (key to ((cacheGeneration[key] ?: 0) + 1))
                 } else {
-                    imageFailures = imageFailures + (imageKey to safeFailureMessage(failure))
+                    attachmentFailures = attachmentFailures + (key to safeAttachmentFailureMessage(failure, key.type))
                 }
             }
         }
+    }
+
+    fun retryReplyAttachment(key: ReplyAttachmentKey) {
+        val sessionKey = SessionKey(key.profileId, key.sessionId)
+        if (sessionKey != currentKey || sessionKey in deletedSessionKeys || isBusy || isOffline || !connection.connected || connection.verifying) return
+        val target = runCatching { connection.snapshot() }.getOrNull()
+        if (target == null || target.profileId != key.profileId) {
+            notices[sessionKey] = "请先连接并验证当前服务，再获取回复${key.type.label}。"
+            return
+        }
+        fetchReplyAttachment(target, key)
     }
 
     fun dispatch(questionText: String, images: List<Path>, retryEntry: Entry? = null, retryKey: SessionKey? = null) {
@@ -337,7 +349,6 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
         val caption = query
         thread(isDaemon = true, name = "chatbox-request") {
             fun operationIsActive() = !operation.cancellation.get() && activeOperationId.get() == operationId
-            fun operationIsNotCancelled() = !operation.cancellation.get() && targetKey !in deletedSessionKeys
             var observedFailureStage = operation.failureStage
 
             fun observeTransportEvent(event: AstrBotTransportEvent) {
@@ -361,51 +372,26 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
 
             var answer = ""
             var requestStarted = false
-            val receivedImages = mutableListOf<ReplyImage>()
-            val fetchedAttachments = mutableSetOf<String>()
+            val receivedAttachments = mutableListOf<ReplyAttachment>()
+            val requestedAttachments = mutableSetOf<ReplyAttachmentKey>()
 
-            fun receiveReplyImage(attachmentId: String?, textOffset: Int) {
+            fun receiveAttachment(type: ReplyAttachmentType, attachmentId: String?, textOffset: Int) {
                 if (!operationIsActive()) return
-                val images = synchronized(receivedImages) {
-                    receivedImages += ReplyImage(attachmentId, textOffset)
-                    receivedImages.toList()
-                }
-                val updated = pending.copy(entries = pending.entries.dropLast(1) + entry.copy(answer = answer, replyImages = images))
+                val attachment = ReplyAttachment(attachmentId?.takeIf(String::isNotBlank), textOffset, type)
+                receivedAttachments += attachment
+                val updatedEntry = entry.copy(answer = answer, replyAttachments = receivedAttachments.toList())
+                val updated = pending.copy(entries = pending.entries.dropLast(1) + updatedEntry)
                 val save = runCatching { store.saveSessionContent(targetKey.profileId, updated) }
-                val imageKey = attachmentId?.let { ReplyImageKey(targetKey.profileId, targetKey.sessionId, it) }
+                val key = attachment.attachmentId?.let { ReplyAttachmentKey(targetKey.profileId, targetKey.sessionId, it, type) }
+                val fetch = key != null && requestedAttachments.add(key)
                 SwingUtilities.invokeLater {
                     if (!operationIsActive()) return@invokeLater
                     val active = sending
                     if (active?.id == operationId) {
-                        sending = active.copy(answer = answer, replyImages = images)
+                        sending = active.copy(answer = updatedEntry.answer, replyAttachments = updatedEntry.replyAttachments)
                     }
-                    if (imageKey != null) retryingImages = retryingImages + imageKey
-                    if (save.isFailure) notices[targetKey] = "本地保存失败；收到的图片可能无法在重启后恢复。"
-                }
-                if (attachmentId == null || !fetchedAttachments.add(attachmentId)) return
-                thread(isDaemon = true, name = "chatbox-reply-image") {
-                    val fetchResult = runCatching {
-                        target.checkTarget()
-                        if (!operationIsNotCancelled()) return@runCatching
-                        val bytes = downloadReplyImage(target.address, target.token, attachmentId, target.allowLoopbackHttp)
-                        target.checkTarget()
-                        if (!operationIsNotCancelled()) return@runCatching
-                        replyImageCache.save(targetKey.profileId, attachmentId, bytes)
-                    }
-                    if (operationIsNotCancelled()) fetchResult.exceptionOrNull()?.let { invalidateOnFailure(target, it) }
-                    SwingUtilities.invokeLater {
-                        if (!operationIsNotCancelled()) return@invokeLater
-                        if (imageKey != null) {
-                            retryingImages = retryingImages - imageKey
-                            val failure = fetchResult.exceptionOrNull()
-                            if (failure == null) {
-                                imageFailures = imageFailures - imageKey
-                                cacheGeneration = cacheGeneration + (imageKey to ((cacheGeneration[imageKey] ?: 0) + 1))
-                            } else {
-                                imageFailures = imageFailures + (imageKey to safeFailureMessage(failure))
-                            }
-                        }
-                    }
+                    if (save.isFailure) notices[targetKey] = "本地保存失败；收到的${type.label}可能无法在重启后恢复。"
+                    if (key != null && fetch) fetchReplyAttachment(target, key)
                 }
             }
 
@@ -422,7 +408,8 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
                         targetKey.sessionId,
                         query,
                         allowLoopbackHttp = target.allowLoopbackHttp,
-                        onReplyImage = ::receiveReplyImage,
+                        onReplyImage = { id, offset -> receiveAttachment(ReplyAttachmentType.IMAGE, id, offset) },
+                        onReplyAudio = { id, offset -> receiveAttachment(ReplyAttachmentType.AUDIO, id, offset) },
                         onEvent = ::observeTransportEvent,
                         onText = { delta ->
                             if (!operationIsActive()) return@sendToAstrBot
@@ -443,7 +430,8 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
                         validatedImages,
                         caption,
                         allowLoopbackHttp = target.allowLoopbackHttp,
-                        onReplyImage = ::receiveReplyImage,
+                        onReplyImage = { id, offset -> receiveAttachment(ReplyAttachmentType.IMAGE, id, offset) },
+                        onReplyAudio = { id, offset -> receiveAttachment(ReplyAttachmentType.AUDIO, id, offset) },
                         onEvent = ::observeTransportEvent,
                         onText = { delta ->
                             if (!operationIsActive()) return@sendImagesToAstrBot
@@ -464,12 +452,12 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
                 cancelled = !operationIsActive(),
             )
             if (!operationIsActive()) return@thread
-            val imageList = synchronized(receivedImages) { receivedImages.toList() }
+            val attachments = receivedAttachments.toList()
             val failure = resultFailure
-            if (answer.isEmpty() && imageList.isEmpty()) timingByEntry.remove(TimedEntryKey(targetKey, entryIndex), timing)
+            if (answer.isEmpty() && attachments.isEmpty()) timingByEntry.remove(TimedEntryKey(targetKey, entryIndex), timing)
             val completed = pending.copy(entries = pending.entries.dropLast(1) + entry.copy(
                 answer = answer,
-                replyImages = imageList,
+                replyAttachments = attachments,
                 status = if (result.isSuccess) "已完成" else
                     (if (requestStarted) "发送失败：" else "未发送：") + observedFailureStage + "：" +
                         safeFailureMessage(failure!!, observedFailureStage),
@@ -495,7 +483,7 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
                     activeOperationId.compareAndSet(operationId, 0)
                     when {
                         saved.isFailure -> notices[targetKey] = "本地保存失败，请勿直接重发。"
-                        result.isSuccess && answer.isEmpty() && imageList.isEmpty() ->
+                        result.isSuccess && answer.isEmpty() && attachments.isEmpty() ->
                             notices[targetKey] = "回复已结束，但没有可显示的内容。"
                         result.isSuccess -> notices.remove(targetKey)
                         else -> notices[targetKey] = observedFailureStage + "：" + safeFailureMessage(failure!!, observedFailureStage)
@@ -543,8 +531,8 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
                                 selectedImages.remove(key)
                                 drafts.remove(key)
                                 notices.remove(key)
-                                retryingImages = retryingImages.filterNot { it.profileId == key.profileId && it.sessionId == key.sessionId }.toSet()
-                                imageFailures = imageFailures.filterKeys { it.profileId != key.profileId || it.sessionId != key.sessionId }
+                                fetchingAttachments = fetchingAttachments.filterNot { it.profileId == key.profileId && it.sessionId == key.sessionId }.toSet()
+                                attachmentFailures = attachmentFailures.filterKeys { it.profileId != key.profileId || it.sessionId != key.sessionId }
                                 cacheGeneration = cacheGeneration.filterKeys { it.profileId != key.profileId || it.sessionId != key.sessionId }
                                 timingByEntry.keys.removeIf { it.key == key }
                                 failedProgressByEntry.keys.removeIf { it.key == key }
@@ -590,13 +578,14 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
                         profileId = currentKey.profileId,
                         sessionId = currentKey.sessionId,
                         answer = item.answer,
-                        images = item.replyImages,
-                        cache = replyImageCache,
+                        attachments = item.replyAttachments,
+                        imageCache = replyImageCache,
+                        audioCache = replyAudioCache,
                         cacheGeneration = cacheGeneration,
-                        failures = imageFailures,
-                        retrying = retryingImages,
+                        failures = attachmentFailures,
+                        retrying = fetchingAttachments,
                         retryEnabled = canRetry,
-                        onRetry = { attachmentId -> retryReplyImage(currentKey, attachmentId) },
+                        onRetry = ::retryReplyAttachment,
                     )
                 },
                 onMessageRendered = { sessionId, entryIndex ->
@@ -744,6 +733,7 @@ private fun shouldInvalidateConnection(error: Throwable): Boolean = when (error.
     "权限不足，请检查聊天权限。",
     "缺少文件上传权限，请为 API 密钥启用 file 权限。",
     "缺少图片下载权限，请为 API 密钥启用 file 权限。",
+    "缺少语音下载权限，请为 API 密钥启用 file 权限。",
     "服务地址已变化，请重新连接验证后再发送。",
     "服务地址已变化，请重新连接验证后再获取图片。",
     "服务地址已变化，请重新连接验证。",
@@ -755,7 +745,11 @@ private fun shouldInvalidateConnection(error: Throwable): Boolean = when (error.
 }
 
 /** Convert only known protocol failures to display text; never reflect arbitrary server or secret text. */
-private fun safeFailureMessage(error: Throwable, failedStage: String? = null): String {
+private fun safeFailureMessage(
+    error: Throwable,
+    failedStage: String? = null,
+    fallback: String = "连接或服务错误；回复状态未确认。",
+): String {
     if (error is SocketTimeoutException) return when {
         failedStage?.startsWith("上传图片") == true -> "图片上传超时。"
         failedStage == "等待服务器响应失败" -> "等待服务器响应超时。"
@@ -774,8 +768,16 @@ private fun safeFailureMessage(error: Throwable, failedStage: String? = null): S
     val message = error.message.orEmpty()
     if (message in SAFE_FAILURES) return message
     if (Regex("服务器返回 HTTP [1-5][0-9]{2}\\.").matches(message)) return message
-    if (Regex("图片下载失败，服务器返回 HTTP [1-5][0-9]{2}\\.").matches(message)) return message
-    return "连接或服务错误；回复状态未确认。"
+    if (Regex("(?:图片|语音)下载失败，服务器返回 HTTP [1-5][0-9]{2}。").matches(message)) return message
+    return fallback
+}
+
+private fun safeAttachmentFailureMessage(error: Throwable, type: ReplyAttachmentType): String {
+    if (type == ReplyAttachmentType.AUDIO &&
+        (error is IllegalArgumentException || error is javax.sound.sampled.UnsupportedAudioFileException)) {
+        return "语音文件损坏或格式不受支持。"
+    }
+    return safeFailureMessage(error, fallback = "获取或缓存${type.label}失败。")
 }
 
 private val SAFE_FAILURES = setOf(
@@ -783,6 +785,7 @@ private val SAFE_FAILURES = setOf(
     "权限不足，请检查聊天权限。",
     "缺少文件上传权限，请为 API 密钥启用 file 权限。",
     "缺少图片下载权限，请为 API 密钥启用 file 权限。",
+    "缺少语音下载权限，请为 API 密钥启用 file 权限。",
     "找不到对话接口，请检查 AstrBot 版本和服务地址。",
     "服务返回重定向，请直接填写最终服务地址。",
     "服务未返回对话事件流，请检查接口地址。",
@@ -792,6 +795,11 @@ private val SAFE_FAILURES = setOf(
     "回复图片超过 20 MB 限制。",
     "服务返回了空图片。",
     "图片下载接口返回了错误信息，而不是图片。",
+    "找不到回复语音，请检查附件是否仍然存在。",
+    "语音下载接口未返回语音，请检查 AstrBot 服务。",
+    "回复语音超过 20 MB 限制。",
+    "服务返回了空语音。",
+    "语音下载接口返回了错误信息，而不是语音。",
     "找不到文件上传接口，请检查 AstrBot 版本和服务地址。",
     "图片超过服务端大小限制。",
     "图片超过服务端大小限制（512 MB）。",

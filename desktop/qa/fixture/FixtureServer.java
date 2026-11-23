@@ -4,12 +4,17 @@ import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsServer;
 
 import javax.imageio.ImageIO;
+import javax.sound.sampled.AudioFileFormat;
+import javax.sound.sampled.AudioFormat;
+import javax.sound.sampled.AudioInputStream;
+import javax.sound.sampled.AudioSystem;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import java.awt.Color;
 import java.awt.Font;
 import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -189,6 +194,16 @@ public final class FixtureServer {
             output.flush();
             return 200;
         }
+        if (request.contains("fixture:voice-reply")) {
+            String id = "reply-voice-" + profile.toLowerCase(java.util.Locale.ROOT);
+            writeEvent(output, "{\"type\":\"plain\",\"data\":\"语音前文\"}");
+            writeEvent(output, "{\"type\":\"record\",\"data\":\"[RECORD]fixture.wav\"}");
+            writeEvent(output, "{\"type\":\"attachment_saved\",\"data\":{\"id\":\"" + id + "\",\"type\":\"record\"}}");
+            writeEvent(output, "{\"type\":\"plain\",\"data\":\"语音后文\"}");
+            writeEvent(output, "{\"type\":\"end\"}");
+            output.flush();
+            return 200;
+        }
         if (delayed) {
             writeEvent(output, "{\"type\":\"plain\",\"data\":\"本地服务已收到，正在继续\",\"streaming\":true}");
             output.flush();
@@ -233,6 +248,10 @@ public final class FixtureServer {
     private int serveDownload(String profile, HttpExchange exchange) throws IOException {
         String query = exchange.getRequestURI().getRawQuery();
         String id = query == null ? "" : URLDecoder.decode(query.replaceFirst("^attachment_id=", ""), StandardCharsets.UTF_8);
+        if (id.equals("reply-voice-" + profile.toLowerCase(java.util.Locale.ROOT))) {
+            send(exchange, 200, "audio/wav", voiceWav());
+            return 200;
+        }
         byte[] image;
         String mediaType;
         if (profile.equals("A") && id.equals(PNG_ID_A)) {
@@ -308,6 +327,23 @@ public final class FixtureServer {
         }
         System.out.println(line);
         System.out.flush();
+    }
+
+    private static byte[] voiceWav() throws IOException {
+        int sampleRate = 16_000;
+        int frames = 2 * sampleRate;
+        AudioFormat format = new AudioFormat(sampleRate, 16, 1, true, false);
+        byte[] pcm = new byte[frames * format.getFrameSize()];
+        for (int frame = 0; frame < frames; frame++) {
+            short sample = (short) (1_000 * Math.sin(frame * 2 * Math.PI * 440 / sampleRate));
+            pcm[2 * frame] = (byte) sample;
+            pcm[2 * frame + 1] = (byte) (sample >> 8);
+        }
+        try (var stream = new AudioInputStream(new ByteArrayInputStream(pcm), format, frames)) {
+            var output = new ByteArrayOutputStream();
+            AudioSystem.write(stream, AudioFileFormat.Type.WAVE, output);
+            return output.toByteArray();
+        }
     }
 
     private static byte[] imageBytes(String format, Color color, String label) throws IOException {

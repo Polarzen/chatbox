@@ -374,7 +374,7 @@ class DesktopUiAcceptanceTest {
         }
         waitUntil("reply image persisted to its cache", 15_000) { cache.read(profileA, "reply-image-a") != null }
         val latest = store.sessionContent(profileA, currentAfterNew).entries.last()
-        assertTrue("Response metadata remains attached to the originating conversation", latest.replyImages.any { it.attachmentId == "reply-image-a" })
+        assertTrue("Response metadata remains attached to the originating conversation", latest.replyAttachments.any { it.attachmentId == "reply-image-a" })
         assertTrue("The request reached the HTTPS mock service with the fixture session id", fixtureRequestSeen("profile=A endpoint=POST /api/v1/chat key=old_key session=$currentAfterNew"))
 
         val multiSelectOffset = fixtureLogCurrentOffset()
@@ -634,6 +634,50 @@ class DesktopUiAcceptanceTest {
         rule.onNodeWithTag("send-button").assertIsEnabled()
         setFixtureControl("upload.fail", "false")
         println("UI_CASE G PASS beforeHeaders=true beforeFirstEvent=true truncatedSse=failedAndPersisted upload503=reported chatNotSent=true composerRecovered=true")
+    }
+
+    @Test
+    fun voiceReplyFromChatShowsPlaybackInOrderAfterRestart() {
+        createV015Profiles(withLegacyKey = true)
+        render()
+        awaitConnected()
+        rule.onNodeWithTag("new-session-button").performClick()
+        val question = "fixture:voice-reply"
+        sendText(question)
+        waitUntil("completed voice reply", 15_000) { entryForCurrentSession(question)?.status == "已完成" }
+
+        val play = rule.onNodeWithText("播放语音")
+        fun assertReplyOrder() {
+            waitUntil("play control between the two reply text blocks", 10_000) {
+                rule.mainClock.advanceTimeByFrame()
+                val before = rule.onNodeWithText("助手：语音前文").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+                val button = play.assertIsDisplayed().assertIsEnabled().fetchSemanticsNode().boundsInRoot
+                val after = rule.onNodeWithText("语音后文").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+                before.center.y < button.center.y && button.center.y < after.center.y
+            }
+        }
+        assertReplyOrder()
+        assertTrue("Voice download should use the active profile key",
+            fixtureRequestSeen("profile=A endpoint=GET /api/v1/file key=old_key session=- result=200"))
+        restartScreen()
+        assertReplyOrder()
+
+        val verifyPlayback = System.getenv("CHATBOX_UI_VERIFY_AUDIO_PLAYBACK") == "1"
+        if (verifyPlayback) {
+            play.performClick()
+            waitUntil("voice playback started", 10_000) {
+                rule.mainClock.advanceTimeByFrame()
+                rule.onNodeWithText("停止播放").assertIsDisplayed()
+                true
+            }
+            waitUntil("voice playback completed", 10_000) {
+                rule.mainClock.advanceTimeByFrame()
+                play.assertIsDisplayed().assertIsEnabled()
+                true
+            }
+            rule.onNodeWithText("语音播放失败", substring = true).assertDoesNotExist()
+        }
+        println("UI_CASE VOICE PASS ordered=true historyReloaded=true playbackVerified=$verifyPlayback")
     }
 
     private fun createV015Profiles(withLegacyKey: Boolean, extraASessions: Int = 0) {

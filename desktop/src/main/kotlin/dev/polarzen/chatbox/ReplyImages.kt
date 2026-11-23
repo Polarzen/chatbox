@@ -9,7 +9,16 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 
-internal data class ReplyImage(val attachmentId: String?, val textOffset: Int)
+internal enum class ReplyAttachmentType(val wireName: String, val label: String) {
+    IMAGE("image", "图片"),
+    AUDIO("audio", "语音"),
+}
+
+internal data class ReplyAttachment(
+    val attachmentId: String?,
+    val textOffset: Int,
+    val type: ReplyAttachmentType,
+)
 
 /** Keeps received image bytes outside of history JSON and scopes names to a profile and attachment. */
 internal class ReplyImageCache(val directory: Path) {

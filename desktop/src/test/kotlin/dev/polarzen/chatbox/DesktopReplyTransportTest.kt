@@ -154,6 +154,90 @@ class DesktopReplyTransportTest {
         }
     }
 
+    @Test fun recordsUseSavedIdsAndPreserveOrderAmongImagesAndText() {
+        val frames = listOf(
+            frame("record", "[RECORD]https://example.invalid/voice.wav"),
+            saved("voice-1", "record"),
+            frame("plain", "A🙂", streaming = true),
+            saved("voice-2", "record"),
+            frame("record", "[RECORD]missing.wav"),
+            frame("image", "[IMAGE]real.png"),
+            saved("image-1"),
+            frame("plain", "B"),
+            frame("record", "[RECORD]missing-at-end.wav"),
+        )
+        withChatServer(frames) { base, _ ->
+            val media = mutableListOf<Triple<String, String?, Int>>()
+            val texts = mutableListOf<String>()
+            val events = mutableListOf<AstrBotTransportEvent>()
+            sendToAstrBot(base, "fixture-key", "user", "session", "question", allowLoopbackHttp = true,
+                onReplyAudio = { id, offset ->
+                    assertTrue(events.contains(AstrBotTransportEvent.FirstContent))
+                    media += Triple("audio", id, offset)
+                },
+                onReplyImage = { id, offset -> media += Triple("image", id, offset) },
+                onEvent = { events += it }, onText = { texts += it })
+            assertEquals(listOf(
+                Triple("audio", "voice-1", 0), Triple("audio", "voice-2", 3),
+                Triple("audio", null, 3), Triple("image", "image-1", 3), Triple("audio", null, 4),
+            ), media)
+            assertEquals(listOf("A🙂", "A🙂B", "A🙂B"), texts)
+            assertEquals(1, events.count { it == AstrBotTransportEvent.FirstContent })
+        }
+    }
+
+    @Test fun malformedFrameFlushesPendingRecordAndPreservesParsingFailure() {
+        val frames = listOf(frame("plain", "A🙂"), frame("record", "[RECORD]partial.wav"), "{")
+        withChatServer(frames) { base, _ ->
+            val audio = mutableListOf<Pair<String?, Int>>()
+            val callbackFailure = IllegalStateException("fixture callback failure")
+            val failure = assertThrows(org.json.JSONException::class.java) {
+                sendToAstrBot(base, "fixture-key", "user", "session", "question", allowLoopbackHttp = true,
+                    onReplyAudio = { id, offset ->
+                        audio += id to offset
+                        throw callbackFailure
+                    }, onText = {})
+            }
+            assertEquals(listOf(null to 3), audio)
+            assertEquals(listOf(callbackFailure), failure.suppressed.toList())
+        }
+    }
+
+    @Test fun downloadsAudioFromAuthenticatedFileEndpointAndChecksResponseType() {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val requests = LinkedBlockingQueue<Pair<String?, String>>()
+        val payload = "RIFF".toByteArray()
+        try {
+            server.createContext("/nested/api/v1/file") { exchange ->
+                exchange.use {
+                    val query = it.requestURI.rawQuery
+                    requests += it.requestHeaders.getFirst("Authorization") to query
+                    val mime = when {
+                        "wrong" in query -> "text/html"
+                        "binary" in query -> "application/octet-stream"
+                        "ogg" in query -> "application/ogg"
+                        else -> "audio/x-wav; charset=binary"
+                    }
+                    it.responseHeaders.add("Content-Type", mime)
+                    it.sendResponseHeaders(200, payload.size.toLong())
+                    it.responseBody.write(payload)
+                }
+            }
+            server.start()
+            val base = "http://127.0.0.1:${server.address.port}/nested"
+            for (id in listOf("file /+猫", "binary", "ogg")) {
+                assertArrayEquals(payload, downloadReplyAudio(base, "fixture-key", id, allowLoopbackHttp = true))
+            }
+            assertEquals("Bearer fixture-key" to "attachment_id=file+%2F%2B%E7%8C%AB", requests.poll())
+            val failure = assertThrows(IllegalStateException::class.java) {
+                downloadReplyAudio(base, "fixture-key", "wrong", allowLoopbackHttp = true)
+            }
+            assertTrue(failure.message.orEmpty().contains("未返回语音"))
+        } finally {
+            server.stop(0)
+        }
+    }
+
     @Test fun downloadsSameOriginFileWithBearerAndEncodedAttachmentId() {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val requests = LinkedBlockingQueue<Triple<String?, String?, String?>>()
@@ -230,6 +314,18 @@ class DesktopReplyTransportTest {
             assertFalse(json.message.orEmpty().contains("fixture-secret"))
             assertFalse(json.message.orEmpty().contains("reply-id"))
 
+            val audioRedirect = assertThrows(IllegalStateException::class.java) {
+                downloadReplyAudio(base, "fixture-secret", "redirect", allowLoopbackHttp = true)
+            }
+            assertTrue(audioRedirect.message.orEmpty().contains("重定向"))
+            assertEquals(0, redirectedRequests.get())
+
+            val audioForbidden = assertThrows(IllegalStateException::class.java) {
+                downloadReplyAudio(base, "fixture-secret", "forbidden", allowLoopbackHttp = true)
+            }
+            assertTrue(audioForbidden.message.orEmpty().contains("file"))
+            assertFalse(audioForbidden.message.orEmpty().contains("private server detail"))
+
             val forbidden = assertThrows(IllegalStateException::class.java) {
                 downloadReplyImage(base, "fixture-secret", "forbidden", allowLoopbackHttp = true)
             }
@@ -241,7 +337,7 @@ class DesktopReplyTransportTest {
         }
     }
 
-    @Test fun capsChunkedReplyImageBytes() {
+    @Test fun capsChunkedReplyImageAndAudioBytes() {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         try {
             server.createContext("/api/v1/file") { exchange ->
@@ -257,11 +353,13 @@ class DesktopReplyTransportTest {
                 }
             }
             server.start()
-            val failure = assertThrows(IllegalStateException::class.java) {
-                downloadReplyImage("http://127.0.0.1:${server.address.port}", "fixture-key", "large",
-                    allowLoopbackHttp = true)
+            val base = "http://127.0.0.1:${server.address.port}"
+            for (download in listOf(::downloadReplyImage, ::downloadReplyAudio)) {
+                val failure = assertThrows(IllegalStateException::class.java) {
+                    download(base, "fixture-key", "large", true)
+                }
+                assertTrue(failure.message.orEmpty().contains("20 MB"))
             }
-            assertTrue(failure.message.orEmpty().contains("20 MB"))
         } finally {
             server.stop(0)
         }
@@ -297,6 +395,6 @@ class DesktopReplyTransportTest {
 
     private fun String.toSse(): String = "data: $this\n\n"
 
-    private fun saved(id: String): String = org.json.JSONObject().put("type", "attachment_saved")
-        .put("data", org.json.JSONObject().put("id", id).put("type", "image")).toString()
+    private fun saved(id: String, type: String = "image"): String = org.json.JSONObject().put("type", "attachment_saved")
+        .put("data", org.json.JSONObject().put("id", id).put("type", type)).toString()
 }

@@ -12,7 +12,15 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.UUID
 
-private const val MAX_REPLY_IMAGE_BYTES = 20 * 1024 * 1024
+private const val MAX_REPLY_MEDIA_BYTES = 20 * 1024 * 1024
+
+private enum class ReplyMedia(val marker: String, val label: String, val mimePrefix: String) {
+    IMAGE("[IMAGE]", "图片", "image/"),
+    AUDIO("[RECORD]", "语音", "audio/");
+
+    fun accepts(mime: String?): Boolean = mime?.startsWith(mimePrefix) == true ||
+        mime == "application/octet-stream" || (this == AUDIO && mime == "application/ogg")
+}
 
 /** Transport milestones emitted synchronously on the sending thread. Upload indexes are zero-based. */
 internal sealed interface AstrBotTransportEvent {
@@ -54,9 +62,21 @@ internal fun sendToAstrBot(
     onEvent: (AstrBotTransportEvent) -> Unit,
     onText: (String) -> Unit,
 ) {
+    sendToAstrBot(base, token, user, session, message, allowLoopbackHttp, onReplyImage,
+        onReplyAudio = { _, _ -> }, onEvent = onEvent, onText = onText)
+}
+
+internal fun sendToAstrBot(
+    base: String, token: String, user: String, session: String, message: String,
+    allowLoopbackHttp: Boolean = false,
+    onReplyImage: (String?, Int) -> Unit = { _, _ -> },
+    onReplyAudio: (String?, Int) -> Unit,
+    onEvent: (AstrBotTransportEvent) -> Unit = {},
+    onText: (String) -> Unit,
+) {
     sendToAstrBotPayload(
         base, token, user, session, JSONObject().put("message", message),
-        allowLoopbackHttp, onReplyImage, onEvent, onText,
+        allowLoopbackHttp, onReplyImage, onReplyAudio, onEvent, onText,
     )
 }
 
@@ -94,6 +114,19 @@ internal fun sendImagesToAstrBot(
     onEvent: (AstrBotTransportEvent) -> Unit = {},
     onText: (String) -> Unit,
 ) {
+    sendImagesToAstrBot(base, token, user, session, images, caption, allowLoopbackHttp, onReplyImage,
+        onReplyAudio = { _, _ -> }, onEvent = onEvent, onText = onText)
+}
+
+internal fun sendImagesToAstrBot(
+    base: String, token: String, user: String, session: String,
+    images: List<Path>, caption: String = "",
+    allowLoopbackHttp: Boolean = false,
+    onReplyImage: (String?, Int) -> Unit = { _, _ -> },
+    onReplyAudio: (String?, Int) -> Unit,
+    onEvent: (AstrBotTransportEvent) -> Unit = {},
+    onText: (String) -> Unit,
+) {
     require(images.isNotEmpty()) { "至少选择一张图片。" }
     // Validate the complete selection before starting uploads, so a later invalid entry cannot
     // leave earlier attachments uploaded without a corresponding chat message.
@@ -115,14 +148,22 @@ internal fun sendImagesToAstrBot(
             .put("filename", path.fileName.toString()))
     }
     sendToAstrBotPayload(base, token, user, session, JSONObject().put("message", parts),
-        allowLoopbackHttp, onReplyImage, onEvent, onText)
+        allowLoopbackHttp, onReplyImage, onReplyAudio, onEvent, onText)
 }
 
 /** Download a reply attachment through the authenticated, same-origin OpenAPI file endpoint. */
 internal fun downloadReplyImage(
     base: String, token: String, attachmentId: String, allowLoopbackHttp: Boolean = false,
+): ByteArray = downloadReplyMedia(base, token, attachmentId, allowLoopbackHttp, ReplyMedia.IMAGE)
+
+internal fun downloadReplyAudio(
+    base: String, token: String, attachmentId: String, allowLoopbackHttp: Boolean = false,
+): ByteArray = downloadReplyMedia(base, token, attachmentId, allowLoopbackHttp, ReplyMedia.AUDIO)
+
+private fun downloadReplyMedia(
+    base: String, token: String, attachmentId: String, allowLoopbackHttp: Boolean, media: ReplyMedia,
 ): ByteArray {
-    require(attachmentId.isNotBlank()) { "图片附件编号无效。" }
+    require(attachmentId.isNotBlank()) { "${media.label}附件编号无效。" }
     val chatTarget = endpoint(base, allowLoopbackHttp)
     val encodedId = URLEncoder.encode(attachmentId, Charsets.UTF_8.name())
     val target = URI(chatTarget.toASCIIString().removeSuffix("/chat") + "/file?attachment_id=$encodedId")
@@ -133,27 +174,28 @@ internal fun downloadReplyImage(
         c.connectTimeout = 12_000
         c.readTimeout = 30_000
         c.setRequestProperty("Authorization", "Bearer $token")
-        c.setRequestProperty("Accept", "image/*, application/octet-stream")
+        c.setRequestProperty("Accept", if (media == ReplyMedia.AUDIO)
+            "audio/*, application/ogg, application/octet-stream" else "image/*, application/octet-stream")
 
         val status = c.responseCode
-        check(status in 200..299) { downloadHttpError(status) }
+        check(status in 200..299) { downloadHttpError(status, media) }
         val mediaType = c.contentType?.substringBefore(';')?.trim()?.lowercase()
-        check(mediaType?.startsWith("image/") == true || mediaType == "application/octet-stream") {
-            "图片下载接口未返回图片，请检查 AstrBot 服务。"
+        check(media.accepts(mediaType)) {
+            "${media.label}下载接口未返回${media.label}，请检查 AstrBot 服务。"
         }
-        check(c.contentLengthLong <= MAX_REPLY_IMAGE_BYTES || c.contentLengthLong < 0) {
-            "回复图片超过 20 MB 限制。"
+        check(c.contentLengthLong <= MAX_REPLY_MEDIA_BYTES) {
+            "回复${media.label}超过 20 MB 限制。"
         }
-        val bytes = c.inputStream.use { it.readBounded(MAX_REPLY_IMAGE_BYTES) }
-        check(bytes.isNotEmpty()) { "服务返回了空图片。" }
-        check(!looksLikeJson(bytes)) { "图片下载接口返回了错误信息，而不是图片。" }
+        val bytes = c.inputStream.use { it.readBounded(MAX_REPLY_MEDIA_BYTES, media) }
+        check(bytes.isNotEmpty()) { "服务返回了空${media.label}。" }
+        check(!looksLikeJson(bytes)) { "${media.label}下载接口返回了错误信息，而不是${media.label}。" }
         return bytes
     } finally {
         c.disconnect()
     }
 }
 
-private fun InputStream.readBounded(maxBytes: Int): ByteArray {
+private fun InputStream.readBounded(maxBytes: Int, media: ReplyMedia): ByteArray {
     val output = ByteArrayOutputStream()
     val buffer = ByteArray(8 * 1024)
     var total = 0
@@ -161,7 +203,7 @@ private fun InputStream.readBounded(maxBytes: Int): ByteArray {
         val count = read(buffer, 0, minOf(buffer.size, maxBytes + 1 - total))
         if (count < 0) break
         total += count
-        check(total <= maxBytes) { "回复图片超过 20 MB 限制。" }
+        check(total <= maxBytes) { "回复${media.label}超过 20 MB 限制。" }
         output.write(buffer, 0, count)
     }
     return output.toByteArray()
@@ -172,12 +214,12 @@ private fun looksLikeJson(bytes: ByteArray): Boolean {
     return first == '{'.code.toByte() || first == '['.code.toByte()
 }
 
-private fun downloadHttpError(status: Int): String = when (status) {
+private fun downloadHttpError(status: Int, media: ReplyMedia): String = when (status) {
     401 -> "密钥无效或已撤销。"
-    403 -> "缺少图片下载权限，请为 API 密钥启用 file 权限。"
-    404 -> "找不到回复图片，请检查附件是否仍然存在。"
+    403 -> "缺少${media.label}下载权限，请为 API 密钥启用 file 权限。"
+    404 -> "找不到回复${media.label}，请检查附件是否仍然存在。"
     in 300..399 -> "服务返回重定向，请直接填写最终服务地址。"
-    else -> "图片下载失败，服务器返回 HTTP $status。"
+    else -> "${media.label}下载失败，服务器返回 HTTP $status。"
 }
 
 private fun imageMediaType(path: Path): String = when (path.fileName.toString().substringAfterLast('.', "").lowercase()) {
@@ -261,7 +303,7 @@ private fun openAstrBotConnection(target: URI): HttpURLConnection {
 private fun sendToAstrBotPayload(
     base: String, token: String, user: String, session: String, messagePayload: JSONObject,
     allowLoopbackHttp: Boolean, onReplyImage: (String?, Int) -> Unit,
-    onEvent: (AstrBotTransportEvent) -> Unit, onText: (String) -> Unit,
+    onReplyAudio: (String?, Int) -> Unit, onEvent: (AstrBotTransportEvent) -> Unit, onText: (String) -> Unit,
 ) {
     val target = endpoint(base, allowLoopbackHttp)
     val c = openAstrBotConnection(target)
@@ -298,7 +340,8 @@ private fun sendToAstrBotPayload(
         var emittedFirstContent = false
         var completedText = ""
         var pendingText = ""
-        var pendingRawImages = 0
+        var pendingMedia: ReplyMedia? = null
+        var pendingCount = 0
         fun replyOffset(): Int = completedText.length + pendingText.length
         fun emitFirstContent() {
             if (!emittedFirstContent) {
@@ -306,14 +349,21 @@ private fun sendToAstrBotPayload(
                 onEvent(AstrBotTransportEvent.FirstContent)
             }
         }
-        fun emitMissingRawImages() {
-            repeat(pendingRawImages) {
-                emitFirstContent()
-                onReplyImage(null, replyOffset())
+        fun emitMedia(media: ReplyMedia, id: String?) {
+            emitFirstContent()
+            when (media) {
+                ReplyMedia.IMAGE -> onReplyImage(id, replyOffset())
+                ReplyMedia.AUDIO -> onReplyAudio(id, replyOffset())
             }
-            pendingRawImages = 0
         }
-        c.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
+        fun flushMissing() {
+            val media = pendingMedia ?: return
+            val count = pendingCount
+            pendingCount = 0
+            pendingMedia = null
+            repeat(count) { emitMedia(media, null) }
+        }
+        fun readReplyFrames() = c.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
             readSse(reader) { raw ->
                 val frame = JSONObject(raw)
                 val type = frame.optString("type")
@@ -326,7 +376,7 @@ private fun sendToAstrBotPayload(
                             completedText += pendingText
                             pendingText = ""
                         } else {
-                            emitMissingRawImages()
+                            flushMissing()
                             val value = frame.opt("data") as? String ?: ""
                             if (frame.optBoolean("streaming")) pendingText += value
                             else {
@@ -338,48 +388,61 @@ private fun sendToAstrBotPayload(
                             onText(completedText + pendingText)
                         }
                     }
-                    "image" -> {
+                    "image", "record" -> {
+                        val media = if (type == "image") ReplyMedia.IMAGE else ReplyMedia.AUDIO
                         val value = frame.opt("data") as? String ?: ""
-                        if (value.startsWith("[IMAGE]")) {
-                            completedText += pendingText
-                            pendingText = ""
-                            pendingRawImages++
-                        } else {
-                            emitMissingRawImages()
-                            completedText += pendingText
-                            pendingText = ""
+                        completedText += pendingText
+                        pendingText = ""
+                        // Consecutive image hints may be followed by a batch of saved images.
+                        if (pendingMedia != media || media == ReplyMedia.AUDIO || !value.startsWith(media.marker)) {
+                            flushMissing()
+                        }
+                        if (value.startsWith(media.marker)) {
+                            pendingMedia = media
+                            pendingCount++
+                            if (media == ReplyMedia.AUDIO) emitFirstContent()
                         }
                     }
                     "attachment_saved" -> {
                         completedText += pendingText
                         pendingText = ""
                         val data = frame.optJSONObject("data")
-                        val savedType = data?.optString("type")
-                        val attachmentId = data?.opt("id") as? String
-                        if (savedType == "image" && !attachmentId.isNullOrBlank()) {
-                            if (pendingRawImages > 0) pendingRawImages--
-                            emitFirstContent()
-                            onReplyImage(attachmentId, replyOffset())
-                        } else emitMissingRawImages()
+                        val media = when (data?.optString("type")) {
+                            "image" -> ReplyMedia.IMAGE
+                            "record" -> ReplyMedia.AUDIO
+                            else -> null
+                        }
+                        if (pendingMedia != media) flushMissing()
+                        val id = (data?.opt("id") as? String)?.takeIf { it.isNotBlank() }
+                        if (media != null && (id != null || media == ReplyMedia.AUDIO)) {
+                            if (pendingCount > 0) {
+                                pendingCount--
+                                if (pendingCount == 0) pendingMedia = null
+                            }
+                            emitMedia(media, id)
+                        } else flushMissing()
                     }
-                    "complete", "file", "video", "record", "actionrow" -> {
-                        emitMissingRawImages()
+                    "complete", "file", "video", "actionrow" -> {
+                        flushMissing()
                         completedText += pendingText
                         pendingText = ""
                     }
-                    "error" -> {
-                        emitMissingRawImages()
-                        error("AstrBot 报告对话失败，请在服务端检查配置。")
-                    }
+                    "error" -> error("AstrBot 报告对话失败，请在服务端检查配置。")
                     "end" -> {
-                        emitMissingRawImages()
+                        flushMissing()
                         done = true
                     }
                 }
                 !done
             }
         }
-        emitMissingRawImages()
+        try {
+            readReplyFrames()
+        } catch (failure: Exception) {
+            runCatching { flushMissing() }.onFailure { failure.addSuppressed(it) }
+            throw failure
+        }
+        flushMissing()
         onText(completedText + pendingText)
         check(done) { "回复流意外中断，可能已在服务端执行。请勿直接重复发送。" }
         onEvent(AstrBotTransportEvent.Completed)

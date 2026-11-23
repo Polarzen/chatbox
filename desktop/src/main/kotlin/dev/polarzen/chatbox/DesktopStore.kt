@@ -15,7 +15,7 @@ internal data class Entry(
     val status: String,
     val attachmentReference: String? = null,
     val attachmentDisplayName: String? = null,
-    val replyImages: List<ReplyImage> = emptyList(),
+    val replyAttachments: List<ReplyAttachment> = emptyList(),
     val attachmentReferences: List<String> = attachmentReference?.let(::listOf) ?: emptyList(),
 )
 
@@ -388,7 +388,7 @@ internal class DesktopStore(private val file: Path) {
             (entry.attachmentReference ?: references.firstOrNull())?.let { row.put("attachmentReference", it) }
             entry.attachmentDisplayName?.let { row.put("attachmentDisplayName", it) }
             row.put("attachmentReferences", JSONArray(references))
-            row.put("replyImages", replyImagesToJson(entry.replyImages, entry.answer))
+            row.put("replyImages", replyAttachmentsToJson(entry.replyAttachments, entry.answer))
             entries.put(row)
         }
         session.put("entries", entries)
@@ -520,7 +520,7 @@ internal class DesktopStore(private val file: Path) {
                     .put("status", status)
                     .also {
                         copyAttachmentFields(row, it)
-                        copyReplyImages(row, it, answer)
+                        copyReplyAttachments(row, it, answer)
                     })
             }
             group.sessions += JSONObject().put("id", sessionId).put("entries", entries)
@@ -641,7 +641,7 @@ internal class DesktopStore(private val file: Path) {
             ?: reference?.let(::attachmentNameFromReference)
         val answer = row.getString("answer")
         return Entry(row.getString("question"), answer, status, reference, displayName,
-            replyImagesFrom(row, answer), references)
+            replyAttachmentsFrom(row, answer), references)
     }
 
     private fun attachmentReferencesFrom(row: JSONObject): List<String> {
@@ -733,36 +733,43 @@ internal class DesktopStore(private val file: Path) {
             source.optJSONArray("attachmentReferences")?.let { target.put("attachmentReferences", JSONArray(it.toString())) }
         }
 
-        private fun copyReplyImages(source: JSONObject, target: JSONObject, answer: String) {
+        private fun copyReplyAttachments(source: JSONObject, target: JSONObject, answer: String) {
             if (source.has("replyImages")) {
-                target.put("replyImages", replyImagesToJson(replyImagesFrom(source, answer), answer))
+                target.put("replyImages", replyAttachmentsToJson(replyAttachmentsFrom(source, answer), answer))
             }
         }
 
-        private fun replyImagesFrom(source: JSONObject, answer: String): List<ReplyImage> {
+        private fun replyAttachmentsFrom(source: JSONObject, answer: String): List<ReplyAttachment> {
             val rows = source.optJSONArray("replyImages") ?: return emptyList()
             return buildList {
                 for (index in 0 until rows.length()) {
                     val row = rows.optJSONObject(index) ?: continue
+                    // Older histories stored only images and had no type field.
+                    val type = when (row.opt("type")) {
+                        null, ReplyAttachmentType.IMAGE.wireName -> ReplyAttachmentType.IMAGE
+                        ReplyAttachmentType.AUDIO.wireName -> ReplyAttachmentType.AUDIO
+                        else -> continue
+                    }
                     val offset = row.opt("textOffset") as? Number ?: continue
                     val numericOffset = offset.toDouble()
                     if (!numericOffset.isFinite() || numericOffset % 1.0 != 0.0 ||
                         numericOffset < Int.MIN_VALUE || numericOffset > Int.MAX_VALUE) continue
                     val attachmentId = when (val raw = row.opt("attachmentId")) {
                         null, JSONObject.NULL -> null
-                        is String -> raw
+                        is String -> raw.takeIf(String::isNotBlank)
                         else -> continue
                     }
-                    add(ReplyImage(attachmentId, numericOffset.toInt().coerceIn(0, answer.length)))
+                    add(ReplyAttachment(attachmentId, numericOffset.toInt().coerceIn(0, answer.length), type))
                 }
             }
         }
 
-        private fun replyImagesToJson(images: List<ReplyImage>, answer: String): JSONArray = JSONArray().also { rows ->
-            images.forEach { image ->
+        private fun replyAttachmentsToJson(attachments: List<ReplyAttachment>, answer: String): JSONArray = JSONArray().also { rows ->
+            attachments.forEach { attachment ->
                 rows.put(JSONObject()
-                    .put("attachmentId", image.attachmentId ?: JSONObject.NULL)
-                    .put("textOffset", image.textOffset.coerceIn(0, answer.length)))
+                    .put("type", attachment.type.wireName)
+                    .put("attachmentId", attachment.attachmentId ?: JSONObject.NULL)
+                    .put("textOffset", attachment.textOffset.coerceIn(0, answer.length)))
             }
         }
     }
