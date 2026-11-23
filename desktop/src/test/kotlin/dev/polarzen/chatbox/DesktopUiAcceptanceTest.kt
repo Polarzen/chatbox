@@ -20,6 +20,7 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasText
@@ -1242,11 +1243,13 @@ class DesktopUiAcceptanceTest {
 
     private fun selectProfile(index: Int) {
         openSettings()
-        val radioNodes = rule.onAllNodes(roleMatcher(Role.RadioButton)).fetchSemanticsNodes()
-        assertTrue("Settings should expose the saved profile radio controls", radioNodes.size > index)
-        rule.onAllNodes(roleMatcher(Role.RadioButton)).get(index).performClick()
-        advanceUiAnimations()
         val expectedProfile = store.profiles[index].id
+        // Saved profiles appear in store order, before the dynamically discovered Launcher instances.
+        val radio = rule.onAllNodes(roleMatcher(Role.RadioButton) and
+            hasAnyAncestor(hasTestTag("connection-control-settings-dialog")))[index]
+        radio.performSemanticsAction(SemanticsActions.OnClick)
+        advanceUiAnimations()
+        radio.assertIsSelected()
         closeDialog()
         waitUntil("profile selection", 10_000) { DesktopStore(historyFile).activeProfileId == expectedProfile }
     }

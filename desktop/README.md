@@ -4,9 +4,9 @@ Windows 桌面版使用 AstrBot OpenAPI 收发文字和图片，也可播放服�
 
 ## 安装与构建
 
-Windows 0.1.10 安装包为 `Chatbox-0.1.10.msi`。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.10/Chatbox-0.1.10.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.10/SHA256SUMS.txt) · [v0.1.10 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.10)
+Windows 0.1.11 安装包为 `Chatbox-0.1.11.msi`。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.11/Chatbox-0.1.11.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.11/SHA256SUMS.txt) · [v0.1.11 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.11)
 
-将 MSI 和 `SHA256SUMS.txt` 下载到同一目录。在该目录打开 PowerShell，运行 `Get-FileHash .\Chatbox-0.1.10.msi -Algorithm SHA256`，确认输出的哈希值与 `SHA256SUMS.txt` 中该 MSI 对应的值一致。从 0.1.5 至 0.1.9 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。安装完成后从开始菜单打开 Chatbox。0.1.1 用户先阅读[旧卸载器升级说明](#从-011-升级)。
+将 MSI 和 `SHA256SUMS.txt` 下载到同一目录。在该目录打开 PowerShell，运行 `Get-FileHash .\Chatbox-0.1.11.msi -Algorithm SHA256`，确认输出的哈希值与 `SHA256SUMS.txt` 中该 MSI 对应的值一致。从 0.1.5 至 0.1.10 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。安装完成后从开始菜单打开 Chatbox。0.1.1 用户先阅读[旧卸载器升级说明](#从-011-升级)。
 
 如需自行构建，在 Windows 安装 JDK 17 和 WiX Toolset 3.x，然后在仓库根目录运行下列命令。
 
