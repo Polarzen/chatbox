@@ -126,7 +126,10 @@ private data class VerificationProbe(
  * selection or reactivating a key after a later request has superseded it.
  */
 @Composable
-internal fun rememberDesktopConnection(store: DesktopStore, keys: NamedKeys): DesktopConnection {
+internal fun rememberDesktopConnection(
+    store: DesktopStore, keys: NamedKeys,
+    withLegacyDraftsSaved: suspend (Set<String>, Set<String>, suspend () -> Set<String>) -> Set<String> = { _, _, adopt -> adopt() },
+): DesktopConnection {
     val scope = rememberCoroutineScope()
     val firstProfile = remember(store) {
         store.activeProfileId.takeIf { store.profile(it) != null } ?: store.profiles.firstOrNull()?.id.orEmpty()
@@ -308,20 +311,27 @@ internal fun rememberDesktopConnection(store: DesktopStore, keys: NamedKeys): De
                     if (!isCurrent(generation, selection)) return@probeSuccess
                     val preparedResult = runCatching {
                         storeMutex.withLock {
+                            val latestKeys = withContext(Dispatchers.IO) {
+                                check(isCurrent(generation, selection)) { "stale" }
+                                val latest = keys.list(profileAtStart)
+                                check(latest.keys.any { it.id == candidateId }) { "key-removed" }
+                                if (store.profile(profileAtStart) == null) store.ensureProfile(profileAtStart, probe.binding.address)
+                                latest
+                            }
+                            val adopt: suspend () -> Set<String> = {
+                                withContext(Dispatchers.IO) {
+                                    check(isCurrent(generation, selection)) { "stale" }
+                                    store.adoptVerifiedSessions(profileAtStart, probe.binding.address, probe.sessions)
+                                }
+                            }
+                            val offlineIds = profiles.filter { it.offlineOnly }.map { it.id }.toSet()
+                            val adoptedSessions = if (offlineIds.isEmpty() || probe.sessions.isEmpty()) adopt()
+                                else withLegacyDraftsSaved(offlineIds, probe.sessions, adopt)
                             withContext(Dispatchers.IO) {
                                 check(isCurrent(generation, selection)) { "stale" }
-                                val latestKeys = keys.list(profileAtStart)
-                                check(latestKeys.keys.any { it.id == candidateId }) { "key-removed" }
-                                if (store.profile(profileAtStart) == null) {
-                                    store.ensureProfile(profileAtStart, probe.binding.address)
-                                }
-                                val adoptedSessions = store.adoptVerifiedSessions(
-                                    profileAtStart, probe.binding.address, probe.sessions,
-                                )
                                 legacySessionAtStart?.takeIf { it in adoptedSessions }?.let { legacySession ->
                                     runCatching { store.selectSession(profileAtStart, legacySession) }
                                 }
-                                check(isCurrent(generation, selection)) { "stale" }
                                 VerificationCommit(probe.binding, latestKeys, store.profiles)
                             }
                         }
@@ -358,8 +368,11 @@ internal fun rememberDesktopConnection(store: DesktopStore, keys: NamedKeys): De
                         })
                     }, onFailure = preparedFailure@{ failure ->
                         if (failure.message == "stale") return@preparedFailure
-                        val message = if (failure.message == "key-removed") "所选密钥已不存在，请重新选择密钥。"
-                            else safeFailureMessage(failure, "")
+                        val message = when (failure.message) {
+                            "key-removed" -> "所选密钥已不存在，请重新选择密钥。"
+                            "legacy-draft-save" -> "无法保存离线会话草稿，请检查本地存储后重新验证。"
+                            else -> safeFailureMessage(failure, "")
+                        }
                         error = message
                         keyErrors = keyErrors + (candidateId to message)
                     })

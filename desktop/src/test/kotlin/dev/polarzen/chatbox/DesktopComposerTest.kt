@@ -7,6 +7,8 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
@@ -17,6 +19,8 @@ import androidx.compose.ui.text.input.TextFieldValue
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
+import java.nio.file.Path
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 
 @OptIn(ExperimentalTestApi::class)
@@ -144,6 +148,46 @@ class DesktopComposerTest {
         }
         composeRule.onNodeWithTag("send-button").performClick()
         composeRule.runOnIdle { assertEquals(1, sends.get()) }
+    }
+
+    @Test
+    fun localCommitLocksEditsAndUnlocksMissingAttachmentReplacement() {
+        val missing = Path.of("missing-${UUID.randomUUID()}.JPG")
+        var replaced: Path? = null
+        var saving by mutableStateOf(true)
+        var draft by mutableStateOf(TextFieldValue("待发"))
+        composeRule.setContent {
+            Composer(
+                draft = draft,
+                onDraft = { draft = it },
+                selectedImage = missing,
+                onChooseImage = {},
+                onRemoveImage = {},
+                onSend = { error("Unexpected send") },
+                canSend = true,
+                canRecord = true,
+                onPasteAttachment = { error("Unexpected paste") },
+                onReplaceMissingAttachment = { replaced = it },
+                composerCommitInProgress = saving,
+            )
+        }
+        composeRule.onNodeWithText("正在保存消息…").assertExists()
+        for (tag in listOf("send-button", "start-recording", "remove-image-button", "choose-image-button")) {
+            composeRule.onNodeWithTag(tag).assertIsNotEnabled()
+        }
+        composeRule.waitUntil(5_000) { composeRule.onAllNodesWithText("重新选择").fetchSemanticsNodes().isNotEmpty() }
+        composeRule.onNodeWithText("重新选择").assertIsNotEnabled()
+        composeRule.onNodeWithTag("composer-field").performClick().performKeyInput {
+            withKeyDown(Key.CtrlLeft) { pressKey(Key.V) }
+            withKeyDown(Key.ShiftLeft) { pressKey(Key.Enter) }
+            pressKey(Key.Enter)
+        }
+        composeRule.runOnIdle {
+            assertEquals("待发", draft.text)
+            saving = false
+        }
+        composeRule.onNodeWithText("重新选择").performClick()
+        composeRule.runOnIdle { assertEquals(missing, replaced) }
     }
 
     private fun installComposer(initial: TextFieldValue, sends: AtomicInteger, onPaste: () -> Boolean = { false }): DraftState {

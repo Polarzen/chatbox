@@ -1,5 +1,13 @@
 package dev.polarzen.chatbox
 
+import androidx.compose.foundation.layout.Column
+import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.runComposeUiTest
+import androidx.compose.ui.test.waitUntilExactlyOneExists
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -18,10 +26,35 @@ import java.nio.ByteOrder
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import javax.sound.sampled.*
 
 class ReplyAudioTest {
     @get:Rule val temp = TemporaryFolder()
+
+    @OptIn(ExperimentalTestApi::class)
+    @Test fun cachedDurationStaysVisibleWhenOutputDeviceIsUnavailable() = runComposeUiTest {
+        val path = ReplyAudioCache(temp.root.toPath()).save("profile", "voice", wav(frames = 16000 * 8))
+        val acquisitions = AtomicInteger()
+        setContent {
+            Column {
+                ReplyAudioPlayback(path) {
+                    acquisitions.incrementAndGet()
+                    throw LineUnavailableException("没有输出设备")
+                }
+            }
+        }
+        waitUntilExactlyOneExists(hasText("0:08"), 5000)
+        onNodeWithText("0:08").assertIsDisplayed()
+        assertEquals(0, acquisitions.get())
+        onNodeWithText("播放语音").performClick()
+        val error = "语音播放失败：没有输出设备"
+        waitUntilExactlyOneExists(hasText(error), 5000)
+        onNodeWithText(error).assertIsDisplayed()
+        onNodeWithText("0:08").assertIsDisplayed()
+        onNodeWithText("播放语音").assertIsDisplayed()
+        assertEquals(1, acquisitions.get())
+    }
 
     @Test fun durationUsesCompleteFramesAndIgnoresMetadataWithoutADevice() {
         val dir = temp.root.toPath()

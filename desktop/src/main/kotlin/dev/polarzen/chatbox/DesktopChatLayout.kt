@@ -156,6 +156,8 @@ internal fun DesktopChatLayout(
     onStartRecording: () -> Unit = {},
     onStopRecording: () -> Unit = {},
     onCancelRecording: () -> Unit = {},
+    onReplaceMissingAttachment: ((Path) -> Unit)? = null,
+    composerCommitInProgress: Boolean = false,
 ) {
     BoxWithConstraints(
         modifier = Modifier.fillMaxSize().background(desktopPalette.canvas).testTag("chat-root"),
@@ -200,6 +202,8 @@ internal fun DesktopChatLayout(
                 onStartRecording = onStartRecording,
                 onStopRecording = onStopRecording,
                 onCancelRecording = onCancelRecording,
+                onReplaceMissingAttachment = onReplaceMissingAttachment,
+                composerCommitInProgress = composerCommitInProgress,
                 selectedImage = selectedImage,
                 selectedImages = selectedImages,
                 onChooseImage = onChooseImage,
@@ -690,11 +694,14 @@ private fun ConversationPane(
     onStartRecording: () -> Unit = {},
     onStopRecording: () -> Unit = {},
     onCancelRecording: () -> Unit = {},
+    onReplaceMissingAttachment: ((Path) -> Unit)? = null,
+    composerCommitInProgress: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val selectedTitle = sessions.firstOrNull { it.selected }?.title?.ifBlank { "新会话" } ?: "新会话"
     val isExternalDragOver = remember { mutableStateOf(false) }
     val addImagesState = rememberUpdatedState(onAddImages)
+    val commitInProgress = rememberUpdatedState(composerCommitInProgress)
     val dragTarget = remember {
         object : DragAndDropTarget {
             override fun onEntered(event: DragAndDropEvent) {
@@ -714,8 +721,9 @@ private fun ConversationPane(
             }
 
             override fun onDrop(event: DragAndDropEvent): Boolean {
-                val files = droppedFilePaths(event)
                 isExternalDragOver.value = false
+                if (commitInProgress.value) return false
+                val files = droppedFilePaths(event)
                 if (files.isEmpty()) return false
                 addImagesState.value(files)
                 return true
@@ -727,7 +735,7 @@ private fun ConversationPane(
             .background(desktopPalette.canvas)
             .dragAndDropTarget(
                 shouldStartDragAndDrop = { event ->
-                    when (val nativeEvent = event.nativeEvent) {
+                    !composerCommitInProgress && when (val nativeEvent = event.nativeEvent) {
                         is DropTargetDragEvent -> nativeEvent.transferable.isDataFlavorSupported(DataFlavor.javaFileListFlavor)
                         is DropTargetDropEvent -> nativeEvent.transferable.isDataFlavorSupported(DataFlavor.javaFileListFlavor)
                         else -> false
@@ -935,6 +943,8 @@ private fun ConversationPane(
             onStartRecording = onStartRecording,
             onStopRecording = onStopRecording,
             onCancelRecording = onCancelRecording,
+            onReplaceMissingAttachment = onReplaceMissingAttachment,
+            composerCommitInProgress = composerCommitInProgress,
             selectedImage = selectedImage,
             selectedImages = selectedImages,
             onChooseImage = onChooseImage,
@@ -945,7 +955,7 @@ private fun ConversationPane(
             modifier = Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, bottom = 16.dp, top = 8.dp),
         )
       }
-      if (isExternalDragOver.value) {
+      if (isExternalDragOver.value && !composerCommitInProgress) {
           Box(
               Modifier.fillMaxSize().background(desktopPalette.accent.copy(alpha = .12f)).testTag("external-drop-overlay"),
               contentAlignment = Alignment.Center,
@@ -1038,6 +1048,8 @@ internal fun Composer(
     onStartRecording: () -> Unit = {},
     onStopRecording: () -> Unit = {},
     onCancelRecording: () -> Unit = {},
+    onReplaceMissingAttachment: ((Path) -> Unit)? = null,
+    composerCommitInProgress: Boolean = false,
 ) {
     Surface(
         modifier = modifier.testTag("composer"),
@@ -1047,6 +1059,9 @@ internal fun Composer(
         elevation = 1.dp,
     ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            if (composerCommitInProgress) {
+                Text("正在保存消息…", color = desktopPalette.muted, fontSize = 12.sp)
+            }
             if (selectedImages.isNotEmpty()) {
                 Column(Modifier.heightIn(max = 156.dp).verticalScroll(rememberScrollState())) {
                     selectedImages.forEachIndexed { index, path ->
@@ -1054,6 +1069,8 @@ internal fun Composer(
                             SelectedAttachmentPreview(
                                 path = path,
                                 onRemove = { onRemoveImagePath?.invoke(path) ?: onRemoveImage() },
+                                onReplace = onReplaceMissingAttachment,
+                                enabled = !composerCommitInProgress,
                                 removeTag = if (index == 0) "remove-image-button" else "remove-image-button-$index",
                             )
                         }
@@ -1069,13 +1086,14 @@ internal fun Composer(
                         color = desktopPalette.ink,
                         fontSize = 13.sp,
                     )
-                    TextButton(onClick = onStopRecording, modifier = Modifier.testTag("stop-recording")) { Text("停止") }
-                    TextButton(onClick = onCancelRecording, modifier = Modifier.testTag("cancel-recording")) { Text("取消") }
+                    TextButton(onClick = onStopRecording, enabled = !composerCommitInProgress, modifier = Modifier.testTag("stop-recording")) { Text("停止") }
+                    TextButton(onClick = onCancelRecording, enabled = !composerCommitInProgress, modifier = Modifier.testTag("cancel-recording")) { Text("取消") }
                 }
             }
             Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
                 OutlinedButton(
                     onClick = onChooseImage,
+                    enabled = !composerCommitInProgress,
                     modifier = Modifier.size(39.dp).testTag("choose-image-button"),
                     contentPadding = PaddingValues(0.dp),
                     shape = CircleShape,
@@ -1084,7 +1102,7 @@ internal fun Composer(
                 if (recordingMillis == null) {
                     OutlinedButton(
                         onClick = onStartRecording,
-                        enabled = canRecord,
+                        enabled = canRecord && !composerCommitInProgress,
                         modifier = Modifier.size(39.dp).semantics { contentDescription = "开始麦克风录音" }
                             .testTag("start-recording"),
                         contentPadding = PaddingValues(0.dp),
@@ -1093,15 +1111,17 @@ internal fun Composer(
                 }
                 BasicTextField(
                     value = draft,
-                    onValueChange = onDraft,
+                    readOnly = composerCommitInProgress,
+                    onValueChange = { if (!composerCommitInProgress) onDraft(it) },
                     modifier = Modifier.weight(1f).heightIn(min = 39.dp, max = 112.dp)
                         .padding(vertical = 9.dp)
                         .onPreviewKeyEvent { event ->
                             if (event.type == KeyEventType.KeyDown && event.key == Key.V && event.isCtrlPressed &&
                                 !event.isShiftPressed && !event.isAltPressed && !event.isMetaPressed
-                            ) return@onPreviewKeyEvent onPasteAttachment()
+                            ) return@onPreviewKeyEvent composerCommitInProgress || onPasteAttachment()
                             if (event.key == Key.Enter && event.type == KeyEventType.KeyDown) {
                                 when {
+                                    composerCommitInProgress -> true
                                     draft.composition != null -> false
                                     event.isShiftPressed -> {
                                         val selectionStart = minOf(draft.selection.start, draft.selection.end)
@@ -1137,7 +1157,7 @@ internal fun Composer(
                 )
                 Button(
                     onClick = onSend,
-                    enabled = canSend && recordingMillis == null,
+                    enabled = canSend && recordingMillis == null && !composerCommitInProgress,
                     modifier = Modifier.height(39.dp).widthIn(min = 78.dp).testTag("send-button"),
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(
@@ -1156,7 +1176,13 @@ internal fun Composer(
 private fun Path.isWaveRecording() = fileName?.toString()?.endsWith(".wav", ignoreCase = true) == true
 
 @Composable
-private fun SelectedAttachmentPreview(path: Path, onRemove: () -> Unit, removeTag: String) {
+private fun SelectedAttachmentPreview(
+    path: Path,
+    onRemove: () -> Unit,
+    onReplace: ((Path) -> Unit)?,
+    enabled: Boolean,
+    removeTag: String,
+) {
     var bitmap by remember(path) { mutableStateOf<ImageBitmap?>(null) }
     var missing by remember(path) { mutableStateOf(false) }
     val audio = path.isWaveRecording()
@@ -1189,7 +1215,12 @@ private fun SelectedAttachmentPreview(path: Path, onRemove: () -> Unit, removeTa
             fontSize = 12.sp,
             maxLines = 1,
         )
-        TextButton(onClick = onRemove, modifier = Modifier.testTag(removeTag)) {
+        if (missing && onReplace != null && path.toFile().extension.lowercase() in setOf("png", "jpg", "jpeg")) {
+            TextButton(onClick = { onReplace(path) }, enabled = enabled) {
+                Text("重新选择", fontSize = 12.sp)
+            }
+        }
+        TextButton(onClick = onRemove, enabled = enabled, modifier = Modifier.testTag(removeTag)) {
             Text("移除", color = desktopPalette.muted, fontSize = 12.sp)
         }
     }

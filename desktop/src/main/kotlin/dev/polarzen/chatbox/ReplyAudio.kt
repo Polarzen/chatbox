@@ -177,7 +177,7 @@ internal suspend fun playReplyAudio(path: Path, acquireClip: () -> Clip = { Audi
 }
 
 @Composable
-internal fun ReplyAudioPlayback(path: Path, durationMillis: Long? = null) {
+internal fun ReplyAudioPlayback(path: Path, durationMillis: Long? = null, acquireClip: () -> Clip = { AudioSystem.getClip() }) {
     var duration by remember(path, durationMillis) { mutableStateOf(durationMillis) }
     LaunchedEffect(path, durationMillis) {
         if (durationMillis == null) duration = withContext(Dispatchers.IO) {
@@ -189,7 +189,7 @@ internal fun ReplyAudioPlayback(path: Path, durationMillis: Long? = null) {
     LaunchedEffect(path, playing) {
         if (playing) {
             try {
-                playReplyAudio(path)
+                playReplyAudio(path, acquireClip)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {

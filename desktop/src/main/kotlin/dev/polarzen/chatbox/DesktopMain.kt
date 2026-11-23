@@ -209,7 +209,6 @@ internal fun DesktopScreen(
     appearanceActions: @Composable () -> Unit = {},
 ) {
     val replyAudioCache = remember(replyImageCache) { ReplyAudioCache(replyImageCache.directory.resolveSibling("reply-audio")) }
-    val connection = rememberDesktopConnection(store, keys)
     val sessionsRevision = remember { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
     val deletedSessionKeys = remember { ConcurrentHashMap.newKeySet<SessionKey>() }
@@ -223,6 +222,7 @@ internal fun DesktopScreen(
     val composer = remember(store) { DesktopComposerSession(store, scope) { key, message ->
         if (message == null) notices.remove(key) else notices[key] = message
     } }
+    val connection = rememberDesktopConnection(store, keys, composer::withLegacyDraftsSaved)
     var preparing by remember { mutableStateOf<Job?>(null) }
     var closeError by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(closeRequested) {
@@ -287,22 +287,26 @@ internal fun DesktopScreen(
         index >= 0 && (chat.entries[index].status.startsWith("发送失败：") || chat.entries[index].status.startsWith("未发送："))
     }?.let { index -> failedProgressByEntry[TimedEntryKey(currentKey, index)] }
 
-    fun chooseImages() {
+    fun chooseImages(replacing: Path? = null) {
+        val origin = currentKey
+        val originEditor = composer.editor(origin)?.takeUnless { it.commitInProgress } ?: return
+        originEditor.editSerial++
         try {
             val chooser = JFileChooser().apply {
-                dialogTitle = "选择图片（可多选）"
+                dialogTitle = if (replacing == null) "选择图片（可多选）" else "重新选择这张图片"
                 isAcceptAllFileFilterUsed = false
-                isMultiSelectionEnabled = true
+                isMultiSelectionEnabled = replacing == null
                 fileFilter = FileNameExtensionFilter("PNG / JPEG 图片", "png", "jpg", "jpeg")
             }
             if (chooser.showOpenDialog(parentWindow) == JFileChooser.APPROVE_OPTION) {
                 val selected = chooser.selectedFiles.takeIf { it.isNotEmpty() }
                     ?.toList()
                     ?: listOfNotNull(chooser.selectedFile)
-                composer.addFiles(currentKey, selected)
+                if (replacing == null) composer.addFiles(origin, selected)
+                else composer.replaceMissingAttachment(origin, replacing, selected)
             }
         } catch (_: InvalidPathException) {
-            composer.addFiles(currentKey, emptyList(), invalidPathCount = 1)
+            composer.addFiles(origin, emptyList(), invalidPathCount = 1)
         }
     }
 
@@ -542,9 +546,10 @@ internal fun DesktopScreen(
             return
         }
         val pendingImport = if (retryEntry == null) composer.pendingImport(targetKey) else null
-        val clickedText = editor.draft.text
+        val clickedSerial = editor.editSerial
         val current = unsavedReplies[targetKey]
         val prepare = scope.launch(start = CoroutineStart.LAZY) {
+            var locked = false
             try {
                 val importIssue = pendingImport?.await()
                 if (importIssue != null) {
@@ -553,7 +558,7 @@ internal fun DesktopScreen(
                 }
                 if (targetKey in deletedSessionKeys) return@launch
                 val committed = editor.draft
-                if (retryEntry == null && (committed.text != clickedText || editor.field.composition != null)) {
+                if (retryEntry == null && (editor.editSerial != clickedSerial || editor.field.composition != null || editor.commitInProgress)) {
                     notices[targetKey] = "草稿已更新，请确认后发送。"
                     return@launch
                 }
@@ -568,9 +573,19 @@ internal fun DesktopScreen(
                 if (query.isEmpty() && paths.isEmpty()) return@launch
                 val error = withContext(Dispatchers.IO) { attachmentProblem(paths, store.managedMediaDirectory) }
                 if (targetKey in deletedSessionKeys) return@launch
+                if (retryEntry == null && (editor.revision != revision || editor.editSerial != clickedSerial ||
+                        editor.field.composition != null || editor.commitInProgress || composer.recordingKey == targetKey)
+                ) {
+                    notices[targetKey] = "草稿已更新，请确认后发送。"
+                    return@launch
+                }
                 if (error != null) {
                     notices[targetKey] = error
                     return@launch
+                }
+                if (retryEntry == null) {
+                    editor.commitInProgress = true
+                    locked = true
                 }
                 val references = paths.map(Path::toString)
                 val entry = Entry(
@@ -594,6 +609,7 @@ internal fun DesktopScreen(
             } catch (e: Exception) {
                 if (targetKey !in deletedSessionKeys) notices[targetKey] = "无法保存本地会话，消息未发送。"
             } finally {
+                if (locked) editor.commitInProgress = false
                 preparing = null
             }
         }
@@ -720,12 +736,14 @@ internal fun DesktopScreen(
             onDraft = { value -> if (!closeRequested) composer.input(currentKey, value) },
             selectedImage = currentImages.firstOrNull(),
             selectedImages = currentImages,
-            onChooseImage = ::chooseImages,
+            onChooseImage = { chooseImages() },
+            onReplaceMissingAttachment = { path -> chooseImages(path) },
+            composerCommitInProgress = closeRequested || editor?.commitInProgress == true,
             onAddImages = { files -> composer.addFiles(currentKey, files) },
             onRemoveImage = { composer.remove(currentKey, null) },
             onRemoveImagePath = { composer.remove(currentKey, it) },
             onPasteAttachment = { selectedSessionId.isNotBlank() && composer.paste(currentKey) },
-            canRecord = selectedSessionId.isNotBlank() && editor != null && composer.recordingKey == null && !closeRequested,
+            canRecord = selectedSessionId.isNotBlank() && editor?.commitInProgress == false && composer.recordingKey == null && !closeRequested,
             recordingMillis = composer.elapsed.takeIf { composer.recordingKey == currentKey },
             onStartRecording = { composer.startMic(currentKey) },
             onStopRecording = { composer.stopMic(currentKey) },
@@ -849,6 +867,7 @@ internal fun addSourceImages(
     existing: List<Path>,
     files: List<File>,
     invalidPathCount: Int = 0,
+    requireContent: Boolean = false,
 ): SourceImageAddition {
     val paths = mutableListOf<Path>()
     var rejectedPathCount = invalidPathCount
@@ -859,7 +878,7 @@ internal fun addSourceImages(
             rejectedPathCount++
         }
     }
-    val validation = inspectSourceImages(paths)
+    val validation = inspectSourceImages(paths, requireContent)
     val combined = (existing + validation.valid).distinct()
     val notice = sourceImageNotice(
         validation.rejected,

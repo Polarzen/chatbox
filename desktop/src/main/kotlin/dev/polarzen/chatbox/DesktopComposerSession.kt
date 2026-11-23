@@ -22,6 +22,9 @@ internal class SessionEditor(initial: ComposerDraft, initialRevision: Long) {
     var draft by mutableStateOf(initial)
     var revision = initialRevision
     var dirty = false
+    var commitInProgress by mutableStateOf(false)
+    var editSerial = 0L
+    var replacedByComposition = ""
 }
 
 /** UI state belongs to the originating session even when an import or recording finishes after navigation. */
@@ -62,19 +65,43 @@ internal class DesktopComposerSession(
     }
 
     fun input(key: SessionKey, value: TextFieldValue) {
-        val editor = editors[key] ?: return
+        val editor = editors[key]?.takeUnless { it.commitInProgress } ?: return
+        val previous = editor.field
+        val composition = value.composition
+        if (previous.text != value.text || previous.composition != composition) editor.editSerial++
         editor.field = value
-        if (value.composition == null) update(key, editor, editor.draft.copy(text = value.text))
+        val committed = if (composition == null) {
+            editor.replacedByComposition = ""
+            value.text
+        } else {
+            // An IME batch may confirm characters and begin another preedit in a single update.
+            val prefix = value.text.substring(0, composition.min)
+            val suffix = value.text.substring(composition.max)
+            val oldRange = previous.composition ?: previous.selection
+            val sameSurroundings = prefix == previous.text.substring(0, oldRange.min) &&
+                suffix == previous.text.substring(oldRange.max)
+            editor.replacedByComposition = when {
+                previous.composition == null && previous.text == value.text ->
+                    previous.text.substring(composition.min, composition.max)
+                sameSurroundings && previous.composition == null -> previous.text.substring(oldRange.min, oldRange.max)
+                sameSurroundings -> editor.replacedByComposition
+                else -> ""
+            }
+            prefix + editor.replacedByComposition + suffix
+        }
+        update(key, editor, editor.draft.copy(text = committed))
     }
 
     fun remove(key: SessionKey, path: Path?) {
-        val editor = editors[key] ?: return
+        val editor = editors[key]?.takeUnless { it.commitInProgress } ?: return
+        editor.editSerial++
         val remaining = if (path == null) emptyList() else editor.draft.attachments.filterNot { it == path }
         update(key, editor, editor.draft.copy(attachments = remaining))
     }
 
     /** Serialize imports per editor, keeping the order of successive pastes even for large bitmaps. */
     private fun enqueue(key: SessionKey, action: suspend () -> String?) {
+        editors[key]?.let { it.editSerial++ } ?: return
         val previous = imports[key]
         val job = scope.async {
             val earlierIssue = previous?.await()
@@ -95,11 +122,36 @@ internal class DesktopComposerSession(
     }
 
     fun addFiles(key: SessionKey, files: List<File>, invalidPathCount: Int = 0) {
+        if (editors[key]?.commitInProgress != false) return
         enqueue(key) {
             val existing = editors.getValue(key).draft.attachments
             val addition = withContext(Dispatchers.IO) { addSourceImages(existing, files, invalidPathCount) }
             append(key, addition.paths.filterNot { it in existing }, addition.notice)
             addition.notice
+        }
+    }
+
+    fun replaceMissingAttachment(key: SessionKey, original: Path, files: List<File>) {
+        if (editors[key]?.commitInProgress != false) return
+        enqueue(key) {
+            val selected = withContext(Dispatchers.IO) { addSourceImages(emptyList(), files, requireContent = true) }
+            val editor = editors[key] ?: return@enqueue null
+            val paths = editor.draft.attachments
+            val index = paths.indexOf(original)
+            if (index < 0) return@enqueue null
+            val path = selected.paths.singleOrNull()
+            val issue = when {
+                selected.notice != null -> selected.notice
+                files.size != 1 || path == null -> "请选择一张 PNG 或 JPEG 图片。"
+                path != original && path in paths -> "该图片已在待发附件中，请选择其他图片。"
+                else -> null
+            }
+            if (issue == null) {
+                val updated = paths.toMutableList().apply { set(index, checkNotNull(path)) }
+                update(key, editor, editor.draft.copy(attachments = updated))
+            }
+            notice(key, issue)
+            issue
         }
     }
 
@@ -110,12 +162,16 @@ internal class DesktopComposerSession(
         notice(key, message)
     }
 
-    fun paste(key: SessionKey): Boolean {
+    fun paste(key: SessionKey, captureClipboard: () -> ClipboardImages = { captureClipboardImages() }): Boolean {
         if (key !in editors) return false
-        when (val capture = captureClipboardImages()) {
+        if (editors.getValue(key).commitInProgress) return true
+        when (val capture = captureClipboard()) {
             ClipboardImages.NativePaste -> return false
             is ClipboardImages.Files -> addFiles(key, capture.files)
-            is ClipboardImages.Failure -> notice(key, capture.message)
+            is ClipboardImages.Failure -> enqueue(key) {
+                notice(key, capture.message)
+                capture.message
+            }
             is ClipboardImages.Bitmap -> enqueue(key) {
                 val path = withContext(Dispatchers.IO) { writeClipboardPng(capture.image, store.managedMediaDirectory) }
                 append(key, listOf(path), null)
@@ -126,7 +182,9 @@ internal class DesktopComposerSession(
     }
 
     fun startMic(key: SessionKey, start: (Path) -> MicRecording = { MicRecording.start(it) }) {
-        if (mic != null || key !in editors) return
+        val editor = editors[key]?.takeUnless { it.commitInProgress } ?: return
+        if (mic != null) return
+        editor.editSerial++
         val capture = start(store.managedMediaDirectory)
         mic = key to capture
         discardMic = false
@@ -206,6 +264,36 @@ internal class DesktopComposerSession(
             throw e
         } catch (e: Exception) {
             if (key in editors) notice(key, "无法保存草稿：${e.localizedMessage ?: "写入失败"}")
+        }
+    }
+
+    suspend fun withLegacyDraftsSaved(
+        offlineProfileIds: Set<String>, sessionIds: Set<String>, adopt: suspend () -> Set<String>,
+    ): Set<String> {
+        val origins = editors.filterKeys { it.profileId in offlineProfileIds && it.sessionId in sessionIds }
+        if (origins.isEmpty()) return adopt()
+        origins.values.forEach { it.commitInProgress = true }
+        try {
+            val recording = recordingKey
+            if (recording != null && recording in origins) {
+                stopMic(recording)
+                micCompletion?.join()
+            }
+            for (key in origins.keys) {
+                imports[key]?.await()
+                try {
+                    save(key)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    throw IllegalStateException("legacy-draft-save", e)
+                }
+            }
+            val moved = adopt()
+            origins.keys.filter { it.sessionId in moved }.forEach(::forget)
+            return moved
+        } finally {
+            origins.values.forEach { it.commitInProgress = false }
         }
     }
 
