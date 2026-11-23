@@ -20,6 +20,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.Modifier
@@ -49,6 +50,11 @@ import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.JFileChooser
 import javax.swing.SwingUtilities
 import javax.swing.filechooser.FileNameExtensionFilter
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.concurrent.thread
 
 fun main(args: Array<String>) {
@@ -90,6 +96,8 @@ fun main(args: Array<String>) {
         historyLock != null
     }.onFailure { lockFailure = it }.getOrDefault(false)
     val store = if (lockAcquired) runCatching { DesktopStore(dataDir.resolve("history.json")) }.getOrNull() else null
+    // No process can be producing or uploading managed media at this point.
+    store?.let { runCatching { it.cleanupUnreferencedManagedMedia() } }
     val credentials = DesktopCredentials(dataDir.resolve("credentials"))
     val keys = NamedKeys(dataDir, credentials)
     val replyImageCache = ReplyImageCache(dataDir.resolve("reply-images"))
@@ -98,9 +106,10 @@ fun main(args: Array<String>) {
         application {
             var appearance by remember { mutableStateOf(appearanceStore.load()) }
             var appearanceError by remember { mutableStateOf<String?>(null) }
+            var closeRequested by remember { mutableStateOf(false) }
             val historySearchOpen = remember { mutableStateOf(false) }
             Window(
-                onCloseRequest = ::exitApplication,
+                onCloseRequest = { if (store == null) exitApplication() else closeRequested = true },
                 title = "chatbox",
                 onPreviewKeyEvent = { event ->
                     if (event.opensHistorySearch() && lockAcquired && store != null) {
@@ -120,7 +129,11 @@ fun main(args: Array<String>) {
                             !lockAcquired && lockFailure == null -> Text("Chatbox 已在运行，请使用已打开的窗口。", Modifier.padding(16.dp))
                             !lockAcquired -> Text("无法锁定本地聊天历史文件，请检查数据目录权限。", Modifier.padding(16.dp))
                             store == null -> Text("无法读取本地聊天历史。请先备份历史文件，再检查数据目录。", Modifier.padding(16.dp))
-                            else -> DesktopScreen(store, keys, replyImageCache, window, historySearchOpen) {
+                            else -> DesktopScreen(
+                                store, keys, replyImageCache, window, historySearchOpen,
+                                closeRequested = closeRequested,
+                                onCloseResult = { ready -> if (ready) exitApplication() else closeRequested = false },
+                            ) {
                                 DesktopAppearanceControls(
                                     appearance,
                                     onPreview = { appearance = it },
@@ -149,8 +162,6 @@ fun main(args: Array<String>) {
         runCatching { lockChannel?.close() }
     }
 }
-
-private data class SessionKey(val profileId: String, val sessionId: String)
 
 private data class SendOperation(
     val id: Int,
@@ -193,13 +204,13 @@ internal fun DesktopScreen(
     replyImageCache: ReplyImageCache,
     parentWindow: java.awt.Window? = null,
     historySearchOpen: MutableState<Boolean> = remember { mutableStateOf(false) },
+    closeRequested: Boolean = false,
+    onCloseResult: (Boolean) -> Unit = {},
     appearanceActions: @Composable () -> Unit = {},
 ) {
     val replyAudioCache = remember(replyImageCache) { ReplyAudioCache(replyImageCache.directory.resolveSibling("reply-audio")) }
-    val connection = rememberDesktopConnection(store, keys)
     val sessionsRevision = remember { mutableIntStateOf(0) }
-    val drafts = remember { mutableStateMapOf<SessionKey, TextFieldValue>() }
-    val selectedImages = remember { mutableStateMapOf<SessionKey, List<Path>>() }
+    val scope = rememberCoroutineScope()
     val deletedSessionKeys = remember { ConcurrentHashMap.newKeySet<SessionKey>() }
     val chats = remember { mutableStateMapOf<SessionKey, Chat>() }
     val unsavedReplies = remember { mutableStateMapOf<SessionKey, Chat>() }
@@ -208,6 +219,24 @@ internal fun DesktopScreen(
         return unsavedReplies[key] ?: persisted
     }
     val notices = remember { mutableStateMapOf<SessionKey, String>() }
+    val composer = remember(store) { DesktopComposerSession(store, scope) { key, message ->
+        if (message == null) notices.remove(key) else notices[key] = message
+    } }
+    val connection = rememberDesktopConnection(store, keys, composer::withLegacyDraftsSaved)
+    var preparing by remember { mutableStateOf<Job?>(null) }
+    var closeError by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(closeRequested) {
+        if (closeRequested) {
+            preparing?.join()
+            try {
+                closeError = composer.flushForExit()
+                onCloseResult(closeError == null)
+            } catch (error: Exception) {
+                closeError = "无法保存草稿，窗口保持打开。请检查本地数据目录后重试。（${error.javaClass.simpleName}）"
+                onCloseResult(false)
+            }
+        }
+    }
     var sending by remember { mutableStateOf<SendOperation?>(null) }
     val activeOperationId = remember { AtomicInteger(0) }
     val qaTimingLog = remember { DesktopQaTimingLog.fromEnvironment() }
@@ -236,14 +265,21 @@ internal fun DesktopScreen(
         sessions.firstOrNull { it.selected }?.id
             ?: sessions.firstOrNull()?.id.orEmpty()
     val currentKey = SessionKey(profileId, selectedSessionId)
-    val storedChat = if (profileId.isNotBlank() && selectedSessionId.isNotBlank()) {
-        chats[currentKey] ?: runCatching { store.sessionContent(profileId, selectedSessionId) }.getOrDefault(Chat(selectedSessionId))
-    } else Chat("")
+    val storedChat = chats[currentKey] ?: remember(currentKey, sessionsRevision.intValue) {
+        if (profileId.isNotBlank() && selectedSessionId.isNotBlank()) {
+            runCatching { store.sessionContent(profileId, selectedSessionId) }.getOrDefault(Chat(selectedSessionId))
+        } else Chat("")
+    }
     val chat = sending?.takeIf { it.key == currentKey }?.visibleChat(storedChat) ?: storedChat
-    val draft = drafts[currentKey] ?: TextFieldValue()
-    val currentImages = selectedImages[currentKey].orEmpty()
+    val loadedDraft = remember(composer, currentKey) { runCatching { composer.open(currentKey) } }
+    DisposableEffect(composer, currentKey) {
+        onDispose { composer.leave(currentKey) }
+    }
+    val editor = loadedDraft.getOrNull()
+    val draft = editor?.field ?: TextFieldValue()
+    val currentImages = editor?.draft?.attachments.orEmpty()
     val isOffline = selectedProfile?.offlineOnly == true
-    val isBusy = sending != null
+    val isBusy = sending != null || preparing != null || closeRequested
     val currentOperation = sending?.takeIf { it.key == currentKey }
     val currentProgress = currentOperation?.let {
         EntryProgress(it.entryIndex, it.stage, it.stageStartedAtNanos)
@@ -251,29 +287,26 @@ internal fun DesktopScreen(
         index >= 0 && (chat.entries[index].status.startsWith("发送失败：") || chat.entries[index].status.startsWith("未发送："))
     }?.let { index -> failedProgressByEntry[TimedEntryKey(currentKey, index)] }
 
-    fun addValidatedImages(sessionKey: SessionKey, files: List<File>, invalidPathCount: Int = 0) {
-        if (files.isEmpty() && invalidPathCount == 0) return
-        val addition = addSourceImages(selectedImages[sessionKey].orEmpty(), files, invalidPathCount)
-        if (addition.paths.isEmpty()) selectedImages.remove(sessionKey) else selectedImages[sessionKey] = addition.paths
-        if (addition.notice == null) notices.remove(sessionKey) else notices[sessionKey] = addition.notice
-    }
-
-    fun chooseImages() {
+    fun chooseImages(replacing: Path? = null) {
+        val origin = currentKey
+        val originEditor = composer.editor(origin)?.takeUnless { it.commitInProgress } ?: return
+        originEditor.editSerial++
         try {
             val chooser = JFileChooser().apply {
-                dialogTitle = "选择图片（可多选）"
+                dialogTitle = if (replacing == null) "选择图片（可多选）" else "重新选择这张图片"
                 isAcceptAllFileFilterUsed = false
-                isMultiSelectionEnabled = true
+                isMultiSelectionEnabled = replacing == null
                 fileFilter = FileNameExtensionFilter("PNG / JPEG 图片", "png", "jpg", "jpeg")
             }
             if (chooser.showOpenDialog(parentWindow) == JFileChooser.APPROVE_OPTION) {
                 val selected = chooser.selectedFiles.takeIf { it.isNotEmpty() }
                     ?.toList()
                     ?: listOfNotNull(chooser.selectedFile)
-                addValidatedImages(currentKey, selected)
+                if (replacing == null) composer.addFiles(origin, selected)
+                else composer.replaceMissingAttachment(origin, replacing, selected)
             }
         } catch (_: InvalidPathException) {
-            addValidatedImages(currentKey, emptyList(), invalidPathCount = 1)
+            composer.addFiles(origin, emptyList(), invalidPathCount = 1)
         }
     }
 
@@ -328,67 +361,14 @@ internal fun DesktopScreen(
         fetchReplyAttachment(target, key)
     }
 
-    fun dispatch(questionText: String, images: List<Path>, retryEntry: Entry? = null, retryKey: SessionKey? = null) {
-        val clickedAtNanos = System.nanoTime()
-        val targetKey = retryKey ?: currentKey
-        if (sending != null || targetKey.profileId.isBlank() || targetKey.sessionId.isBlank()) return
-        if (retryKey != null && retryKey != currentKey) return
-        if (isOffline) {
-            notices[targetKey] = "离线历史不可发送。请选择已验证的服务配置。"
-            return
-        }
-
-        val target = runCatching { connection.snapshot() }.getOrElse { error ->
-            notices[targetKey] = if (isKeyAccessFailure(error)) {
-                "无法读取所选密钥，请重新选择密钥并连接验证。"
-            } else safeFailureMessage(error)
-            return
-        }
-        if (target == null || target.profileId != targetKey.profileId || !connection.connected) {
-            notices[targetKey] = "请先连接并验证当前服务，再发送消息。"
-            return
-        }
-        val query = questionText.trim()
-        val imageValidation = inspectSourceImages(images)
-        if (imageValidation.rejected.isNotEmpty()) {
-            notices[targetKey] = "图片无法发送：${formatRejectedImages(imageValidation.rejected)}。"
-            return
-        }
-        val validatedImages = imageValidation.valid
-        if (query.isEmpty() && validatedImages.isEmpty()) return
-
-        val references = validatedImages.map(Path::toString)
-        val entry = Entry(
-            question = query,
-            answer = "",
-            status = "发送中",
-            attachmentReference = references.firstOrNull(),
-            attachmentDisplayName = validatedImages.firstOrNull()?.fileName?.toString(),
-            attachmentReferences = references,
-        )
-        val current = runCatching { latestChat(targetKey) }
-            .getOrElse {
-                notices[targetKey] = "无法读取本地会话，消息未发送。"
-                return
-            }
-        val pending = current.copy(entries = current.entries + entry)
-        val persisted = runCatching { store.saveSessionContent(targetKey.profileId, pending) }
-        if (persisted.isFailure) {
-            val failure = persisted.exceptionOrNull()!!
-            invalidateOnFailure(target, failure)
-            notices[targetKey] = if (shouldInvalidateConnection(failure)) safeFailureMessage(failure)
-                else "无法保存本地会话，消息未发送。"
-            return
-        }
-
+    fun startRequest(
+        clickedAtNanos: Long, targetKey: SessionKey, target: DesktopSendTarget, entry: Entry,
+        pending: Chat, attachments: List<Path>,
+    ) {
         unsavedReplies.remove(targetKey)
         chats[targetKey] = pending
         sessionsRevision.intValue++
         notices.remove(targetKey)
-        if (retryEntry == null) {
-            if (draft.text == questionText) drafts[targetKey] = TextFieldValue()
-            if (selectedImages[targetKey] == images) selectedImages.remove(targetKey)
-        }
         val operationId = ++nextOperationId
         val entryIndex = pending.entries.lastIndex
         val operation = SendOperation(
@@ -398,7 +378,7 @@ internal fun DesktopScreen(
         timingByEntry[TimedEntryKey(targetKey, entryIndex)] = timing
         sending = operation
         activeOperationId.set(operationId)
-        val caption = query
+        val query = entry.question
         thread(isDaemon = true, name = "chatbox-request") {
             fun operationIsActive() = !operation.cancellation.get() && activeOperationId.get() == operationId
             var observedFailureStage = operation.failureStage
@@ -407,7 +387,7 @@ internal fun DesktopScreen(
                 if (!operationIsActive()) throw CancellationException("会话已删除。")
                 val stageStartedAt = System.nanoTime()
                 timing.onTransportEvent(event)
-                val stage = progressStage(event)
+                val stage = progressStage(event, attachments)
                 observedFailureStage = stage.failureLabel
                 SwingUtilities.invokeLater {
                     if (!operationIsActive()) return@invokeLater
@@ -452,7 +432,7 @@ internal fun DesktopScreen(
                 target.checkTarget()
                 check(operationIsActive()) { "会话已删除。" }
                 requestStarted = true
-                if (validatedImages.isEmpty()) {
+                if (attachments.isEmpty()) {
                     sendToAstrBot(
                         target.address,
                         target.token,
@@ -474,19 +454,19 @@ internal fun DesktopScreen(
                         },
                     )
                 } else {
-                    sendImagesToAstrBot(
+                    sendAttachmentsToAstrBot(
                         target.address,
                         target.token,
                         store.username,
                         targetKey.sessionId,
-                        validatedImages,
-                        caption,
+                        attachments,
+                        query,
                         allowLoopbackHttp = target.allowLoopbackHttp,
                         onReplyImage = { id, offset -> receiveAttachment(ReplyAttachmentType.IMAGE, id, offset) },
                         onReplyAudio = { id, offset -> receiveAttachment(ReplyAttachmentType.AUDIO, id, offset) },
                         onEvent = ::observeTransportEvent,
                         onText = { delta ->
-                            if (!operationIsActive()) return@sendImagesToAstrBot
+                            if (!operationIsActive()) return@sendAttachmentsToAstrBot
                             answer = delta
                             SwingUtilities.invokeLater {
                                 if (!operationIsActive()) return@invokeLater
@@ -546,6 +526,97 @@ internal fun DesktopScreen(
         }
     }
 
+    fun dispatch(retryEntry: Entry? = null, targetKey: SessionKey = currentKey) {
+        val clickedAtNanos = System.nanoTime()
+        if (targetKey != currentKey || editor == null || closeRequested || sending != null || preparing != null ||
+            composer.recordingKey == targetKey || (retryEntry == null && editor.field.composition != null)
+        ) return
+        if (isOffline) {
+            notices[targetKey] = "离线历史不可发送。请选择已验证的服务配置。"
+            return
+        }
+        val target = runCatching { connection.snapshot() }.getOrElse { error ->
+            notices[targetKey] = if (isKeyAccessFailure(error)) {
+                "无法读取所选密钥，请重新选择密钥并连接验证。"
+            } else safeFailureMessage(error)
+            return
+        }
+        if (target == null || target.profileId != targetKey.profileId || !connection.connected) {
+            notices[targetKey] = "请先连接并验证当前服务，再发送消息。"
+            return
+        }
+        val pendingImport = if (retryEntry == null) composer.pendingImport(targetKey) else null
+        val clickedSerial = editor.editSerial
+        val current = unsavedReplies[targetKey]
+        val prepare = scope.launch(start = CoroutineStart.LAZY) {
+            var locked = false
+            try {
+                val importIssue = pendingImport?.await()
+                if (importIssue != null) {
+                    notices[targetKey] = importIssue
+                    return@launch
+                }
+                if (targetKey in deletedSessionKeys) return@launch
+                val committed = editor.draft
+                if (retryEntry == null && (editor.editSerial != clickedSerial || editor.field.composition != null || editor.commitInProgress)) {
+                    notices[targetKey] = "草稿已更新，请确认后发送。"
+                    return@launch
+                }
+                val revision = editor.revision
+                val query = retryEntry?.question ?: committed.text.trim()
+                val paths = if (retryEntry == null) committed.attachments else try {
+                    retryEntry.attachmentReferences.ifEmpty { listOfNotNull(retryEntry.attachmentReference) }.map { Path.of(it) }
+                } catch (_: InvalidPathException) {
+                    notices[targetKey] = "无法读取原始附件路径。"
+                    return@launch
+                }
+                if (query.isEmpty() && paths.isEmpty()) return@launch
+                val error = withContext(Dispatchers.IO) { attachmentProblem(paths, store.managedMediaDirectory) }
+                if (targetKey in deletedSessionKeys) return@launch
+                if (retryEntry == null && (editor.revision != revision || editor.editSerial != clickedSerial ||
+                        editor.field.composition != null || editor.commitInProgress || composer.recordingKey == targetKey)
+                ) {
+                    notices[targetKey] = "草稿已更新，请确认后发送。"
+                    return@launch
+                }
+                if (error != null) {
+                    notices[targetKey] = error
+                    return@launch
+                }
+                if (retryEntry == null) {
+                    editor.commitInProgress = true
+                    locked = true
+                }
+                val references = paths.map(Path::toString)
+                val entry = Entry(
+                    question = query, answer = "", status = "发送中",
+                    attachmentReference = references.firstOrNull(),
+                    attachmentDisplayName = paths.firstOrNull()?.fileName?.toString(),
+                    attachmentReferences = references,
+                )
+                val pending = withContext(Dispatchers.IO) {
+                    val stored = current ?: store.sessionContent(targetKey.profileId, targetKey.sessionId)
+                    val updated = stored.copy(entries = stored.entries + entry)
+                    if (retryEntry == null) store.commitDraft(targetKey, revision, updated)
+                    else store.saveSessionContent(targetKey.profileId, updated)
+                    updated
+                }
+                if (targetKey in deletedSessionKeys) return@launch
+                if (retryEntry == null) composer.consumed(targetKey, revision)
+                startRequest(clickedAtNanos, targetKey, target, entry, pending, paths)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (targetKey !in deletedSessionKeys) notices[targetKey] = "无法保存本地会话，消息未发送。"
+            } finally {
+                if (locked) editor.commitInProgress = false
+                preparing = null
+            }
+        }
+        preparing = prepare
+        prepare.start()
+    }
+
     fun selectSearchHit(hit: HistoryHit, query: String): Boolean {
         val key = SessionKey(hit.profileId, hit.sessionId)
         val selected = runCatching {
@@ -582,8 +653,9 @@ internal fun DesktopScreen(
 
     val canCreate = profileId.isNotBlank() && selectedProfile != null && !selectedProfile.offlineOnly
     val canSend = selectedSessionId.isNotBlank() && !isBusy && !isOffline && connection.connected && !connection.verifying &&
-        (draft.text.isNotBlank() || currentImages.isNotEmpty())
-    val canRetry = !isBusy && !isOffline && connection.connected && !connection.verifying
+        editor != null && draft.composition == null && composer.recordingKey != currentKey &&
+        (draft.text.isNotBlank() || currentImages.isNotEmpty() || composer.pendingImport(currentKey) != null)
+    val canRetry = !isBusy && !isOffline && connection.connected && !connection.verifying && composer.recordingKey != currentKey
 
     Surface(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
         if (event.opensHistorySearch()) {
@@ -614,7 +686,7 @@ internal fun DesktopScreen(
                     runCatching { store.deleteSession(profileId, sessionId) }
                         .onSuccess {
                             deletedSessionKeys.add(key)
-                        if (searchDestination?.first == key) searchDestination = null
+                            if (searchDestination?.first == key) searchDestination = null
                             sending?.takeIf { it.key == key }?.let { operation ->
                                 operation.cancellation.set(true)
                                 activeOperationId.compareAndSet(operation.id, 0)
@@ -623,8 +695,7 @@ internal fun DesktopScreen(
                             if (retryConfirmation?.key == key) retryConfirmation = null
                             chats.remove(key)
                             unsavedReplies.remove(key)
-                            selectedImages.remove(key)
-                            drafts.remove(key)
+                            composer.forget(key)
                             notices.remove(key)
                             fetchingAttachments = fetchingAttachments.filterNot { it.profileId == key.profileId && it.sessionId == key.sessionId }.toSet()
                             attachmentFailures = attachmentFailures.filterKeys { it.profileId != key.profileId || it.sessionId != key.sessionId }
@@ -662,19 +733,24 @@ internal fun DesktopScreen(
                 DesktopConnectionControls(connection)
             },
             draft = draft,
-            onDraft = { value -> drafts[currentKey] = value },
+            onDraft = { value -> if (!closeRequested) composer.input(currentKey, value) },
             selectedImage = currentImages.firstOrNull(),
             selectedImages = currentImages,
-            onChooseImage = ::chooseImages,
-            onAddImages = { files -> addValidatedImages(currentKey, files) },
-            onRemoveImage = { selectedImages.remove(currentKey) },
-            onRemoveImagePath = { path ->
-                val remaining = selectedImages[currentKey].orEmpty().filterNot { it == path }
-                if (remaining.isEmpty()) selectedImages.remove(currentKey) else selectedImages[currentKey] = remaining
-            },
-            onSend = { dispatch(draft.text, currentImages) },
+            onChooseImage = { chooseImages() },
+            onReplaceMissingAttachment = { path -> chooseImages(path) },
+            composerCommitInProgress = closeRequested || editor?.commitInProgress == true,
+            onAddImages = { files -> composer.addFiles(currentKey, files) },
+            onRemoveImage = { composer.remove(currentKey, null) },
+            onRemoveImagePath = { composer.remove(currentKey, it) },
+            onPasteAttachment = { selectedSessionId.isNotBlank() && composer.paste(currentKey) },
+            canRecord = selectedSessionId.isNotBlank() && editor?.commitInProgress == false && composer.recordingKey == null && !closeRequested,
+            recordingMillis = composer.elapsed.takeIf { composer.recordingKey == currentKey },
+            onStartRecording = { composer.startMic(currentKey) },
+            onStopRecording = { composer.stopMic(currentKey) },
+            onCancelRecording = { composer.stopMic(currentKey, discard = true) },
+            onSend = { dispatch() },
             canSend = canSend,
-            notice = notices[currentKey],
+            notice = if (loadedDraft.isFailure) "本地草稿无法读取。" else notices[currentKey],
             onRetry = { entry ->
                 if (canRetry && chat.entries.any { it === entry || it == entry }) {
                     retryConfirmation = RetryConfirmation(currentKey, entry)
@@ -704,6 +780,13 @@ internal fun DesktopScreen(
             progress = currentProgress,
         )
 
+        if (closeRequested || closeError != null) {
+            AlertDialog(
+                onDismissRequest = { if (!closeRequested) closeError = null },
+                text = { Text(closeError ?: "正在保存草稿…") },
+                confirmButton = { if (!closeRequested) TextButton(onClick = { closeError = null }) { Text("关闭") } },
+            )
+        }
         if (searchOpen) {
             val overrides = buildMap {
                 for ((key, reply) in unsavedReplies) {
@@ -730,15 +813,7 @@ internal fun DesktopScreen(
                 confirmButton = {
                     TextButton(onClick = {
                         retryConfirmation = null
-                        val references = pendingRetry.entry.attachmentReferences.ifEmpty {
-                            listOfNotNull(pendingRetry.entry.attachmentReference)
-                        }
-                        val images = references.mapNotNull { runCatching { Path.of(it) }.getOrNull() }
-                        if (images.size != references.size) {
-                            notices[pendingRetry.key] = "无法读取原始图片，请确认文件仍然存在。"
-                        } else {
-                            dispatch(pendingRetry.entry.question, images, pendingRetry.entry, pendingRetry.key)
-                        }
+                        dispatch(pendingRetry.entry, pendingRetry.key)
                     }, enabled = canRetry) { Text("确认重发") }
                 },
                 dismissButton = { TextButton(onClick = { retryConfirmation = null }) { Text("取消") } },
@@ -747,7 +822,26 @@ internal fun DesktopScreen(
     }
 }
 
-private fun inspectSourceImages(paths: List<Path>): SourceImageValidation {
+/** Local preflight completes for every part before a pending history row or upload is created. */
+private fun attachmentProblem(paths: List<Path>, mediaDirectory: Path): String? {
+    val rejected = paths.mapNotNull { path ->
+        val name = path.fileName?.toString().orEmpty()
+        if (name.endsWith(".wav", ignoreCase = true)) {
+            val reason = when {
+                path.toAbsolutePath().normalize().parent != mediaDirectory.toAbsolutePath().normalize() -> "不是本机录音"
+                !Files.isRegularFile(path) || !Files.isReadable(path) -> "文件不可读取"
+                runCatching { validatedAudio(path) }.isFailure -> "录音损坏、超限或格式不受支持"
+                else -> null
+            }
+            reason?.let { RejectedSourceImage(name, it) }
+        } else {
+            inspectSourceImages(listOf(path), requireContent = true).rejected.firstOrNull()
+        }
+    }
+    return if (rejected.isEmpty()) null else "附件无法发送：${formatRejectedImages(rejected)}。"
+}
+
+private fun inspectSourceImages(paths: List<Path>, requireContent: Boolean = false): SourceImageValidation {
     val valid = mutableListOf<Path>()
     val rejected = mutableListOf<RejectedSourceImage>()
     paths.forEach { original ->
@@ -760,7 +854,8 @@ private fun inspectSourceImages(paths: List<Path>): SourceImageValidation {
             normalized.fileName?.toString()?.substringAfterLast('.', "")?.lowercase(Locale.ROOT).orEmpty() !in IMAGE_EXTENSIONS -> "仅支持 PNG/JPEG"
             !Files.isRegularFile(normalized) || !Files.isReadable(normalized) -> "文件不可读取"
             size == null -> "文件不可读取"
-            size?.let { it > MAX_SOURCE_IMAGE_BYTES } == true -> "超过 512 MiB"
+            size == 0L && requireContent -> "文件为空"
+            size > MAX_SOURCE_IMAGE_BYTES -> "超过 512 MiB"
             else -> null
         }
         if (reason == null) valid.add(checkNotNull(normalized)) else rejected.add(RejectedSourceImage(name, reason))
@@ -772,6 +867,7 @@ internal fun addSourceImages(
     existing: List<Path>,
     files: List<File>,
     invalidPathCount: Int = 0,
+    requireContent: Boolean = false,
 ): SourceImageAddition {
     val paths = mutableListOf<Path>()
     var rejectedPathCount = invalidPathCount
@@ -782,7 +878,7 @@ internal fun addSourceImages(
             rejectedPathCount++
         }
     }
-    val validation = inspectSourceImages(paths)
+    val validation = inspectSourceImages(paths, requireContent)
     val combined = (existing + validation.valid).distinct()
     val notice = sourceImageNotice(
         validation.rejected,
@@ -818,20 +914,23 @@ private fun formatRejectedImages(rejected: List<RejectedSourceImage>): String {
 private const val MAX_SOURCE_IMAGE_BYTES = 512L * 1024L * 1024L
 private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg")
 
-private fun progressStage(event: AstrBotTransportEvent): ProgressStage = when (event) {
-    is AstrBotTransportEvent.UploadStarted -> ProgressStage(
-        "正在上传图片 ${event.index + 1}/${event.count}",
-        "上传图片 ${event.index + 1}/${event.count} 失败",
-    )
-    is AstrBotTransportEvent.UploadFinished -> ProgressStage(
-        "图片已上传 ${event.index + 1}/${event.count}",
-        "准备发送消息失败",
-    )
-    AstrBotTransportEvent.ChatStarted -> ProgressStage("等待服务器响应", "等待服务器响应失败")
-    AstrBotTransportEvent.HeadersReceived -> ProgressStage("验证响应流", "验证响应流失败")
-    AstrBotTransportEvent.StreamReady -> ProgressStage("等待首段回复", "等待首段回复失败")
-    AstrBotTransportEvent.FirstContent -> ProgressStage("正在接收回复", "接收回复失败")
-    AstrBotTransportEvent.Completed -> ProgressStage("整理回复", "整理回复失败")
+private fun progressStage(event: AstrBotTransportEvent, attachments: List<Path>): ProgressStage {
+    fun label(index: Int) = if (attachments.getOrNull(index)?.fileName?.toString()?.endsWith(".wav", true) == true) "语音" else "图片"
+    return when (event) {
+        is AstrBotTransportEvent.UploadStarted -> ProgressStage(
+            "正在上传${label(event.index)} ${event.index + 1}/${event.count}",
+            "上传${label(event.index)} ${event.index + 1}/${event.count} 失败",
+        )
+        is AstrBotTransportEvent.UploadFinished -> ProgressStage(
+            "${label(event.index)}已上传 ${event.index + 1}/${event.count}",
+            "准备发送消息失败",
+        )
+        AstrBotTransportEvent.ChatStarted -> ProgressStage("等待服务器响应", "等待服务器响应失败")
+        AstrBotTransportEvent.HeadersReceived -> ProgressStage("验证响应流", "验证响应流失败")
+        AstrBotTransportEvent.StreamReady -> ProgressStage("等待首段回复", "等待首段回复失败")
+        AstrBotTransportEvent.FirstContent -> ProgressStage("正在接收回复", "接收回复失败")
+        AstrBotTransportEvent.Completed -> ProgressStage("整理回复", "整理回复失败")
+    }
 }
 
 private fun safeHistoryFailureMessage(error: Throwable, operation: String): String = when (error) {
@@ -876,6 +975,7 @@ private fun safeFailureMessage(
     fallback: String = "连接或服务错误；回复状态未确认。",
 ): String {
     if (error is SocketTimeoutException) return when {
+        failedStage?.startsWith("上传语音") == true -> "语音上传超时。"
         failedStage?.startsWith("上传图片") == true -> "图片上传超时。"
         failedStage == "等待服务器响应失败" -> "等待服务器响应超时。"
         failedStage == "验证响应流失败" -> "验证响应流超时。"
@@ -884,6 +984,7 @@ private fun safeFailureMessage(
         else -> "连接服务超时。"
     }
     if (error is InterruptedException) return when {
+        failedStage?.startsWith("上传语音") == true -> "语音上传已中断。"
         failedStage?.startsWith("上传图片") == true -> "图片上传已中断。"
         failedStage == "等待服务器响应失败" -> "等待服务器响应时已中断。"
         failedStage == "等待首段回复失败" -> "等待首段回复时已中断。"
@@ -892,6 +993,7 @@ private fun safeFailureMessage(
     }
     val message = error.message.orEmpty()
     if (message in SAFE_FAILURES) return message
+    if (Regex("(?:图片|语音)上传失败，服务器返回 HTTP [1-5][0-9]{2}。").matches(message)) return message
     if (Regex("服务器返回 HTTP [1-5][0-9]{2}\\.").matches(message)) return message
     if (Regex("(?:图片|语音)下载失败，服务器返回 HTTP [1-5][0-9]{2}。").matches(message)) return message
     return fallback
@@ -926,6 +1028,11 @@ private val SAFE_FAILURES = setOf(
     "服务返回了空语音。",
     "语音下载接口返回了错误信息，而不是语音。",
     "找不到文件上传接口，请检查 AstrBot 版本和服务地址。",
+    "语音超过服务端大小限制。",
+    "语音上传接口未返回 JSON，请检查 AstrBot 地址和版本。",
+    "语音上传接口返回了无法识别的响应。",
+    "语音上传失败，请检查文件权限和 API 密钥的文件权限。",
+    "语音上传成功响应中缺少附件编号。",
     "图片超过服务端大小限制。",
     "图片超过服务端大小限制（512 MB）。",
     "无法读取所选图片。",

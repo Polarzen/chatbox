@@ -1,6 +1,7 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$ScratchRoot = 'D:\Chatbox验收 V1\ui-redesign'
+    [string]$ScratchRoot = 'D:\Chatbox验收 V1\ui-redesign',
+    [switch]$VerifyMedia
 )
 
 $ErrorActionPreference = 'Stop'
@@ -185,6 +186,10 @@ $props = [ordered]@{
     'controls.file' = ConvertTo-PrivatePath $controlsFile
     'media.dir' = ConvertTo-PrivatePath $mediaDir
     'ready.file' = ConvertTo-PrivatePath $readyFile
+}
+if ($VerifyMedia) {
+    $props['media.verifier'] = ConvertTo-PrivatePath (Join-Path $PSScriptRoot 'verify_media.py')
+    $props['media.python'] = ConvertTo-PrivatePath (Get-Command python.exe -ErrorAction Stop).Source
 }
 $propertiesText = ($props.GetEnumerator() | ForEach-Object { $_.Key + '=' + $_.Value }) -join [Environment]::NewLine
 [IO.File]::WriteAllText($privateProps, $propertiesText + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))

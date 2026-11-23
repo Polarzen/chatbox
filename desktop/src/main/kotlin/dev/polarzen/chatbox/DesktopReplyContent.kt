@@ -27,7 +27,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.ImageBitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.nio.file.Path
 
 internal data class ReplyAttachmentKey(
     val profileId: String,
@@ -128,20 +127,20 @@ private fun DesktopReplyAttachment(
     onRetry: (ReplyAttachmentKey) -> Unit,
 ) {
     var bitmap by remember(key) { mutableStateOf<ImageBitmap?>(null) }
-    var audioPath by remember(key) { mutableStateOf<Path?>(null) }
+    var validated by remember(key, generation) { mutableStateOf<ValidatedAudio?>(null) }
     var checked by remember(key) { mutableStateOf(false) }
     LaunchedEffect(key, generation) {
         when (key.type) {
             ReplyAttachmentType.IMAGE -> bitmap = withContext(Dispatchers.IO) { imageCache.read(key.profileId, key.attachmentId) }
-            ReplyAttachmentType.AUDIO -> audioPath = withContext(Dispatchers.IO) { audioCache.read(key.profileId, key.attachmentId) }
+            ReplyAttachmentType.AUDIO -> validated = withContext(Dispatchers.IO) { audioCache.readAudio(key.profileId, key.attachmentId) }
         }
         checked = true
     }
-    val audio = audioPath
+    val audio = validated
     val image = bitmap
     val label = key.type.label
     if (audio != null) {
-        ReplyAudioPlayback(audio)
+        ReplyAudioPlayback(audio.path, audio.durationMillis)
     } else if (image != null) {
         Image(
             bitmap = image,

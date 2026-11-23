@@ -128,24 +128,61 @@ internal fun sendImagesToAstrBot(
     onText: (String) -> Unit,
 ) {
     require(images.isNotEmpty()) { "至少选择一张图片。" }
-    // Validate the complete selection before starting uploads, so a later invalid entry cannot
-    // leave earlier attachments uploaded without a corresponding chat message.
     val prepared = images.map { image ->
         val path = image.toAbsolutePath().normalize()
         require(Files.isRegularFile(path) && Files.isReadable(path)) { "无法读取所选图片。" }
-        path to imageMediaType(path)
+        UploadAttachment(path, imageMediaType(path))
     }
-    val uploaded = prepared.mapIndexed { index, (path, mediaType) ->
-        onEvent(AstrBotTransportEvent.UploadStarted(index, prepared.size))
-        val attachmentId = uploadImageToAstrBot(base, token, path, mediaType, allowLoopbackHttp)
-        onEvent(AstrBotTransportEvent.UploadFinished(index, prepared.size))
-        path to attachmentId
+    sendPreparedAttachments(base, token, user, session, prepared, caption, allowLoopbackHttp,
+        onReplyImage, onReplyAudio, onEvent, onText)
+}
+
+internal fun sendAttachmentsToAstrBot(
+    base: String, token: String, user: String, session: String,
+    attachments: List<Path>, caption: String = "",
+    allowLoopbackHttp: Boolean = false,
+    onReplyImage: (String?, Int) -> Unit = { _, _ -> },
+    onReplyAudio: (String?, Int) -> Unit = { _, _ -> },
+    onEvent: (AstrBotTransportEvent) -> Unit = {},
+    onText: (String) -> Unit,
+) {
+    require(attachments.isNotEmpty()) { "至少选择一个附件。" }
+    val prepared = attachments.map { source ->
+        val path = source.toAbsolutePath().normalize()
+        require(Files.isRegularFile(path) && Files.isReadable(path)) { "无法读取附件：${path.fileName}。" }
+        val mediaType = when (path.fileName.toString().substringAfterLast('.', "").lowercase()) {
+            "wav" -> "audio/wav"
+            "png", "jpg", "jpeg" -> imageMediaType(path)
+            else -> throw IllegalArgumentException("仅支持 PNG、JPEG 或 WAV 附件：${path.fileName}。")
+        }
+        val size = Files.size(path)
+        require(size > 0) { "附件为空：${path.fileName}。" }
+        require(size <= 512L * 1024 * 1024) { "附件超过 512 MiB 限制：${path.fileName}。" }
+        UploadAttachment(path, mediaType)
     }
+    sendPreparedAttachments(base, token, user, session, prepared, caption, allowLoopbackHttp,
+        onReplyImage, onReplyAudio, onEvent, onText)
+}
+
+private data class UploadAttachment(val path: Path, val mediaType: String) {
+    val segmentType get() = if (mediaType == "audio/wav") "record" else "image"
+    val label get() = if (mediaType == "audio/wav") "语音" else "图片"
+}
+
+private fun sendPreparedAttachments(
+    base: String, token: String, user: String, session: String,
+    prepared: List<UploadAttachment>, caption: String, allowLoopbackHttp: Boolean,
+    onReplyImage: (String?, Int) -> Unit, onReplyAudio: (String?, Int) -> Unit,
+    onEvent: (AstrBotTransportEvent) -> Unit, onText: (String) -> Unit,
+) {
     val parts = JSONArray()
     if (caption.isNotEmpty()) parts.put(JSONObject().put("type", "plain").put("text", caption))
-    uploaded.forEach { (path, attachmentId) ->
-        parts.put(JSONObject().put("type", "image").put("attachment_id", attachmentId)
-            .put("filename", path.fileName.toString()))
+    prepared.forEachIndexed { index, attachment ->
+        onEvent(AstrBotTransportEvent.UploadStarted(index, prepared.size))
+        val id = uploadAttachmentToAstrBot(base, token, attachment, allowLoopbackHttp)
+        onEvent(AstrBotTransportEvent.UploadFinished(index, prepared.size))
+        parts.put(JSONObject().put("type", attachment.segmentType).put("attachment_id", id)
+            .put("filename", attachment.path.fileName.toString()))
     }
     sendToAstrBotPayload(base, token, user, session, JSONObject().put("message", parts),
         allowLoopbackHttp, onReplyImage, onReplyAudio, onEvent, onText)
@@ -232,22 +269,22 @@ private fun imageMediaType(path: Path): String = when (path.fileName.toString().
     else -> throw IllegalArgumentException("仅支持 PNG、JPEG、GIF、WebP、BMP 或 TIFF 图片。")
 }
 
-private fun uploadImageToAstrBot(
-    base: String, token: String, image: Path, mediaType: String, allowLoopbackHttp: Boolean,
+private fun uploadAttachmentToAstrBot(
+    base: String, token: String, attachment: UploadAttachment, allowLoopbackHttp: Boolean,
 ): String {
     val chatTarget = endpoint(base, allowLoopbackHttp)
     val target = URI(chatTarget.toASCIIString().removeSuffix("/chat") + "/file")
     val c = openAstrBotConnection(target)
     val boundary = "----Chatbox" + UUID.randomUUID().toString().replace("-", "")
-    val extension = image.fileName.toString().substringAfterLast('.', "").lowercase()
+    val extension = attachment.path.fileName.toString().substringAfterLast('.', "").lowercase()
     // An ASCII upload name avoids multipart header ambiguity for Unicode local filenames.
     val safeExtension = extension.takeIf { it.matches(Regex("[a-z0-9]{1,8}")) } ?: "img"
-    val prefix = "--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"image.$safeExtension\"\r\n" +
-        "Content-Type: $mediaType\r\n\r\n"
+    val prefix = "--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"${attachment.segmentType}.$safeExtension\"\r\n" +
+        "Content-Type: ${attachment.mediaType}\r\n\r\n"
     val suffix = "\r\n--$boundary--\r\n"
     val prefixBytes = prefix.toByteArray(Charsets.UTF_8)
     val suffixBytes = suffix.toByteArray(Charsets.UTF_8)
-    val contentLength = Math.addExact(Math.addExact(prefixBytes.size.toLong(), Files.size(image)), suffixBytes.size.toLong())
+    val contentLength = Math.addExact(Math.addExact(prefixBytes.size.toLong(), Files.size(attachment.path)), suffixBytes.size.toLong())
     try {
         c.instanceFollowRedirects = false
         c.requestMethod = "POST"
@@ -260,38 +297,38 @@ private fun uploadImageToAstrBot(
         c.setFixedLengthStreamingMode(contentLength)
         c.outputStream.use { output ->
             output.write(prefixBytes)
-            Files.newInputStream(image).use { input -> input.copyTo(output) }
+            Files.newInputStream(attachment.path).use { input -> input.copyTo(output) }
             output.write(suffixBytes)
         }
         val status = c.responseCode
-        check(status in 200..299) { uploadHttpError(status) }
+        check(status in 200..299) { uploadHttpError(status, attachment.label) }
         check(c.contentType?.substringBefore(';')?.trim()?.equals("application/json", true) == true) {
-            "图片上传接口未返回 JSON，请检查 AstrBot 地址和版本。"
+            "${attachment.label}上传接口未返回 JSON，请检查 AstrBot 地址和版本。"
         }
         val response = runCatching { JSONObject(c.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }) }
-            .getOrElse { throw IllegalStateException("图片上传接口返回了无法识别的响应。") }
+            .getOrElse { throw IllegalStateException("${attachment.label}上传接口返回了无法识别的响应。") }
         if (response.optString("status") != "ok") {
             val detail = response.optString("message").lowercase()
             throw IllegalStateException(when {
-                "too large" in detail || "file too large" in detail -> "图片超过服务端大小限制（512 MB）。"
-                else -> "图片上传失败，请检查文件权限和 API 密钥的文件权限。"
+                "too large" in detail || "file too large" in detail -> "${attachment.label}超过服务端大小限制（512 MB）。"
+                else -> "${attachment.label}上传失败，请检查文件权限和 API 密钥的文件权限。"
             })
         }
-        val attachmentId = response.optJSONObject("data")?.optString("attachment_id").orEmpty()
-        check(attachmentId.isNotBlank()) { "图片上传成功响应中缺少附件编号。" }
+        val attachmentId = response.optJSONObject("data")?.opt("attachment_id") as? String
+        check(!attachmentId.isNullOrBlank()) { "${attachment.label}上传成功响应中缺少附件编号。" }
         return attachmentId
     } finally {
         c.disconnect()
     }
 }
 
-private fun uploadHttpError(status: Int): String = when (status) {
+private fun uploadHttpError(status: Int, label: String): String = when (status) {
     401 -> "密钥无效或已撤销。"
     403 -> "缺少文件上传权限，请为 API 密钥启用 file 权限。"
     404 -> "找不到文件上传接口，请检查 AstrBot 版本和服务地址。"
-    413 -> "图片超过服务端大小限制。"
+    413 -> "${label}超过服务端大小限制。"
     in 300..399 -> "服务返回重定向，请直接填写最终服务地址。"
-    else -> "图片上传失败，服务器返回 HTTP $status。"
+    else -> "${label}上传失败，服务器返回 HTTP $status。"
 }
 
 private fun openAstrBotConnection(target: URI): HttpURLConnection {

@@ -1,0 +1,115 @@
+{
+  "installed_version": "0.1.12",
+  "server": "local AstrBot 4.29.4",
+  "source": "One user-operated physical microphone capture reused across three isolated test sessions",
+  "user_confirmation": "User confirmed the recorded Chinese test phrase played clearly.",
+  "before_send": {
+    "uploads": 0,
+    "chats": 0
+  },
+  "offline_pending_preview": {
+    "duration": "0:05",
+    "restored_caption": true,
+    "playback_started": true,
+    "manual_stop": true
+  },
+  "offline_sent_history": {
+    "duration": "0:05",
+    "playback_started": true,
+    "natural_end": true,
+    "outgoing_post_delta": 0
+  },
+  "cases": {
+    "captioned": {
+      "posts": [
+        "POST /api/v1/file",
+        "POST /api/v1/chat"
+      ],
+      "server_user_rows": 1,
+      "segment_order": [
+        "plain",
+        "record"
+      ],
+      "upload_window_attachment_rows": 1,
+      "media": [
+        {
+          "mime": "audio/wav",
+          "size_bytes": 166044,
+          "sha256": "af3489b74183897d08eb7c30a7e0958e215e0a963363cb5aeab58ca1b89f1b4f",
+          "matches_local": true,
+          "frames": 83000,
+          "sample_rate_hz": 16000,
+          "channels": 1,
+          "bits_per_sample": 16,
+          "duration_seconds": 5.1875
+        }
+      ]
+    },
+    "pure": {
+      "posts": [
+        "POST /api/v1/file",
+        "POST /api/v1/chat"
+      ],
+      "server_user_rows": 1,
+      "segment_order": [
+        "record"
+      ],
+      "upload_window_attachment_rows": 1,
+      "media": [
+        {
+          "mime": "audio/wav",
+          "size_bytes": 166044,
+          "sha256": "af3489b74183897d08eb7c30a7e0958e215e0a963363cb5aeab58ca1b89f1b4f",
+          "matches_local": true,
+          "frames": 83000,
+          "sample_rate_hz": 16000,
+          "channels": 1,
+          "bits_per_sample": 16,
+          "duration_seconds": 5.1875
+        }
+      ]
+    },
+    "mixed": {
+      "posts": [
+        "POST /api/v1/file",
+        "POST /api/v1/file",
+        "POST /api/v1/chat"
+      ],
+      "server_user_rows": 1,
+      "segment_order": [
+        "plain",
+        "image",
+        "record"
+      ],
+      "upload_window_attachment_rows": 2,
+      "media": [
+        {
+          "mime": "image/png",
+          "size_bytes": 19043,
+          "sha256": "dd2d47f9b69306b91d2e7e429c7cae72f9a2c3344b84fded797bdc946337d143",
+          "matches_local": true,
+          "width": 453,
+          "height": 345
+        },
+        {
+          "mime": "audio/wav",
+          "size_bytes": 166044,
+          "sha256": "af3489b74183897d08eb7c30a7e0958e215e0a963363cb5aeab58ca1b89f1b4f",
+          "matches_local": true,
+          "frames": 83000,
+          "sample_rate_hz": 16000,
+          "channels": 1,
+          "bits_per_sample": 16,
+          "duration_seconds": 5.1875
+        }
+      ]
+    }
+  },
+  "actual_assistant_reply": {
+    "cached_wav_frames": 261120,
+    "sample_rate_hz": 32000,
+    "duration_seconds": 8.16,
+    "offline_display": "0:08"
+  },
+  "server_stt_enable": false
+}

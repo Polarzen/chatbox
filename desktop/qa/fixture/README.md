@@ -16,7 +16,7 @@ The output gives the exact paths for the run. Keep the run root for subsequent c
 - localappdata\Chatbox\credentials: one current-user DPAPI blob for A's original single key, encrypted with the exact manual profile ID entropy used by the app
 - tls\fixture-app-trust.p12: private app-specific truststore with the fixture certificate
 - private\fixture-private.properties: harness configuration with synthetic secrets
-- private\service.log: safe request log with key aliases, endpoint, session ID, and result only
+- private\service.log: request metadata and media verification receipts when enabled
 - media: generated PNG and JPEG upload samples
 
 The fixture does not preseed named-key metadata. On first use, the app recognizes its DPAPI blob as the legacy credential and migrates it through the normal key metadata path under the name 原有密钥. The private properties file is the only place where full synthetic API keys are exposed. Read it directly from the harness or a same-user interactive test process; do not copy its contents into screenshots, ordinary app settings, or logs. Its credential names are:
@@ -38,14 +38,20 @@ Profile A is https://127.0.0.1:18443 and profile B is https://127.0.0.1:18444. B
 - GET /api/v1/file?attachment_id=reply-image-a returns a real PNG; reply-image-b returns a real JPEG.
 - A request with token.invalid receives HTTP 401.
 
-The service logs a safe key alias, endpoint, session ID when present, and result code. It does not log bearer values, request bodies, prompts, usernames, or attachment IDs.
+The service logs a safe key alias, endpoint, session ID when present, and result code. Each POST also emits a `received` line on arrival. Compare the counts of `received profile=A operation=upload` and `received profile=A operation=chat` before and after each UI action. Take the initial counts after preparation, which sends its own probe requests.
+
+### Check attachment submissions and voice durations
+
+Pass `-VerifyMedia` to `Prepare-Fixture.ps1` to enable the Python 3 standard-library verifier for the installed client. It checks multipart field `file`, image signatures, and readable PCM WAV frames for `audio/wav`. For chat it checks that each image or record segment includes a filename and references a distinct, matching upload to that profile. The `verified` lines give ordered segment types and fixture-generated upload IDs. An audio upload also reports its frame count, sample rate, and channel count. The verifier keeps only the attachment type in private receipt files.
+
+Send `fixture:duration-pair` to receive one SSE response containing 8 seconds of mono audio and 65 seconds of stereo audio. Send `fixture:duration-edges` for 375 ms, 2.75 seconds with a RIFF metadata chunk, a corrupt WAV, and a missing WAV. Set `wav.repair.corrupt=true` and `wav.repair.missing=true` in the run's private controls file, then use the client's retry actions. The same attachment IDs will return 3.5 and 4.5 seconds of valid audio.
 
 The private `controls.properties` file also supports focused send and upload cases. The two chat timing markers are included in the synthetic prompt, while the milliseconds can be adjusted in the control file:
 
 - `fixture:delay-before-headers` waits `chat.delay.before.headers.ms` (default 1500) before returning SSE headers.
 - `fixture:delay-before-first-event` waits `chat.delay.before.first.event.ms` (default 1500) after headers and before the first SSE event.
 - `fixture:truncate-sse` returns a partial text event and closes the stream without an `end` event. Setting `chat.truncate.sse=true` does the same for any chat request.
-- `upload.fail=true` returns HTTP 503 for image upload requests. Set it back to `false` before a successful upload case.
+- `upload.fail=true` returns HTTP 503 for file uploads. Set it back to `false` before a successful upload case.
 
 For example, to make the next upload fail, add `upload.fail=true` to the run's private `controls.properties`; the setting is read for each request. These controls never write request content to the log. Keep the whole private run directory out of screenshots and shared artifacts.
 

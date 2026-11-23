@@ -1,0 +1,77 @@
+{
+  "captioned": {
+    "post_sequence": [
+      "file",
+      "chat"
+    ],
+    "user_rows": 1,
+    "segment_types": [
+      "plain",
+      "record"
+    ],
+    "upload_window_rows": 1,
+    "files": [
+      {
+        "mime": "audio/wav",
+        "size": 124814,
+        "sha256": "1a77cf665281b0a5c740d47e84a97d708a04716726c9d99741e03b672788b429",
+        "frames": 62384,
+        "rate": 22050,
+        "channels": 1,
+        "bits": 16
+      }
+    ]
+  },
+  "pure": {
+    "post_sequence": [
+      "file",
+      "chat"
+    ],
+    "user_rows": 1,
+    "segment_types": [
+      "record"
+    ],
+    "upload_window_rows": 1,
+    "files": [
+      {
+        "mime": "audio/wav",
+        "size": 124814,
+        "sha256": "1a77cf665281b0a5c740d47e84a97d708a04716726c9d99741e03b672788b429",
+        "frames": 62384,
+        "rate": 22050,
+        "channels": 1,
+        "bits": 16
+      }
+    ]
+  },
+  "mixed": {
+    "post_sequence": [
+      "file",
+      "file",
+      "chat"
+    ],
+    "user_rows": 1,
+    "segment_types": [
+      "plain",
+      "image",
+      "record"
+    ],
+    "upload_window_rows": 2,
+    "files": [
+      {
+        "mime": "image/png",
+        "size": 19043,
+        "sha256": "dd2d47f9b69306b91d2e7e429c7cae72f9a2c3344b84fded797bdc946337d143"
+      },
+      {
+        "mime": "audio/wav",
+        "size": 124814,
+        "sha256": "1a77cf665281b0a5c740d47e84a97d708a04716726c9d99741e03b672788b429",
+        "frames": 62384,
+        "rate": 22050,
+        "channels": 1,
+        "bits": 16
+      }
+    ]
+  }
+}
