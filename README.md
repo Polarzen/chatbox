@@ -12,7 +12,7 @@ Windows 正式版为 0.1.5。[下载 MSI](https://github.com/Polarzen/chatbox/re
 
 长会话列表使用细滚动条，鼠标操作区域宽 14 dp。列表无需滚动时自动隐藏滚动条。点击会话标题可原位切换，在行末菜单可删除会话。还可拖入多张图片，在回复气泡中查看上传与等待进度，或从顶栏切换 Launcher 实例、自部署服务和命名密钥。
 
-0.1.7 候选版已在托管 Windows 环境验证从 0.1.5 原目录升级。日常机器从 0.1.6 原目录升级及安装后的验收仍待 UAC 确认。[候选版 CI 构建](https://github.com/Polarzen/chatbox/actions/runs/45112103783) · [0.1.7 验收记录](docs/WINDOWS_017_RELEASE_ACCEPTANCE.md)
+托管 Windows 已从 0.1.5 原目录升级至 0.1.7 候选版，日常机器也已从 0.1.6 原目录升级至同一候选版。日常安装版的窗口交互和资源管理器混合文件拖放正在验收。[候选版 CI 构建](https://github.com/Polarzen/chatbox/actions/runs/45112103783) · [0.1.7 验收记录](docs/WINDOWS_017_RELEASE_ACCEPTANCE.md)
 
 以下为 Kotlin + Jetpack Compose 实现的 Android 首版原型，仍待真实手机与服务端联合验收。
 

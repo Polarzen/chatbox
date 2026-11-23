@@ -8,7 +8,7 @@ Windows 正式版为 0.1.5。[下载 MSI](https://github.com/Polarzen/chatbox/re
 
 在 PowerShell 中运行 `Get-FileHash .\Chatbox-0.1.5.msi -Algorithm SHA256`，确认结果与校验文件中的值一致。升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。安装完成后从开始菜单打开 Chatbox。0.1.1 用户先阅读[旧卸载器升级说明](#从-011-升级)。
 
-0.1.7 候选版已在托管 Windows 环境验证从 0.1.5 原目录升级。日常机器从 0.1.6 原目录升级及安装后的验收仍待 UAC 确认。本次 CI 构建的安装包位于运行页面的 `Chatbox-Windows-MSI` 产物中，保留 7 天。[候选版 CI 构建](https://github.com/Polarzen/chatbox/actions/runs/45112103783) · [0.1.7 验收记录](../docs/WINDOWS_017_RELEASE_ACCEPTANCE.md)
+托管 Windows 已从 0.1.5 原目录升级至 0.1.7 候选版，日常机器也已从 0.1.6 原目录升级至同一候选版。日常安装版的窗口交互和资源管理器混合文件拖放正在验收。本次 CI 构建的安装包位于运行页面的 `Chatbox-Windows-MSI` 产物中，保留 7 天。[候选版 CI 构建](https://github.com/Polarzen/chatbox/actions/runs/45112103783) · [0.1.7 验收记录](../docs/WINDOWS_017_RELEASE_ACCEPTANCE.md)
 
 如需自行构建，在 Windows 安装 JDK 17 和 WiX Toolset 3.x，然后在仓库根目录运行下列命令。
 
