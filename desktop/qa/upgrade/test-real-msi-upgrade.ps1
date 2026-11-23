@@ -568,6 +568,7 @@ try {
 
     $firstStartAt = (Get-ServiceLines).Count
     $candidateFirstApp = Start-InstalledApp $candidateExe $true $localAppData $fixtureTrust
+    Write-Evidence "Start Menu process: $($candidateFirstApp.Path) version $(Get-FileVersion $candidateFirstApp.Path), SHA-256 $(Get-Sha256 $candidateFirstApp.Path)."
     Wait-ServiceRequest 'profile=A endpoint=GET /api/v1/chat/sessions key=old_key session=- result=200' $firstStartAt
     $firstKeyState = Assert-LegacyKey $appData $profileId $oldSecret
     Assert-SeedHistory (Get-History $historyPath) $username $sessionA $sessionB

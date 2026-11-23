@@ -6,6 +6,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.scrollable
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -43,8 +49,15 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -54,12 +67,16 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.draganddrop.DragAndDropEvent
@@ -86,6 +103,7 @@ private val ChatLine = Color(0xFFE9E6EF)
 private val ChatPurple = Color(0xFF7455C7)
 private val ChatPurpleLight = Color(0xFFF0EBFB)
 private val ChatAssistant = Color(0xFFFFFFFF)
+private val SidebarInset = 14.dp
 
 internal data class EntryProgress(
     val entryIndex: Int,
@@ -218,9 +236,13 @@ private fun SessionSidebar(
         Column(
             Modifier.fillMaxSize()
                 .then(if (!elevated) Modifier.border(width = 1.dp, color = ChatLine) else Modifier)
-                .padding(horizontal = 14.dp, vertical = 14.dp),
+                .padding(start = SidebarInset, top = 14.dp, bottom = 14.dp),
         ) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.fillMaxWidth().padding(end = SidebarInset),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Button(
                     onClick = {
                         onNewSession()
@@ -255,16 +277,13 @@ private fun SessionSidebar(
             }
             Spacer(Modifier.height(14.dp))
             if (sessions.isEmpty()) {
-                Row(Modifier.weight(1f).fillMaxWidth()) {
-                    Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
-                        Text("还没有对话", color = ChatMuted, fontSize = 13.sp)
-                    }
-                    SessionListScrollbar(sessionListState)
+                Box(Modifier.weight(1f).fillMaxWidth().padding(end = SidebarInset), contentAlignment = Alignment.Center) {
+                    Text("还没有对话", color = ChatMuted, fontSize = 13.sp)
                 }
             } else {
-                Row(Modifier.weight(1f).fillMaxWidth()) {
+                Box(Modifier.weight(1f).fillMaxWidth()) {
                     LazyColumn(
-                        modifier = Modifier.weight(1f).fillMaxHeight(),
+                        modifier = Modifier.fillMaxSize().padding(end = SidebarInset),
                         state = sessionListState,
                         verticalArrangement = Arrangement.spacedBy(5.dp),
                     ) {
@@ -313,7 +332,9 @@ private fun SessionSidebar(
                             }
                         }
                     }
-                    SessionListScrollbar(sessionListState)
+                    if (sessionListState.canScrollBackward || sessionListState.canScrollForward) {
+                        SessionListScrollbar(sessionListState, Modifier.align(Alignment.CenterEnd))
+                    }
                 }
             }
         }
@@ -345,53 +366,95 @@ private fun SessionSidebar(
 
 @Composable
 @OptIn(ExperimentalFoundationApi::class)
-private fun SessionListScrollbar(state: LazyListState) {
+private fun SessionListScrollbar(state: LazyListState, modifier: Modifier) {
     val scope = rememberCoroutineScope()
-    val firstIndex = state.firstVisibleItemIndex
     val atTop = !state.canScrollBackward
     val atBottom = !state.canScrollForward
-    val style = remember {
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val dragged by interaction.collectIsDraggedAsState()
+    val highlighted = hovered || dragged
+    val style = remember(highlighted) {
         ScrollbarStyle(
             minimalHeight = 24.dp,
-            thickness = 7.dp,
-            shape = RoundedCornerShape(5.dp),
+            thickness = SidebarInset,
+            shape = SessionThumbShape(if (highlighted) 6.dp else 4.dp),
             hoverDurationMillis = 0,
-            unhoverColor = ChatPurple.copy(alpha = .9f),
-            hoverColor = ChatPurple,
+            unhoverColor = Color(0xFFA49FAF),
+            hoverColor = Color(0xFF797284),
         )
     }
 
     Column(
-        Modifier.width(24.dp).fillMaxHeight().testTag("session-scrollbar"),
+        modifier.width(SidebarInset).fillMaxHeight().hoverable(interaction)
+            .scrollable(state, Orientation.Vertical, reverseDirection = true)
+            .testTag("session-scrollbar"),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        TextButton(
-            onClick = { scope.launch { state.animateScrollToItem((firstIndex - 1).coerceAtLeast(0)) } },
+        SessionScrollArrow(
+            symbol = "▲",
+            description = "向上滚动一个会话",
+            tag = "session-scroll-up",
+            highlighted = highlighted,
             enabled = !atTop,
-            modifier = Modifier.size(24.dp).testTag("session-scroll-up"),
-            contentPadding = PaddingValues(0.dp),
-        ) { Text("▲", fontSize = 9.sp, color = if (atTop) ChatMuted.copy(alpha = .35f) else ChatMuted) }
+            onClick = {
+                scope.launch { state.animateScrollToItem((state.firstVisibleItemIndex - 1).coerceAtLeast(0)) }
+            },
+        )
 
-        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            VerticalScrollbar(
-                adapter = rememberScrollbarAdapter(state),
-                modifier = Modifier.fillMaxHeight().width(16.dp).testTag("session-scroll-thumb"),
-                style = style,
-            )
-        }
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(state),
+            modifier = Modifier.weight(1f).fillMaxWidth().testTag("session-scroll-thumb"),
+            style = style,
+            interactionSource = interaction,
+        )
 
-        TextButton(
+        SessionScrollArrow(
+            symbol = "▼",
+            description = "向下滚动一个会话",
+            tag = "session-scroll-down",
+            highlighted = highlighted,
+            enabled = !atBottom,
             onClick = {
                 scope.launch {
                     val lastIndex = (state.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+                    val firstIndex = state.firstVisibleItemIndex
                     if (firstIndex < lastIndex) state.animateScrollToItem(firstIndex + 1)
                     else state.animateScrollToItem(lastIndex, Int.MAX_VALUE)
                 }
             },
-            enabled = !atBottom,
-            modifier = Modifier.size(24.dp).testTag("session-scroll-down"),
-            contentPadding = PaddingValues(0.dp),
-        ) { Text("▼", fontSize = 9.sp, color = if (atBottom) ChatMuted.copy(alpha = .35f) else ChatMuted) }
+        )
+    }
+}
+
+// Compose sizes the draggable thumb to the track width. Inset only its painted outline.
+private class SessionThumbShape(private val width: Dp) : Shape {
+    override fun createOutline(size: Size, layoutDirection: LayoutDirection, density: Density): Outline {
+        val pixels = with(density) { width.roundToPx() }.toFloat().coerceAtMost(size.width)
+        val left = ((size.width - pixels) / 2f).toInt().toFloat()
+        return Outline.Rounded(RoundRect(Rect(left, 0f, left + pixels, size.height), CornerRadius(pixels / 2f)))
+    }
+}
+
+@Composable
+private fun SessionScrollArrow(
+    symbol: String,
+    description: String,
+    tag: String,
+    highlighted: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    var focused by remember { mutableStateOf(false) }
+    Box(
+        Modifier.fillMaxWidth().height(18.dp).onFocusChanged { focused = it.isFocused }
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = description }.testTag(tag),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (highlighted || focused) {
+            Text(symbol, fontSize = 9.sp, color = if (enabled) ChatMuted else ChatMuted.copy(alpha = .35f))
+        }
     }
 }
 

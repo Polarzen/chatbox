@@ -1,7 +1,11 @@
 package dev.polarzen.chatbox
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.material.MaterialTheme
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.geometry.Offset
@@ -21,11 +25,14 @@ import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.withKeyDown
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.mutableIntStateOf
 import org.json.JSONArray
 import org.json.JSONObject
@@ -57,7 +64,7 @@ import javax.swing.JButton
 import javax.swing.JFileChooser
 import javax.swing.SwingUtilities
 
-/** Acceptance checks drive the production DesktopScreen with disposable local profiles. */
+/** Acceptance checks drive the production desktop UI with synthetic sessions and disposable profiles. */
 class DesktopUiAcceptanceTest {
     private val composeRule = createComposeRule()
     private val preflight = TestRule { base, _ ->
@@ -423,6 +430,48 @@ class DesktopUiAcceptanceTest {
     }
 
     @Test
+    fun sidebarScrollbarVisibilityFollowsContentAndViewportHeight() {
+        val sessions = mutableStateOf(emptyList<SessionInfo>())
+        val height = mutableIntStateOf(440)
+        rule.setContent {
+            MaterialTheme {
+                Box(Modifier.requiredSize(900.dp, height.intValue.dp)) {
+                    DesktopChatLayout(
+                        sessions = sessions.value, chat = Chat(""),
+                        onSelectSession = {}, onNewSession = {}, canCreate = true, topActions = {},
+                        draft = TextFieldValue(), onDraft = {}, selectedImage = null,
+                        onChooseImage = {}, onRemoveImage = {}, onSend = {}, canSend = false,
+                        notice = null, onRetry = {}, canRetry = false, assistantContent = {},
+                    )
+                }
+            }
+        }
+        fun assertControlsAbsent() {
+            for (tag in listOf("session-scrollbar", "session-scroll-thumb", "session-scroll-up", "session-scroll-down")) {
+                rule.onNodeWithTag(tag, useUnmergedTree = true).assertDoesNotExist()
+            }
+        }
+        rule.onNodeWithText("还没有对话").assertIsDisplayed()
+        assertControlsAbsent()
+        rule.runOnIdle {
+            sessions.value = List(3) { index ->
+                SessionInfo("session-$index", 1, index == 0, "一段会换行的合成会话标题".repeat(3))
+            }
+        }
+        advanceUiAnimations()
+        rule.onNodeWithTag("session-item-2").assertIsDisplayed()
+        assertControlsAbsent()
+        rule.runOnIdle { height.intValue = 180 }
+        advanceUiAnimations()
+        rule.onNodeWithTag("session-scroll-thumb").assertIsDisplayed()
+        rule.runOnIdle { height.intValue = 440 }
+        advanceUiAnimations()
+        rule.onNodeWithTag("session-item-2").assertIsDisplayed()
+        assertControlsAbsent()
+    }
+
+    @Test
+    @OptIn(ExperimentalTestApi::class)
     fun acceptanceF_scrolledDuplicateSessionsKeepDraftsAndDeleteInFlightHistory() {
         createV015Profiles(withLegacyKey = true, extraASessions = 44)
         render()
@@ -434,6 +483,19 @@ class DesktopUiAcceptanceTest {
         val otherSession = duplicateSessions[12].id
         val scrolledIndex = store.sessions(profileA).indexOfFirst { it.id == scrolledSession }
         val orderBeforeSelection = store.sessions(profileA)
+        val selectedBeforeDrag = store.profile(profileA)!!.currentSession
+        assertEquals(0, visibleSessionIndices().first())
+        rule.onNodeWithTag("session-scroll-thumb").performMouseInput {
+            // The grab point is outside even the 6 dp hovered thumb, inside its wider hit area.
+            val x = centerX - 5.dp.toPx()
+            moveTo(Offset(x, 8.dp.toPx()))
+            press()
+            moveTo(Offset(x, centerY))
+            release()
+        }
+        advanceUiAnimations()
+        assertTrue("Dragging beside the painted thumb scrolls the long list", visibleSessionIndices().first() > 0)
+        assertEquals("Scrolling preserves the active conversation", selectedBeforeDrag, store.profile(profileA)!!.currentSession)
         scrollToSessionRow(scrolledIndex)
         val visibleBeforeSelection = visibleSessionIndices()
         assertTrue("The requested duplicate row is actually in the sidebar viewport", scrolledIndex in visibleBeforeSelection)
