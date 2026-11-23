@@ -453,11 +453,17 @@ class DesktopUiAcceptanceTest {
         }
         rule.onNodeWithText("还没有对话").assertIsDisplayed()
         assertControlsAbsent()
-        rule.runOnIdle {
-            sessions.value = List(3) { index ->
-                SessionInfo("session-$index", 1, index == 0, "一段会换行的合成会话标题".repeat(3))
-            }
+        val history = List(20) { index ->
+            SessionInfo("session-$index", 1, index == 0, "一段会换行的合成会话标题".repeat(3))
         }
+        rule.runOnIdle { sessions.value = history.take(3) }
+        advanceUiAnimations()
+        rule.onNodeWithTag("session-item-2").assertIsDisplayed()
+        assertControlsAbsent()
+        rule.runOnIdle { sessions.value = history }
+        advanceUiAnimations()
+        rule.onNodeWithTag("session-scroll-thumb").assertIsDisplayed()
+        rule.runOnIdle { sessions.value = history.take(3) }
         advanceUiAnimations()
         rule.onNodeWithTag("session-item-2").assertIsDisplayed()
         assertControlsAbsent()
