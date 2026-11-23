@@ -550,40 +550,88 @@ private fun SessionScrollArrow(
 
 @Composable
 private fun ConversationToolbar(
+    selectedTitle: String,
+    sidebarOpen: Boolean,
+    onToggleSidebar: () -> Unit,
+    showNewSession: Boolean,
+    onNewSession: () -> Unit,
+    canCreate: Boolean,
     actions: @Composable () -> Unit,
-    title: @Composable RowScope.() -> Unit,
 ) {
     Layout(
         modifier = Modifier.fillMaxWidth(),
         content = {
-            Row(verticalAlignment = Alignment.CenterVertically, content = title)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(
+                    onClick = onToggleSidebar,
+                    modifier = Modifier.sizeIn(minWidth = 40.dp, minHeight = 40.dp)
+                        .semantics { contentDescription = if (sidebarOpen) "收起最近对话" else "打开最近对话" }
+                        .testTag("sidebar-toggle"),
+                    contentPadding = PaddingValues(0.dp),
+                ) {
+                    Text(if (sidebarOpen) "‹" else "☰", color = desktopPalette.muted, fontSize = 19.sp)
+                }
+                Spacer(Modifier.width(8.dp))
+            }
+            Text(
+                selectedTitle,
+                color = desktopPalette.ink,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Box {
+                if (showNewSession) {
+                    TextButton(
+                        onClick = onNewSession,
+                        enabled = canCreate,
+                        modifier = Modifier.testTag("new-session-toolbar-button"),
+                    ) { Text("＋ 新会话", color = desktopPalette.accent, fontSize = 13.sp) }
+                }
+            }
             Row(verticalAlignment = Alignment.CenterVertically) { actions() }
         },
-    ) { (titleRow, actionsRow), constraints ->
+    ) { (toggle, title, newSession, actionsRow), constraints ->
         val width = constraints.maxWidth
         val compact = width.toDp() < 640.dp
         val inset = (if (compact) 12.dp else 22.dp).roundToPx().coerceAtMost(width / 2)
         val contentWidth = width - 2 * inset
-        val minLineHeight = (if (compact) 40.dp else 62.dp).roundToPx().coerceAtMost(constraints.maxHeight)
         val childConstraints = constraints.copy(minWidth = 0, maxWidth = contentWidth, minHeight = 0)
+
+        val togglePlaceable = toggle.measure(childConstraints)
+        val newSessionPlaceable = newSession.measure(childConstraints.copy(maxWidth = contentWidth - togglePlaceable.width))
+        val remainingWidth = contentWidth - togglePlaceable.width - newSessionPlaceable.width
+        val minLineHeight = maxOf(
+            (if (compact) 40.dp else 62.dp).roundToPx(),
+            togglePlaceable.height,
+            newSessionPlaceable.height,
+        ).coerceAtMost(constraints.maxHeight)
         val stackedHeightIsBounded = compact && constraints.hasBoundedHeight
-        val actionsHeightLimit = if (stackedHeightIsBounded) constraints.maxHeight - minLineHeight else constraints.maxHeight
-        val actionsPlaceable = actionsRow.measure(childConstraints.copy(maxHeight = actionsHeightLimit))
-        val titleWidth = if (compact) contentWidth else contentWidth - actionsPlaceable.width
-        val titleHeightLimit = if (stackedHeightIsBounded) constraints.maxHeight - actionsPlaceable.height else constraints.maxHeight
-        val titlePlaceable = titleRow.measure(
-            childConstraints.copy(minWidth = titleWidth, maxWidth = titleWidth, maxHeight = titleHeightLimit),
+        val actionsPlaceable = actionsRow.measure(
+            childConstraints.copy(
+                maxWidth = if (compact) contentWidth else remainingWidth,
+                maxHeight = if (stackedHeightIsBounded) constraints.maxHeight - minLineHeight else constraints.maxHeight,
+            ),
         )
-        val contentHeight = if (compact) {
-            maxOf(minLineHeight, titlePlaceable.height) + actionsPlaceable.height
-        } else {
-            maxOf(minLineHeight, titlePlaceable.height, actionsPlaceable.height)
-        }
+        val titleWidth = if (compact) remainingWidth else remainingWidth - actionsPlaceable.width
+        val titlePlaceable = title.measure(
+            childConstraints.copy(
+                minWidth = titleWidth,
+                maxWidth = titleWidth,
+                maxHeight = if (stackedHeightIsBounded) constraints.maxHeight - actionsPlaceable.height else constraints.maxHeight,
+            ),
+        )
+        val titleLineHeight = maxOf(minLineHeight, titlePlaceable.height)
+        val contentHeight = if (compact) titleLineHeight + actionsPlaceable.height else maxOf(titleLineHeight, actionsPlaceable.height)
         val height = contentHeight.coerceAtLeast(constraints.minHeight)
         layout(width, height) {
-            val titleLineHeight = if (compact) height - actionsPlaceable.height else height
-            titlePlaceable.placeRelative(inset, (titleLineHeight - titlePlaceable.height) / 2)
-            val actionsY = if (compact) titleLineHeight else (height - actionsPlaceable.height) / 2
+            val lineHeight = if (compact) height - actionsPlaceable.height else height
+            togglePlaceable.placeRelative(inset, (lineHeight - togglePlaceable.height) / 2)
+            val titleStart = inset + togglePlaceable.width
+            titlePlaceable.placeRelative(titleStart, (lineHeight - titlePlaceable.height) / 2)
+            newSessionPlaceable.placeRelative(titleStart + titleWidth, (lineHeight - newSessionPlaceable.height) / 2)
+            val actionsY = if (compact) lineHeight else (height - actionsPlaceable.height) / 2
             actionsPlaceable.placeRelative(width - inset - actionsPlaceable.width, actionsY)
         }
     }
@@ -666,35 +714,15 @@ private fun ConversationPane(
             ),
     ) {
       Column(Modifier.fillMaxSize()) {
-        ConversationToolbar(actions = topActions) {
-            TextButton(
-                onClick = onToggleSidebar,
-                modifier = Modifier.sizeIn(minWidth = 40.dp, minHeight = 40.dp)
-                    .semantics { contentDescription = if (sidebarOpen) "收起最近对话" else "打开最近对话" }
-                    .testTag("sidebar-toggle"),
-                contentPadding = PaddingValues(0.dp),
-            ) {
-                Text(if (sidebarOpen) "‹" else "☰", color = desktopPalette.muted, fontSize = 19.sp)
-            }
-            Spacer(Modifier.width(8.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    selectedTitle,
-                    color = desktopPalette.ink,
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            if (!narrow && !embeddedSidebar && !sidebarOpen) {
-                TextButton(
-                    onClick = onNewSession,
-                    enabled = canCreate,
-                    modifier = Modifier.testTag("new-session-toolbar-button"),
-                ) { Text("＋ 新会话", color = desktopPalette.accent, fontSize = 13.sp) }
-            }
-        }
+        ConversationToolbar(
+            selectedTitle = selectedTitle,
+            sidebarOpen = sidebarOpen,
+            onToggleSidebar = onToggleSidebar,
+            showNewSession = !narrow && !embeddedSidebar && !sidebarOpen,
+            onNewSession = onNewSession,
+            canCreate = canCreate,
+            actions = topActions,
+        )
         Spacer(Modifier.fillMaxWidth().height(1.dp).background(desktopPalette.line))
 
         MessageViewport(
