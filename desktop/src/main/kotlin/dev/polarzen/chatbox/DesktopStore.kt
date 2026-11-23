@@ -29,7 +29,13 @@ internal data class Profile(
     val currentSession: String,
 )
 
-internal data class SessionInfo(val id: String, val entryCount: Int, val selected: Boolean, val title: String)
+internal data class SessionInfo(
+    val id: String,
+    val entryCount: Int,
+    val selected: Boolean,
+    val title: String,
+    val manualName: String? = null,
+)
 
 /** Durable local chat storage. Profile IDs, endpoint addresses, and server session IDs are distinct. */
 internal class DesktopStore(private val file: Path) {
@@ -91,11 +97,13 @@ internal class DesktopStore(private val file: Path) {
         val rows = profile.getJSONArray("sessions")
         return (0 until rows.length()).map { index ->
             val row = rows.getJSONObject(index)
+            val manualName = (row.opt("manualName") as? String)?.takeIf { it.isNotBlank() }
             SessionInfo(
                 row.getString("id"),
                 row.getJSONArray("entries").length(),
                 row.getString("id") == current,
-                sessionTitle(row),
+                manualName ?: defaultSessionTitle(row),
+                manualName,
             )
         }
     }
@@ -186,6 +194,18 @@ internal class DesktopStore(private val file: Path) {
             require(findSession(profile, sessionId) != null) { "Unknown session" }
             profile.put("currentSession", sessionId)
             copy.put("activeProfileId", profileId)
+        }
+    }
+
+    /** Sets the local display name, or restores the original title when name is null. */
+    @Synchronized
+    fun renameSession(profileId: String, sessionId: String, name: String?) {
+        val trimmed = name?.trim()
+        require(trimmed == null || trimmed.isNotEmpty()) { "Session name cannot be blank" }
+        persist { copy ->
+            val profile = requireProfile(copy, profileId)
+            val session = findSession(profile, sessionId) ?: error("Unknown session")
+            if (trimmed == null) session.remove("manualName") else session.put("manualName", trimmed)
         }
     }
 
@@ -432,7 +452,7 @@ internal class DesktopStore(private val file: Path) {
             ?.toLong()
     }
 
-    private fun sessionTitle(session: JSONObject): String {
+    private fun defaultSessionTitle(session: JSONObject): String {
         session.optString("title").trim().takeIf { it.isNotEmpty() }?.let { return shortTitle(it) }
         val entries = session.getJSONArray("entries")
         for (index in 0 until entries.length()) {

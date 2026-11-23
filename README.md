@@ -4,9 +4,15 @@ Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 
 
 ## Windows 下载
 
-Windows 0.1.8 安装包为 `Chatbox-0.1.8.msi`（55,472,128 字节）。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.8/Chatbox-0.1.8.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.8/SHA256SUMS.txt) · [v0.1.8 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.8)
+Windows 0.1.9 安装包为 `Chatbox-0.1.9.msi`（55,517,184 字节）。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.9/Chatbox-0.1.9.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.9/SHA256SUMS.txt) · [v0.1.9 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.9)
 
-在 PowerShell 中运行 `Get-FileHash .\Chatbox-0.1.8.msi -Algorithm SHA256`，确认结果与 `SHA256SUMS.txt` 中的 `0dd2baa59acf736d42ed5e161f857102e88d07e8897d2d78aaf696fc8ec8b0f8` 一致。从 0.1.5、0.1.6 或 0.1.7 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。0.1.1 用户先阅读[旧卸载器升级说明](desktop/README.md#从-011-升级)。
+在 PowerShell 中运行 `Get-FileHash .\Chatbox-0.1.9.msi -Algorithm SHA256`，确认结果与 `SHA256SUMS.txt` 中的 `69af357970b78ca85ad58b0195a05ae5770636c18f45f26b4204f6f4ebbcf2e9` 一致。从 0.1.5、0.1.6、0.1.7 或 0.1.8 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。0.1.1 用户先阅读[旧卸载器升级说明](desktop/README.md#从-011-升级)。
+
+## Windows 0.1.9
+
+长回复逐段显示时，聊天区会跟随最新内容。向上滚动可停在原处阅读，点击「回到最新」或滚回底部即可继续跟随。
+
+打开会话行末的「⋯」，选择「重命名」即可保存自定义名称。在同一对话框点击「恢复默认名称」，旧会话会沿用原有标题。没有旧标题时，取第一条非空提问作为名称，纯图片会话显示「图片会话」，空会话显示「新会话」。[0.1.9 验收记录](docs/WINDOWS_019_RELEASE_ACCEPTANCE.md)
 
 ## Windows 0.1.8
 

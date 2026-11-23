@@ -1,14 +1,21 @@
 package dev.polarzen.chatbox
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.material.MaterialTheme
+import androidx.compose.material.Text
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.test.doubleClick
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
@@ -50,6 +57,9 @@ import org.junit.runners.model.Statement
 import java.awt.Component
 import java.awt.Container
 import java.awt.GraphicsEnvironment
+import java.awt.Toolkit
+import java.awt.datatransfer.DataFlavor
+import java.awt.datatransfer.StringSelection
 import java.awt.Window
 import java.nio.file.Files
 import java.nio.file.Path
@@ -678,6 +688,422 @@ class DesktopUiAcceptanceTest {
             rule.onNodeWithText("语音播放失败", substring = true).assertDoesNotExist()
         }
         println("UI_CASE VOICE PASS ordered=true historyReloaded=true playbackVerified=$verifyPlayback")
+    }
+
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun v019_longReplyPreservesReadingLineAcrossTextImageAndCompletion() {
+        createV015Profiles(withLegacyKey = true)
+        rule.setContent {
+            Box(Modifier.requiredSize(650.dp, 480.dp)) { MaterialTheme { DesktopScreen(store, keys, cache) } }
+        }
+        awaitConnected()
+        val stream = UUID.randomUUID().toString().take(8)
+        val prompt = "fixture:long-stream:$stream"
+        val clipboard = Toolkit.getDefaultToolkit().systemClipboard
+        val previous = clipboard.getContents(null)
+        try {
+            sendText(prompt)
+            awaitUi("paragraph 90 visible at the live tail") { visibleParagraph(90) }
+            val draft = "下一条草稿"
+            rule.onNodeWithTag("composer-field").performTextInput(draft)
+            advanceUiAnimations()
+            val viewport = bounds("message-region")
+            assertTrue("Reply spans at least three viewports", paragraphBox(90).top - paragraphBox(1).top > 3 * viewport.height)
+            rule.onNodeWithTag("return-to-latest").assertDoesNotExist()
+            val composer = bounds("composer")
+            // Wheel through the final lazy item. Its semantics remain visible even though
+            // the actual reply tail is now several screens below the viewport.
+            wheelUntil(-3f) { paragraphBox(90).top > viewport.bottom + 2 * viewport.height }
+            val middle = nearestVisibleParagraph(90, "Paragraph")
+            val anchor = paragraphBox(middle)
+            assertTrue(visibleParagraph(middle))
+            rule.onNodeWithTag("message-entry-1").assertIsDisplayed()
+            val latest = bounds("return-to-latest")
+            assertTrue("Latest control overlays the message viewport", latest.top >= viewport.top && latest.bottom <= viewport.bottom)
+            assertEquals(composer, bounds("composer"))
+            val session = store.profile(profileA)!!.currentSession
+            val name = "当前流式会话"
+            clickSemanticsTag("sidebar-toggle")
+            advanceUiAnimations()
+            openRename(session)
+            enterName(name)
+            clickSemanticsTag("confirm-rename-session")
+            advanceUiAnimations()
+            clickSemanticsTag("close-sidebar-button")
+            advanceUiAnimations()
+            rule.onNodeWithText(name).assertIsDisplayed()
+            assertEquals(anchor.top, paragraphBox(middle).top, 2f)
+
+            val digits = middle.toString().padStart(3, '0')
+            rule.onNodeWithTag("message-region").performMouseInput { doubleClick(anchor.center - viewport.topLeft) }
+            fun assertSelectionCopied() {
+                rule.waitUntil(2_000) {
+                    runCatching { clipboard.setContents(StringSelection("selection check"), null) }.isSuccess
+                }
+                rule.onNodeWithTag("message-region").performKeyInput { withKeyDown(Key.CtrlLeft) { pressKey(Key.C) } }
+                awaitUi("selected paragraph number $digits copied") { clipboard.getData(DataFlavor.stringFlavor) == digits }
+            }
+            assertSelectionCopied()
+
+            fun assertReadingLine() {
+                assertEquals("Paragraph $middle y after stream update", anchor.top, paragraphBox(middle).top, 2f)
+                assertTrue(visibleParagraph(middle))
+                rule.onNodeWithTag("return-to-latest").assertIsDisplayed()
+                assertEquals(composer, bounds("composer"))
+                assertEquals(session, store.profile(profileA)!!.currentSession)
+                assertEquals(name, store.sessions(profileA).single { it.id == session }.title)
+                assertComposerText(draft)
+                assertSelectionCopied()
+            }
+            releaseStream(stream, "text")
+            awaitUi("second text batch rendered") { paragraphBox(108).height > 0 }
+            assertReadingLine()
+            releaseStream(stream, "image")
+            awaitUi("reply image decoded and laid out") {
+                rule.onAllNodes(SemanticsMatcher.expectValue(SemanticsProperties.ContentDescription, listOf("助手回复图片")),
+                    useUnmergedTree = true).fetchSemanticsNodes().any { it.size.height > 0 }
+            }
+            assertReadingLine()
+            releaseStream(stream, "end")
+            awaitUi("completed reply rendered") {
+                entryForCurrentSession(prompt)?.status == "已完成" &&
+                    rule.onAllNodes(hasTestTag("message-progress-1")).fetchSemanticsNodes().isEmpty()
+            }
+            assertReadingLine()
+
+            val saved = DesktopStore(historyFile)
+            assertEquals(name, saved.sessions(profileA).single { it.id == session }.title)
+            val reply = saved.sessionContent(profileA, session).entries.last()
+            assertEquals(prompt, reply.question)
+            assertEquals("reply-image-a", reply.replyAttachments.single().attachmentId)
+            clickSemanticsTag("return-to-latest")
+            awaitUi("latest click reveals image tail") { atImageTail() }
+            wheelUntil(-3f) { isDisplayed("return-to-latest") }
+            wheelUntil(3f) { atImageTail() }
+            assertEquals(composer, bounds("composer"))
+            wheelUntil(-3f) { isDisplayed("return-to-latest") && paragraphBox(108).top > viewport.bottom + viewport.height }
+            val nextQuestion = "延迟的下一条问题"
+            val previousCount = saved.sessionContent(profileA, session).entries.size
+            rule.onNodeWithTag("composer-field").performTextClearance()
+            sendText(nextQuestion)
+            awaitUi("sending from older text reveals the new turn") {
+                rule.onNodeWithText(nextQuestion).assertIsDisplayed()
+                rule.onNodeWithText("本地服务已收到，正在继续", substring = true).assertIsDisplayed()
+                rule.onNodeWithTag("return-to-latest").assertDoesNotExist()
+                true
+            }
+            awaitUi("new turn completes in the same conversation") {
+                store.sessionContent(profileA, session).entries.let {
+                    it.size == previousCount + 1 && it.last().question == nextQuestion && it.last().status == "已完成"
+                }
+            }
+            println("UI_CASE V019_READING PASS paragraph=$middle anchorY=${anchor.top} viewport=${viewport.height} batches=2 image=true completion=true copy=true newTurnVisible=true")
+        } finally {
+            for (stage in listOf("text", "image", "end")) releaseStream(stream, stage)
+            rule.waitUntil(2_000) {
+                runCatching { clipboard.setContents(previous ?: StringSelection(""), null) }.isSuccess
+            }
+        }
+    }
+
+    @Test
+    fun v019_resumedFollowingTracksEachSubsequentBatchAndImage() {
+        createV015Profiles(withLegacyKey = true)
+        render()
+        awaitConnected()
+        val stream = UUID.randomUUID().toString().take(8)
+        val prompt = "fixture:long-stream:$stream fixture:two-text-batches"
+        fun followingTextTail(number: Int) = visibleParagraph(number) && !isDisplayed("return-to-latest")
+        try {
+            sendText(prompt)
+            awaitUi("initial tail") { followingTextTail(90) }
+            wheelUntil(-3f) { isDisplayed("return-to-latest") && !visibleParagraph(90) }
+            clickSemanticsTag("return-to-latest")
+            advanceUiAnimations()
+            awaitUi("clicked latest before batch two") { followingTextTail(90) }
+            releaseStream(stream, "text")
+            awaitUi("latest follows the next nine paragraphs") { followingTextTail(99) }
+            wheelUntil(-3f) { isDisplayed("return-to-latest") && !visibleParagraph(99) }
+            wheelUntil(3f) { followingTextTail(99) }
+            releaseStream(stream, "text2")
+            awaitUi("manual return follows another nine paragraphs") { followingTextTail(108) }
+            releaseStream(stream, "image")
+            awaitUi("following remains active after asynchronous image decode") { atImageTail() }
+            releaseStream(stream, "end")
+            awaitUi("tail follows the completed status layout") { entryForCurrentSession(prompt)?.status == "已完成" && atImageTail() }
+            println("UI_CASE V019_FOLLOW PASS clickThenText=99 wheelThenText=108 image=true completion=true")
+        } finally {
+            for (stage in listOf("text", "text2", "image", "end")) releaseStream(stream, stage)
+        }
+    }
+
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun v019_namesAndBackgroundStreamKeepSessionIdentityAndSelectedDraft() {
+        createV015Profiles(withLegacyKey = true)
+        val historic = fixture.getProperty("session.a")
+        val duplicate = store.createSession(profileA).session
+        val imageOnly = store.createSession(profileA).session
+        val fresh = store.createSession(profileA).session
+        val review = (1..70).joinToString("\n\n") { "Review " + it.toString().padStart(3, '0') + " | 独立回复" }
+        store.saveSessionContent(profileA, Chat(duplicate, listOf(Entry("合成的 A 历史问题", review, "已完成"))))
+        store.saveSessionContent(profileA, Chat(imageOnly, listOf(Entry("", "", "已完成", attachmentDisplayName = "sample.png"))))
+        // Exercise the persisted legacy explicit title alongside generated titles.
+        val json = JSONObject(Files.readString(historyFile))
+        val sessions = json.getJSONArray("profiles").getJSONObject(0).getJSONArray("sessions")
+        (0 until sessions.length()).map(sessions::getJSONObject).single { it.getString("id") == historic }.put("title", "服务历史标题")
+        Files.writeString(historyFile, json.toString())
+        store = DesktopStore(historyFile)
+        store.selectSession(profileA, historic)
+        render()
+        awaitConnected()
+        fun row(id: String) = "session-item-" + store.sessions(profileA).indexOfFirst { it.id == id }
+        fun assertRow(id: String, title: String) {
+            rule.onNode(hasTestTag(row(id)) and hasText(title)).assertIsDisplayed()
+        }
+        fun saveName(id: String, value: String) {
+            openRename(id)
+            enterName(value)
+            clickSemanticsTag("confirm-rename-session")
+            awaitUi("renamed row $id") { assertRow(id, value.trim()); true }
+        }
+        assertRow(historic, "服务历史标题")
+        assertRow(duplicate, "合成的 A 历史问题")
+        assertRow(imageOnly, "图片会话")
+        assertRow(fresh, "新会话")
+        val order = store.sessions(profileA).map { it.id }
+        val stream = UUID.randomUUID().toString().take(8)
+        val prompt = "fixture:long-stream:$stream"
+        try {
+            sendText(prompt)
+            awaitUi("first batch at tail") { visibleParagraph(90) }
+            wheelUntil(-3f) { isDisplayed("return-to-latest") }
+            wheelUntil(3f) { visibleParagraph(90) && !isDisplayed("return-to-latest") }
+            releaseStream(stream, "text")
+            awaitUi("following reader sees the second batch tail") { visibleParagraph(108) }
+            rule.onNodeWithTag("return-to-latest").assertDoesNotExist()
+            wheelUntil(-3f) { isDisplayed("return-to-latest") }
+            selectSession(duplicate)
+            awaitUi("selected conversation independently opens at its own tail") {
+                bounds("message-region").contains(paragraphBox(70, "Review").center) && !isDisplayed("return-to-latest")
+            }
+            rule.onNodeWithTag("composer-field").performTextInput("独立草稿")
+            val attachment = Path.of(fixture.getProperty("media.dir")).resolve("upload-b.jpg")
+            chooseImageThroughRealPicker(attachment)
+            wheelUntil(-3f) { paragraphBox(70, "Review").top > bounds("message-region").bottom + bounds("message-region").height }
+            val reviewLine = nearestVisibleParagraph(70, "Review")
+            val before = paragraphBox(reviewLine, "Review")
+            fun assertSelected() {
+                assertEquals(duplicate, store.profile(profileA)!!.currentSession)
+                assertEquals(order, store.sessions(profileA).map { it.id })
+                assertComposerText("独立草稿")
+                assertComposerContainsText(attachment.fileName.toString())
+                assertEquals(before.top, paragraphBox(reviewLine, "Review").top, 2f)
+                rule.onNodeWithTag("return-to-latest").assertIsDisplayed()
+            }
+            openRename(historic)
+            enterName("忽略")
+            clickSemanticsTag("cancel-rename-session")
+            advanceUiAnimations()
+            assertRow(historic, "服务历史标题")
+            openRename(historic)
+            enterName("  ")
+            clickSemanticsTag("confirm-rename-session")
+            rule.onNodeWithTag("rename-session-error").assertIsDisplayed()
+            val nameField = rule.onNodeWithTag("rename-session-name")
+            nameField.performSemanticsAction(SemanticsActions.RequestFocus)
+            advanceUiAnimations()
+            assertTrue("Rename field receives keyboard focus", nameField.fetchSemanticsNode().config[SemanticsProperties.Focused])
+            nameField.performKeyInput { pressKey(Key.Escape) }
+            advanceUiAnimations()
+            rule.onNodeWithTag("rename-session-dialog").assertDoesNotExist()
+            assertRow(historic, "服务历史标题")
+            openRename(historic)
+            enterName("无法写入")
+            val priorHistory = Files.readString(historyFile)
+            Files.setAttribute(historyFile, "dos:readonly", true)
+            try {
+                clickSemanticsTag("confirm-rename-session")
+                rule.onNodeWithTag("rename-session-error").assertIsDisplayed()
+                assertEquals("无法写入", rule.onNodeWithTag("rename-session-name").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
+                assertEquals(priorHistory, Files.readString(historyFile))
+                assertEquals("服务历史标题", store.sessions(profileA).single { it.id == historic }.title)
+            } finally {
+                Files.setAttribute(historyFile, "dos:readonly", false)
+            }
+            clickSemanticsTag("cancel-rename-session")
+            advanceUiAnimations()
+            saveName(historic, "  重复手动名称  ")
+            assertSelected()
+            saveName(duplicate, "重复手动名称")
+            assertRow(historic, "重复手动名称")
+            rule.onNode(hasText("重复手动名称") and !hasAnyAncestor(sessionRowMatcher()),
+                useUnmergedTree = true).assertIsDisplayed()
+            clickSemanticsTag("session-menu-$duplicate", useUnmergedTree = true)
+            advanceUiAnimations()
+            clickSemanticsTag("delete-session-$duplicate", useUnmergedTree = true)
+            advanceUiAnimations()
+            rule.onNodeWithText("聊天记录“重复手动名称”", substring = true).assertIsDisplayed()
+            clickSemanticsTag("cancel-delete-session")
+            advanceUiAnimations()
+            assertSelected()
+            releaseStream(stream, "image")
+            awaitUi("background image cached") { cache.read(profileA, "reply-image-a") != null }
+            assertSelected()
+            releaseStream(stream, "end")
+            awaitUi("background reply persisted") {
+                store.sessionContent(profileA, historic).entries.last().let { it.status == "已完成" && it.answer.contains("Paragraph 108") && it.replyAttachments.size == 1 }
+            }
+            assertSelected()
+            restartScreen()
+            awaitConnected()
+            assertRow(historic, "重复手动名称")
+            assertRow(duplicate, "重复手动名称")
+            assertEquals(duplicate, store.profile(profileA)!!.currentSession)
+            openRename(historic)
+            clickSemanticsTag("restore-session-name")
+            awaitUi("default historical title restored") { assertRow(historic, "服务历史标题"); true }
+            assertRow(duplicate, "重复手动名称")
+            assertEquals("服务历史标题", DesktopStore(historyFile).sessions(profileA).single { it.id == historic }.title)
+            assertEquals(order, store.sessions(profileA).map { it.id })
+            println("UI_CASE V019_NAMES PASS defaults=4 duplicate=true backgroundImage=true selectedDraft=true persisted=true restore=true")
+        } finally {
+            for (stage in listOf("text", "image", "end")) releaseStream(stream, stage)
+        }
+    }
+
+    @Test
+    fun v019_sameSessionIdAcrossProfilesAndResizeToFit() {
+        val profile = mutableStateOf("Profile A")
+        val height = mutableIntStateOf(160)
+        rule.setContent {
+            Box(Modifier.requiredSize(420.dp, height.intValue.dp)) {
+                MessageViewport(profile.value, "shared-session-id", entryCount = 1, modifier = Modifier) {
+                    item {
+                        Column {
+                            Text("${profile.value} beginning")
+                            Spacer(Modifier.height(280.dp))
+                            Text("${profile.value} end")
+                        }
+                    }
+                }
+            }
+        }
+        fun insideViewport(label: String): Boolean {
+            val text = rule.onNodeWithText(label).fetchSemanticsNode()
+            val viewport = bounds("message-region")
+            return text.positionInRoot.y >= viewport.top && text.positionInRoot.y + text.size.height <= viewport.bottom
+        }
+        awaitUi("profile A opens at tail") { insideViewport("Profile A end") }
+        wheelUntil(-3f) { insideViewport("Profile A beginning") && isDisplayed("return-to-latest") }
+        rule.runOnIdle { profile.value = "Profile B" }
+        awaitUi("same session ID in another profile opens independently at tail") {
+            insideViewport("Profile B end") && !isDisplayed("return-to-latest")
+        }
+        wheelUntil(-3f) { insideViewport("Profile B beginning") && isDisplayed("return-to-latest") }
+        rule.runOnIdle { height.intValue = 420 }
+        awaitUi("entire conversation fits after resize") {
+            insideViewport("Profile B beginning") && insideViewport("Profile B end") && !isDisplayed("return-to-latest")
+        }
+        rule.runOnIdle { height.intValue = 160 }
+        awaitUi("shrinking the viewport follows the tail again") {
+            insideViewport("Profile B end") && !insideViewport("Profile B beginning") && !isDisplayed("return-to-latest")
+        }
+    }
+
+    private fun bounds(tag: String) = rule.onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
+
+    private fun openRename(id: String) {
+        clickSemanticsTag("session-menu-$id", useUnmergedTree = true)
+        advanceUiAnimations()
+        clickSemanticsTag("rename-session-$id", useUnmergedTree = true)
+        advanceUiAnimations()
+    }
+
+    private fun enterName(value: String) {
+        rule.onNodeWithTag("rename-session-name").performTextClearance()
+        rule.onNodeWithTag("rename-session-name").performTextInput(value)
+    }
+
+    private fun readLayout(label: String): Pair<TextLayoutResult, Offset> {
+        val node = rule.onNodeWithText(label, substring = true, useUnmergedTree = true).fetchSemanticsNode()
+        val results = mutableListOf<TextLayoutResult>()
+        check(node.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(results))
+        return results.single() to node.positionInRoot
+    }
+
+    private fun paragraphBox(number: Int, prefix: String = "Paragraph"): Rect {
+        val label = "$prefix " + number.toString().padStart(3, '0')
+        val (layout, origin) = readLayout(label)
+        val offset = layout.layoutInput.text.text.indexOf(label)
+        check(offset >= 0)
+        return layout.getBoundingBox(offset + prefix.length + 2).translate(origin)
+    }
+
+    private fun nearestVisibleParagraph(last: Int, prefix: String): Int {
+        val viewport = bounds("message-region")
+        var first = 1
+        var end = last
+        while (first < end) {
+            val middle = (first + end) / 2
+            if (paragraphBox(middle, prefix).top < viewport.top) first = middle + 1 else end = middle
+        }
+        check(paragraphBox(first, prefix).bottom <= viewport.bottom)
+        return first
+    }
+
+    private fun visibleParagraph(number: Int) = bounds("message-region").contains(paragraphBox(number).center)
+
+    private fun atImageTail(): Boolean {
+        val image = rule.onNode(SemanticsMatcher.expectValue(SemanticsProperties.ContentDescription, listOf("助手回复图片")),
+            useUnmergedTree = true).fetchSemanticsNode()
+        val end = image.positionInRoot.y + image.size.height
+        val viewport = bounds("message-region")
+        return end in viewport.top..viewport.bottom && !isDisplayed("return-to-latest")
+    }
+
+    @OptIn(ExperimentalTestApi::class)
+    private fun wheelUntil(amount: Float, done: () -> Boolean) {
+        val viewport = rule.onNodeWithTag("message-region")
+        val scrollRange = viewport.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange]
+        val start = scrollRange.value()
+        repeat(80) {
+            if (done()) {
+                // Desktop smooth-wheel events finish over several frames. Measure after the
+                // gesture settles so the anchor excludes the user's remaining scroll delta.
+                var previous = scrollRange.value()
+                var stable = 0
+                for (frame in 1..20) {
+                    Thread.sleep(20)
+                    rule.mainClock.advanceTimeBy(64)
+                    val current = scrollRange.value()
+                    stable = if (current == previous) stable + 1 else 0
+                    if (stable >= 3) break
+                    previous = current
+                }
+                if (done()) return
+            }
+            viewport.performMouseInput {
+                moveTo(center)
+                scroll(amount)
+            }
+            advanceUiAnimations()
+        }
+        assertTrue("Wheel $amount from $start ended at ${scrollRange.value()}/${scrollRange.maxValue()} " +
+            "with return-to-latest=${isDisplayed("return-to-latest")}", done())
+    }
+
+    private fun awaitUi(description: String, condition: () -> Boolean) {
+        waitUntil(description, 15_000) {
+            rule.mainClock.advanceTimeBy(100)
+            condition()
+        }
+    }
+
+    private fun releaseStream(runId: String, stage: String) {
+        val controls = Path.of(fixture.getProperty("controls.file"))
+        Files.writeString(controls.resolveSibling("long-stream-$runId.$stage"), "")
     }
 
     private fun createV015Profiles(withLegacyKey: Boolean, extraASessions: Int = 0) {
