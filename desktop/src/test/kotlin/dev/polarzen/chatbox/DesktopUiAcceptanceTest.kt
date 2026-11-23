@@ -648,6 +648,117 @@ class DesktopUiAcceptanceTest {
     }
 
     @Test
+    fun draftRecoverySeparatesDuplicateTitlesAndSharedSessionIdAcrossProfiles() {
+        createV015Profiles(withLegacyKey = false, sharedSessionId = true)
+        val shared = fixture.getProperty("session.a")
+        val second = store.createSession(profileA).session
+        store.renameSession(profileA, shared, "同名")
+        store.renameSession(profileA, second, "同名")
+        store.selectSession(profileA, shared)
+        val closing = mutableStateOf(false)
+        var closeResult: Boolean? = null
+        render(closeRequested = { closing.value }, onCloseResult = { closeResult = it })
+        fun input(text: String) {
+            awaitUi("editor ready") { rule.onNodeWithTag("start-recording").assertIsEnabled(); true }
+            assertComposerText("")
+            rule.onNodeWithTag("composer-field").performTextInput(text)
+            assertComposerText(text)
+        }
+        val original = "第一条\n末尾"
+        input(original)
+        selectSession(second)
+        input("第二条")
+        openRename(second)
+        enterName("改名后")
+        clickSemanticsTag("confirm-rename-session")
+        advanceUiAnimations()
+        selectProfile(1)
+        input("另一配置")
+        selectProfile(0)
+        assertComposerText("第二条")
+        selectSession(shared)
+        assertComposerText(original)
+        rule.onNodeWithTag("composer-field").performTextInput("！")
+        rule.runOnIdle { closing.value = true }
+        awaitUi("normal close flushed the final edit") { closeResult == true }
+        rule.runOnIdle { closing.value = false }
+        restartScreen()
+        awaitUi("restored original multiline draft including final edit") { composerFieldText() == original + "！" }
+        selectSession(second)
+        awaitUi("restored renamed session draft") { composerFieldText() == "第二条" }
+        selectProfile(1)
+        awaitUi("restored draft for same ID in another profile") { composerFieldText() == "另一配置" }
+        assertEquals(0, fixtureRequestCount("endpoint=POST /api/v1/file"))
+        assertEquals(0, fixtureRequestCount("endpoint=POST /api/v1/chat"))
+    }
+
+    @Test
+    fun failedVoiceUploadAndUncertainManualRetryKeepRecordingAndFollowingDraft() {
+        createV015Profiles(withLegacyKey = true)
+        val key = SessionKey(profileA, fixture.getProperty("session.a"))
+        val directory = Files.createDirectories(store.managedMediaDirectory)
+        val wav = directory.resolve("${UUID.randomUUID()}.wav")
+        val format = javax.sound.sampled.AudioFormat(8000f, 16, 1, true, false)
+        javax.sound.sampled.AudioInputStream(ByteArray(16000).inputStream(), format, 8000L).use {
+            javax.sound.sampled.AudioSystem.write(it, javax.sound.sampled.AudioFileFormat.Type.WAVE, wav.toFile())
+        }
+        val question = "fixture:delay-before-headers 录音重试"
+        store.saveDraft(key, store.nextDraftRevision(), ComposerDraft(question, listOf(wav)))
+        val upload = "profile=A endpoint=POST /api/v1/file"
+        val chat = "profile=A endpoint=POST /api/v1/chat"
+        fun assertPosts(files: Int, chats: Int) {
+            assertEquals(files, fixtureRequestCount(upload))
+            assertEquals(chats, fixtureRequestCount(chat))
+        }
+        fun retryLast() {
+            val index = store.sessionContent(profileA, key.sessionId).entries.lastIndex
+            awaitUi("manual retry available for the failed recording") { isDisplayed("retry-message-$index") }
+            clickSemanticsTag("retry-message-$index")
+            advanceUiAnimations()
+            rule.onNodeWithText("确认重发").performSemanticsAction(SemanticsActions.OnClick)
+        }
+        render()
+        awaitConnected()
+        assertComposerText(question)
+        assertPosts(0, 0)
+        setFixtureControl("upload.fail", "true")
+        clickSemanticsTag("send-button")
+        awaitUi("voice upload rejected before chat") {
+            entryForCurrentSession(question)?.status?.startsWith("发送失败：") == true && fixtureRequestCount(upload) == 1
+        }
+        assertPosts(1, 0)
+        assertEquals(listOf(wav.toString()), entryForCurrentSession(question)!!.attachmentReferences)
+        assertTrue(Files.isRegularFile(wav))
+        assertComposerText("")
+        setFixtureControl("upload.fail", "false")
+        setFixtureControl("chat.truncate.sse", "true")
+        setFixtureControl("chat.delay.before.headers.ms", "3000")
+        retryLast()
+        val next = "下一条未发送的草稿"
+        rule.onNodeWithTag("composer-field").performTextInput(next)
+        awaitUi("partial voice reply persisted as uncertain") {
+            entryForCurrentSession(question)?.let {
+                it.status.startsWith("发送失败：") && it.answer.contains("回复流中断前的部分内容")
+            } == true && fixtureRequestCount(chat) == 1 && store.readDraft(key).text == next
+        }
+        assertComposerText(next)
+        restartScreen()
+        awaitConnected()
+        assertComposerText(next)
+        assertPosts(2, 1)
+        assertEquals(listOf(wav.toString()), entryForCurrentSession(question)!!.attachmentReferences)
+        setFixtureControl("chat.truncate.sse", "false")
+        retryLast()
+        awaitUi("manual retry completes") {
+            entryForCurrentSession(question)?.status == "已完成" && fixtureRequestCount(chat) == 2
+        }
+        assertComposerText(next)
+        assertPosts(3, 2)
+        assertEquals(ComposerDraft(next), DesktopStore(historyFile).readDraft(key))
+        assertTrue(Files.isRegularFile(wav))
+    }
+
+    @Test
     fun voiceReplyFromChatShowsPlaybackInOrderAfterRestart() {
         createV015Profiles(withLegacyKey = true)
         render()
@@ -1107,9 +1218,9 @@ class DesktopUiAcceptanceTest {
         Files.writeString(controls.resolveSibling("long-stream-$runId.$stage"), "")
     }
 
-    private fun createV015Profiles(withLegacyKey: Boolean, extraASessions: Int = 0) {
+    private fun createV015Profiles(withLegacyKey: Boolean, extraASessions: Int = 0, sharedSessionId: Boolean = false) {
         val aSession = fixture.getProperty("session.a")
-        val bSession = fixture.getProperty("session.b")
+        val bSession = if (sharedSessionId) aSession else fixture.getProperty("session.b")
         val now = System.currentTimeMillis()
         val a = profileJson(profileA, fixture.getProperty("base.a"), aSession,
             listOf(sessionJson(aSession, "合成的 A 历史问题", "合成的 A 历史回复", now)) +
@@ -1139,10 +1250,10 @@ class DesktopUiAcceptanceTest {
         .put("entries", JSONArray().put(JSONObject()
             .put("question", question).put("answer", answer).put("status", "已完成")))
 
-    private fun render() {
+    private fun render(closeRequested: () -> Boolean = { false }, onCloseResult: (Boolean) -> Unit = {}) {
         rule.setContent {
             key(screenEpoch.intValue) {
-                MaterialTheme { DesktopScreen(store, keys, cache) }
+                MaterialTheme { DesktopScreen(store, keys, cache, closeRequested = closeRequested(), onCloseResult = onCloseResult) }
             }
         }
     }

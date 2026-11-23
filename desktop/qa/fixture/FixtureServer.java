@@ -20,6 +20,8 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -102,13 +104,20 @@ public final class FixtureServer {
     private void handle(String profile, HttpExchange exchange) throws IOException {
         String path = exchange.getRequestURI().getPath();
         if (path.equals("/health")) {
-            send(exchange, 200, "text/plain; charset=utf-8", "ok".getBytes(StandardCharsets.UTF_8));
+            try {
+                send(exchange, 200, "text/plain; charset=utf-8", "ok".getBytes(StandardCharsets.UTF_8));
+            } finally {
+                exchange.close();
+            }
             return;
         }
 
         String session = "-";
         String alias = identify(profile, exchange.getRequestHeaders().getFirst("Authorization"));
         int status;
+        if (exchange.getRequestMethod().equals("POST") && (path.equals("/api/v1/file") || path.equals("/api/v1/chat"))) {
+            System.out.println("received profile=" + profile + " operation=" + (path.endsWith("/file") ? "upload" : "chat"));
+        }
         try {
             if (alias.equals("invalid") || (alias.equals("old_key") && rejectOldKey())) {
                 status = 401;
@@ -174,6 +183,10 @@ public final class FixtureServer {
 
     private int serveChat(String profile, HttpExchange exchange, byte[] body, String session) throws IOException {
         String request = new String(body, StandardCharsets.UTF_8);
+        if (!verifyMedia(profile, "chat", "", "", body)) {
+            send(exchange, 400, "application/json", "{}".getBytes(StandardCharsets.UTF_8));
+            return 400;
+        }
         String reply = profile.equals("A") ? "已收到本地验收消息。" : "B 服务已收到本地验收消息。";
         boolean delayed = request.contains("延迟");
         boolean delayBeforeHeaders = request.contains("fixture:delay-before-headers");
@@ -199,6 +212,19 @@ public final class FixtureServer {
         Matcher longStream = LONG_STREAM.matcher(request);
         if (longStream.find()) {
             serveLongStream(profile, output, longStream.group(1), request.contains("fixture:two-text-batches"));
+            return 200;
+        }
+        if (request.contains("fixture:duration-pair") || request.contains("fixture:duration-edges")) {
+            String[] samples = request.contains("fixture:duration-pair")
+                    ? new String[] {"mono8", "stereo65"} : new String[] {"short", "metadata", "corrupt", "missing"};
+            for (String sample : samples) {
+                String id = "wav-" + profile + "-" + sample;
+                writeEvent(output, "{\"type\":\"plain\",\"data\":\"" + sample + "\"}");
+                writeEvent(output, "{\"type\":\"record\",\"data\":\"[RECORD]sample.wav\"}");
+                writeEvent(output, "{\"type\":\"attachment_saved\",\"data\":{\"id\":\"" + id + "\",\"type\":\"record\"}}");
+            }
+            writeEvent(output, "{\"type\":\"end\"}");
+            output.flush();
             return 200;
         }
         if (request.contains("fixture:voice-reply")) {
@@ -292,6 +318,10 @@ public final class FixtureServer {
             return 503;
         }
         String id = "upload-" + profile.toLowerCase() + "-" + UUID.randomUUID();
+        if (!verifyMedia(profile, "upload", id, mediaType, multipart)) {
+            send(exchange, 400, "application/json", "{}".getBytes(StandardCharsets.UTF_8));
+            return 400;
+        }
         String json = "{\"status\":\"ok\",\"data\":{\"attachment_id\":\"" + id + "\"}}";
         send(exchange, 200, "application/json; charset=utf-8", json.getBytes(StandardCharsets.UTF_8));
         return 200;
@@ -300,8 +330,24 @@ public final class FixtureServer {
     private int serveDownload(String profile, HttpExchange exchange) throws IOException {
         String query = exchange.getRequestURI().getRawQuery();
         String id = query == null ? "" : URLDecoder.decode(query.replaceFirst("^attachment_id=", ""), StandardCharsets.UTF_8);
+        String prefix = "wav-" + profile + "-";
+        if (id.startsWith(prefix)) {
+            String sample = id.substring(prefix.length());
+            byte[] wav = switch (sample) {
+                case "mono8" -> voiceWav(8000, 1, false);
+                case "stereo65" -> voiceWav(65000, 2, false);
+                case "short" -> voiceWav(375, 1, false);
+                case "metadata" -> voiceWav(2750, 1, true);
+                case "corrupt" -> control("wav.repair.corrupt", false) ? voiceWav(3500, 1, false) : new byte[]{'R','I','F','F'};
+                case "missing" -> control("wav.repair.missing", false) ? voiceWav(4500, 1, false) : null;
+                default -> null;
+            };
+            send(exchange, wav == null ? 404 : 200, wav == null ? "application/json" : "audio/wav",
+                    wav == null ? "{}".getBytes(StandardCharsets.UTF_8) : wav);
+            return wav == null ? 404 : 200;
+        }
         if (id.equals("reply-voice-" + profile.toLowerCase(java.util.Locale.ROOT))) {
-            send(exchange, 200, "audio/wav", voiceWav());
+            send(exchange, 200, "audio/wav", voiceWav(2000, 1, false));
             return 200;
         }
         byte[] image;
@@ -381,20 +427,52 @@ public final class FixtureServer {
         System.out.flush();
     }
 
-    private static byte[] voiceWav() throws IOException {
+    // Only enabled by Prepare-Fixture -VerifyMedia. The validator writes anonymous receipts,
+    // never request bodies, into the private run directory. Its stdout contains only checked metadata.
+    private boolean verifyMedia(String profile, String operation, String id, String mediaType, byte[] body) throws IOException {
+        String verifier = config.getProperty("media.verifier");
+        if (verifier == null) return true;
+        Process process = new ProcessBuilder(config.getProperty("media.python"), "-I", verifier, operation, profile,
+                controlsFile.getParent().toString(), id, mediaType).redirectError(ProcessBuilder.Redirect.DISCARD).start();
+        try {
+            try (var input = process.getOutputStream()) {
+                input.write(body);
+            }
+            String receipt = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            if (process.waitFor() != 0) return false;
+            System.out.println("verified profile=" + profile + " " + receipt);
+            return true;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted fixture verifier", interrupted);
+        } finally {
+            process.destroy();
+        }
+    }
+
+    private static byte[] voiceWav(int millis, int channels, boolean metadata) throws IOException {
         int sampleRate = 16_000;
-        int frames = 2 * sampleRate;
-        AudioFormat format = new AudioFormat(sampleRate, 16, 1, true, false);
+        int frames = (int) ((long) millis * sampleRate / 1000);
+        AudioFormat format = new AudioFormat(sampleRate, 16, channels, true, false);
         byte[] pcm = new byte[frames * format.getFrameSize()];
         for (int frame = 0; frame < frames; frame++) {
             short sample = (short) (1_000 * Math.sin(frame * 2 * Math.PI * 440 / sampleRate));
-            pcm[2 * frame] = (byte) sample;
-            pcm[2 * frame + 1] = (byte) (sample >> 8);
+            for (int channel = 0; channel < channels; channel++) {
+                int offset = (frame * channels + channel) * 2;
+                pcm[offset] = (byte) sample;
+                pcm[offset + 1] = (byte) (sample >> 8);
+            }
         }
         try (var stream = new AudioInputStream(new ByteArrayInputStream(pcm), format, frames)) {
             var output = new ByteArrayOutputStream();
             AudioSystem.write(stream, AudioFileFormat.Type.WAVE, output);
-            return output.toByteArray();
+            byte[] wav = output.toByteArray();
+            if (!metadata) return wav;
+            // Insert an odd-sized RIFF JUNK chunk and its padding immediately after WAVE.
+            return ByteBuffer.allocate(wav.length + 12).order(ByteOrder.LITTLE_ENDIAN)
+                    .put(wav, 0, 4).putInt(wav.length + 4).put(wav, 8, 4)
+                    .put(new byte[]{'J','U','N','K'}).putInt(3).put(new byte[]{1, 2, 3, 0})
+                    .put(wav, 12, wav.length - 12).array();
         }
     }
 

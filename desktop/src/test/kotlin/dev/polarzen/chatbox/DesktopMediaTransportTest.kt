@@ -4,10 +4,15 @@ import com.sun.net.httpserver.HttpServer
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
+import java.io.RandomAccessFile
 import java.net.InetSocketAddress
 import java.nio.file.Files
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicInteger
+import javax.sound.sampled.AudioFileFormat
+import javax.sound.sampled.AudioFormat
+import javax.sound.sampled.AudioInputStream
+import javax.sound.sampled.AudioSystem
 
 class DesktopMediaTransportTest {
     @Test fun uploadsOrderedImagesAndReportsTransportMilestones() {
@@ -70,8 +75,61 @@ class DesktopMediaTransportTest {
                 AstrBotTransportEvent.StreamReady, AstrBotTransportEvent.FirstContent,
                 AstrBotTransportEvent.Completed,
             ), events)
+
+            val recording = temp.resolve("留言.WAV")
+            val format = AudioFormat(16000f, 16, 1, true, false)
+            AudioInputStream(byteArrayOf(1, 0, 2, 0).inputStream(), format, 2).use {
+                AudioSystem.write(it, AudioFileFormat.Type.WAVE, recording.toFile())
+            }
+            val expectedWav = Files.readAllBytes(recording)
+            val base = "http://127.0.0.1:${server.address.port}"
+            for (withImage in listOf(false, true)) {
+                val files = if (withImage) listOf(first, recording) else listOf(recording)
+                sendAttachmentsToAstrBot(base, "fixture-key", "user", "session", files,
+                    caption = if (withImage) "说明" else "", allowLoopbackHttp = true) {}
+                val parts = checkNotNull(chat.poll()).getJSONArray("message")
+                assertEquals(if (withImage) 3 else 1, parts.length())
+                if (withImage) {
+                    assertEquals("plain", parts.getJSONObject(0).getString("type"))
+                    assertEquals("说明", parts.getJSONObject(0).getString("text"))
+                    assertEquals("image", parts.getJSONObject(1).getString("type"))
+                    assertEquals("attachment-4", parts.getJSONObject(1).getString("attachment_id"))
+                    assertTrue(checkNotNull(uploads.poll()).toString(Charsets.ISO_8859_1)
+                        .contains("Content-Type: image/png"))
+                }
+                val record = parts.getJSONObject(parts.length() - 1)
+                assertEquals("record", record.getString("type"))
+                assertEquals(if (withImage) "attachment-5" else "attachment-3", record.getString("attachment_id"))
+                assertEquals("留言.WAV", record.getString("filename"))
+                val multipart = checkNotNull(uploads.poll()).toString(Charsets.ISO_8859_1)
+                assertTrue(multipart.contains("name=\"file\"; filename=\"record.wav\""))
+                assertTrue(multipart.contains("Content-Type: audio/wav\r\n\r\n" +
+                    expectedWav.toString(Charsets.ISO_8859_1) + "\r\n--"))
+                assertNull(uploads.poll())
+                assertNull(chat.poll())
+            }
         } finally {
             server.stop(0)
+            temp.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun validatesEveryMixedAttachmentBeforeFirstUpload() {
+        val temp = Files.createTempDirectory("chatbox-media-preflight-")
+        try {
+            val valid = Files.write(temp.resolve("first.png"), byteArrayOf(1))
+            val oversized = temp.resolve("large.jpg")
+            RandomAccessFile(oversized.toFile(), "rw").use { it.setLength(512L * 1024 * 1024 + 1) }
+            val invalid = listOf(temp.resolve("missing.wav"), Files.createFile(temp.resolve("empty.wav")),
+                Files.write(temp.resolve("unknown.pdf"), byteArrayOf(2)), oversized)
+            for (path in invalid) {
+                val failure = assertThrows(IllegalArgumentException::class.java) {
+                    sendAttachmentsToAstrBot("", "", "", "", listOf(valid, path),
+                        onEvent = { fail("Upload started before validating ${path.fileName}") }) {}
+                }
+                assertTrue(failure.message.orEmpty().contains(path.fileName.toString()))
+            }
+        } finally {
             temp.toFile().deleteRecursively()
         }
     }
@@ -214,8 +272,9 @@ class DesktopMediaTransportTest {
                         it.sendResponseHeaders(200, body.size.toLong())
                         it.responseBody.write(body)
                     } else {
-                        val body = """{"status":"ok","data":{"attachment_id":"image-only"}}"""
-                            .toByteArray(Charsets.UTF_8)
+                        val id = if (failureMode.get() == 3) JSONObject() else "image-only"
+                        val body = JSONObject().put("status", "ok").put("data", JSONObject().put("attachment_id", id))
+                            .toString().toByteArray(Charsets.UTF_8)
                         it.responseHeaders.add("Content-Type", "application/json")
                         it.sendResponseHeaders(200, body.size.toLong())
                         it.responseBody.write(body)
@@ -258,6 +317,15 @@ class DesktopMediaTransportTest {
             assertTrue(rejected.message.orEmpty().contains("512 MB"))
             assertEquals(2, uploads.size)
             assertNull("chat must not run after an upload API error", chats.poll())
+
+            failureMode.set(3)
+            val malformed = assertThrows(IllegalStateException::class.java) {
+                sendImageToAstrBot(base, "fixture-key", "test-user", "same-session", image,
+                    allowLoopbackHttp = true) {}
+            }
+            assertEquals("图片上传成功响应中缺少附件编号。", malformed.message)
+            assertEquals(3, uploads.size)
+            assertNull("chat must not run with a malformed attachment ID", chats.poll())
         } finally {
             server.stop(0)
             temp.toFile().deleteRecursively()

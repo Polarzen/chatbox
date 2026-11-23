@@ -1,5 +1,6 @@
 package dev.polarzen.chatbox
 
+import androidx.compose.foundation.layout.Row
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.runtime.Composable
@@ -8,6 +9,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -19,6 +21,9 @@ import java.nio.ByteOrder
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.FileTime
+import java.io.EOFException
 import java.security.MessageDigest
 import java.util.HexFormat
 import javax.sound.sampled.AudioFormat
@@ -26,14 +31,50 @@ import javax.sound.sampled.AudioInputStream
 import javax.sound.sampled.AudioSystem
 import javax.sound.sampled.Clip
 import javax.sound.sampled.LineEvent
+import javax.sound.sampled.UnsupportedAudioFileException
 
-private const val MAX_WAV_BYTES = 20 * 1024 * 1024
+internal const val MAX_WAV_BYTES = 20 * 1024 * 1024
+
+internal data class ValidatedAudio(val path: Path, val durationMillis: Long)
+
+internal fun formatAudioDuration(millis: Long): String {
+    if (millis < 1000) return "<1 秒"
+    val seconds = millis / 1000
+    return "${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}"
+}
+
+// A null duration records an invalid format, never a transient filesystem failure.
+private data class DurationEntry(val size: Long, val modified: FileTime, val key: Any?, val millis: Long?)
+private val durationCache = object : LinkedHashMap<Path, DurationEntry>(128, .75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Path, DurationEntry>?) = size > 512
+}
+
+internal fun validatedAudio(path: Path): ValidatedAudio {
+    val attrs = Files.readAttributes(path, BasicFileAttributes::class.java)
+    val cached = synchronized(durationCache) { durationCache[path] }
+    if (cached != null && cached.size == attrs.size() && cached.modified == attrs.lastModifiedTime() &&
+        cached.key == attrs.fileKey()) return ValidatedAudio(path, requireNotNull(cached.millis) { "Invalid WAV" })
+    val millis = try {
+        val wav = readWav(path)
+        (wav.size.toLong() / wav.format.frameSize * 1000L) / wav.format.sampleRate.toLong()
+    } catch (_: IllegalArgumentException) {
+        null
+    } catch (_: UnsupportedAudioFileException) {
+        null
+    } catch (_: EOFException) {
+        null
+    }
+    synchronized(durationCache) {
+        durationCache[path] = DurationEntry(attrs.size(), attrs.lastModifiedTime(), attrs.fileKey(), millis)
+    }
+    return ValidatedAudio(path, requireNotNull(millis) { "Invalid WAV" })
+}
 
 internal class ReplyAudioCache(val directory: Path) {
-    fun read(profileId: String, attachmentId: String): Path? = try {
-        val path = audioPath(profileId, attachmentId)
-        readWav(path)
-        path
+    fun read(profileId: String, attachmentId: String): Path? = readAudio(profileId, attachmentId)?.path
+
+    fun readAudio(profileId: String, attachmentId: String): ValidatedAudio? = try {
+        validatedAudio(audioPath(profileId, attachmentId))
     } catch (_: Exception) {
         null
     }
@@ -48,6 +89,7 @@ internal class ReplyAudioCache(val directory: Path) {
         try {
             Files.write(temporary, copy)
             Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            synchronized(durationCache) { durationCache.remove(target) }
         } finally {
             Files.deleteIfExists(temporary)
         }
@@ -135,7 +177,13 @@ internal suspend fun playReplyAudio(path: Path, acquireClip: () -> Clip = { Audi
 }
 
 @Composable
-internal fun ReplyAudioPlayback(path: Path) {
+internal fun ReplyAudioPlayback(path: Path, durationMillis: Long? = null) {
+    var duration by remember(path, durationMillis) { mutableStateOf(durationMillis) }
+    LaunchedEffect(path, durationMillis) {
+        if (durationMillis == null) duration = withContext(Dispatchers.IO) {
+            try { validatedAudio(path).durationMillis } catch (_: Exception) { null }
+        }
+    }
     var playing by remember(path) { mutableStateOf(false) }
     var failure by remember(path) { mutableStateOf<String?>(null) }
     LaunchedEffect(path, playing) {
@@ -150,8 +198,11 @@ internal fun ReplyAudioPlayback(path: Path) {
             playing = false
         }
     }
-    TextButton(onClick = { failure = null; playing = !playing }) {
-        Text(if (playing) "停止播放" else "播放语音")
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        TextButton(onClick = { failure = null; playing = !playing }) {
+            Text(if (playing) "停止播放" else "播放语音")
+        }
+        duration?.let { Text(formatAudioDuration(it)) }
     }
     failure?.let { Text("语音播放失败：$it") }
 }

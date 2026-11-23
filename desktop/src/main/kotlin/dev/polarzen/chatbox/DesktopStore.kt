@@ -4,10 +4,13 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URI
 import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 
 internal data class Entry(
     val question: String,
@@ -20,6 +23,10 @@ internal data class Entry(
 )
 
 internal data class Chat(val session: String, val entries: List<Entry> = emptyList())
+
+internal data class SessionKey(val profileId: String, val sessionId: String)
+
+internal data class ComposerDraft(val text: String = "", val attachments: List<Path> = emptyList())
 
 internal data class Profile(
     val id: String,
@@ -40,6 +47,11 @@ internal data class SessionInfo(
 /** Durable local chat storage. Profile IDs, endpoint addresses, and server session IDs are distinct. */
 internal class DesktopStore(private val file: Path) {
     private var state: JSONObject
+    private val draftClock = AtomicLong()
+    private val appliedDraftRevisions = mutableMapOf<SessionKey, Long>()
+    val managedMediaDirectory: Path = file.toAbsolutePath().normalize().parent.resolve("composer-media")
+
+    fun nextDraftRevision(): Long = draftClock.incrementAndGet()
 
     init {
         state = if (!Files.exists(file)) {
@@ -274,7 +286,98 @@ internal class DesktopStore(private val file: Path) {
                 }
             }
         }
+        appliedDraftRevisions.remove(SessionKey(profileId, sessionId))
         return checkNotNull(selected)
+    }
+
+    @Synchronized
+    fun readDraft(key: SessionKey): ComposerDraft {
+        val profile = findProfile(state, key.profileId) ?: return ComposerDraft()
+        val draft = findSession(profile, key.sessionId)?.optJSONObject("draft") ?: return ComposerDraft()
+        val attachments = draft.getJSONArray("attachments")
+        return ComposerDraft(draft.getString("text"), (0 until attachments.length()).map { Path.of(attachments.getString(it)) })
+    }
+
+    @Synchronized
+    fun saveDraft(key: SessionKey, revision: Long, draft: ComposerDraft) {
+        if (revision <= (appliedDraftRevisions[key] ?: Long.MIN_VALUE)) return
+        val profile = findProfile(state, key.profileId) ?: return
+        if (findSession(profile, key.sessionId) == null) return
+        persist(requireAtomic = true) { copy ->
+            val session = checkNotNull(findSession(requireProfile(copy, key.profileId), key.sessionId))
+            if (draft.text.isEmpty() && draft.attachments.isEmpty()) {
+                session.remove("draft")
+            } else {
+                session.put("draft", JSONObject().put("text", draft.text)
+                    .put("attachments", JSONArray(draft.attachments.map(Path::toString))))
+            }
+        }
+        appliedDraftRevisions[key] = revision
+    }
+
+    @Synchronized
+    fun commitDraft(key: SessionKey, revision: Long, pendingChat: Chat) {
+        require(pendingChat.session == key.sessionId) { "消息与草稿来自不同会话" }
+        check(revision >= (appliedDraftRevisions[key] ?: Long.MIN_VALUE)) { "草稿已更新，请重新发送" }
+        persist(requireAtomic = true) { copy ->
+            val profile = requireProfile(copy, key.profileId)
+            require(!profile.optBoolean("offlineOnly")) { "Legacy offline profiles are read-only" }
+            val session = findSession(profile, key.sessionId) ?: error("Unknown session")
+            writeSessionContent(session, pendingChat)
+            session.remove("draft")
+        }
+        appliedDraftRevisions[key] = revision
+    }
+
+    /** Run once under the process lock at cold start, before any in-memory attachment or send exists. */
+    @Synchronized
+    fun cleanupUnreferencedManagedMedia() {
+        val directory = managedMediaDirectory
+        if (!Files.exists(directory, NOFOLLOW_LINKS)) return
+        for (ancestor in generateSequence(directory) { it.parent }) {
+            val attrs = Files.readAttributes(ancestor, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+            if (!attrs.isDirectory || attrs.isOther || attrs.isSymbolicLink) return
+        }
+        val candidates = Files.newDirectoryStream(directory).use { files ->
+            files.filter { path ->
+                MANAGED_MEDIA_NAME.matches(path.fileName.toString()) && Files.isRegularFile(path, NOFOLLOW_LINKS)
+            }.toMutableSet()
+        }
+        if (candidates.isEmpty()) return
+
+        fun keep(reference: String) {
+            if (candidates.isEmpty()) return
+            val path = try {
+                if (reference.startsWith("file:", ignoreCase = true)) Path.of(URI(reference)) else Path.of(reference)
+            } catch (_: IllegalArgumentException) {
+                return // Historical non-local reference.
+            } catch (_: java.net.URISyntaxException) {
+                return
+            }
+            candidates.remove(path.toAbsolutePath().normalize())
+            // A user can also select a path through a linked directory or an NTFS short name.
+            try {
+                candidates.remove(path.toRealPath())
+            } catch (_: java.nio.file.NoSuchFileException) {
+                // Moved external files are retained in the draft for the user to resolve.
+            }
+        }
+        val profiles = profileArray(state)
+        for (i in 0 until profiles.length()) {
+            val sessions = profiles.getJSONObject(i).getJSONArray("sessions")
+            for (j in 0 until sessions.length()) {
+                val session = sessions.getJSONObject(j)
+                val attachments = session.optJSONObject("draft")?.getJSONArray("attachments")
+                if (attachments != null) for (k in 0 until attachments.length()) keep(attachments.getString(k))
+                val entries = session.getJSONArray("entries")
+                for (k in 0 until entries.length()) {
+                    val entry = entries.getJSONObject(k)
+                    (entry.opt("attachmentReference") as? String)?.takeIf { it.isNotEmpty() }?.let(::keep)
+                    attachmentReferencesFrom(entry).forEach(::keep)
+                }
+            }
+        }
+        candidates.forEach { Files.deleteIfExists(it) }
     }
 
     @Synchronized
@@ -508,16 +611,16 @@ internal class DesktopStore(private val file: Path) {
         return IMAGE_EXTENSIONS.any { extension -> path.endsWith(extension) }
     }
 
-    private fun persist(change: (JSONObject) -> Unit) {
+    private fun persist(requireAtomic: Boolean = false, change: (JSONObject) -> Unit) {
         val copy = JSONObject(state.toString())
         change(copy)
         copy.put("schemaVersion", SCHEMA_VERSION).put("username", username)
         if (copy.similar(state)) return
-        writeAtomic(copy)
+        writeAtomic(copy, requireAtomic)
         state = copy
     }
 
-    private fun writeAtomic(contents: JSONObject) {
+    private fun writeAtomic(contents: JSONObject, requireAtomic: Boolean = false) {
         val dir = file.toAbsolutePath().parent
         Files.createDirectories(dir)
         val tmp = Files.createTempFile(dir, "history-", ".tmp")
@@ -525,7 +628,8 @@ internal class DesktopStore(private val file: Path) {
             Files.writeString(tmp, contents.toString())
             try {
                 Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+            } catch (e: java.nio.file.AtomicMoveNotSupportedException) {
+                if (requireAtomic) throw e
                 Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING)
             }
         } finally {
@@ -570,7 +674,9 @@ internal class DesktopStore(private val file: Path) {
                         copyReplyAttachments(row, it, answer)
                     })
             }
-            group.sessions += JSONObject().put("id", sessionId).put("entries", entries)
+            val session = JSONObject().put("id", sessionId).put("entries", entries)
+            source.optJSONObject("draft")?.let { session.put("draft", it) }
+            group.sessions += session
             if (addressKey == lastServer) {
                 group.lastSession = sessionId
                 activeGroup = group
@@ -739,6 +845,7 @@ internal class DesktopStore(private val file: Path) {
 
     companion object {
         private const val SCHEMA_VERSION = 2
+        private val MANAGED_MEDIA_NAME = Regex("""screenshot-[0-9]+\.png|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.wav|recording-[0-9]+\.part""")
         private const val SESSION_ORDER_VERSION = 1
         private const val MAX_TITLE_CODE_POINTS = 40
         private const val IMAGE_SESSION_TITLE = "图片会话"
