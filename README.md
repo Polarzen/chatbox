@@ -4,9 +4,11 @@ Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 
 
 ## Windows 下载
 
-Windows 0.1.10 安装包为 `Chatbox-0.1.10.msi`。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.10/Chatbox-0.1.10.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.10/SHA256SUMS.txt) · [v0.1.10 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.10)
+Windows 0.1.11 安装包为 `Chatbox-0.1.11.msi`。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.11/Chatbox-0.1.11.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.11/SHA256SUMS.txt) · [v0.1.11 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.11)
 
-将 MSI 和 `SHA256SUMS.txt` 下载到同一目录。在该目录打开 PowerShell，运行 `Get-FileHash .\Chatbox-0.1.10.msi -Algorithm SHA256`，确认输出的哈希值与 `SHA256SUMS.txt` 中该 MSI 对应的值一致。从 0.1.5 至 0.1.9 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。0.1.1 用户先阅读[旧卸载器升级说明](desktop/README.md#从-011-升级)。
+将 MSI 和 `SHA256SUMS.txt` 下载到同一目录。在该目录打开 PowerShell，运行 `Get-FileHash .\Chatbox-0.1.11.msi -Algorithm SHA256`，确认输出的哈希值与 `SHA256SUMS.txt` 中该 MSI 对应的值一致。从 0.1.5 至 0.1.10 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。0.1.1 用户先阅读[旧卸载器升级说明](desktop/README.md#从-011-升级)。
+
+0.1.11 修复了调整窗口大小或切换侧栏时顶栏可能导致应用崩溃的问题。
 
 ## Windows 0.1.10
 

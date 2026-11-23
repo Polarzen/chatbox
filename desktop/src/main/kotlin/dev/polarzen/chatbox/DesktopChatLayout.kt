@@ -42,7 +42,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -74,6 +73,7 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.platform.testTag
@@ -548,6 +548,47 @@ private fun SessionScrollArrow(
     }
 }
 
+@Composable
+private fun ConversationToolbar(
+    actions: @Composable () -> Unit,
+    title: @Composable RowScope.() -> Unit,
+) {
+    Layout(
+        modifier = Modifier.fillMaxWidth(),
+        content = {
+            Row(verticalAlignment = Alignment.CenterVertically, content = title)
+            Row(verticalAlignment = Alignment.CenterVertically) { actions() }
+        },
+    ) { (titleRow, actionsRow), constraints ->
+        val width = constraints.maxWidth
+        val compact = width.toDp() < 640.dp
+        val inset = (if (compact) 12.dp else 22.dp).roundToPx().coerceAtMost(width / 2)
+        val contentWidth = width - 2 * inset
+        val minLineHeight = (if (compact) 40.dp else 62.dp).roundToPx().coerceAtMost(constraints.maxHeight)
+        val childConstraints = constraints.copy(minWidth = 0, maxWidth = contentWidth, minHeight = 0)
+        val stackedHeightIsBounded = compact && constraints.hasBoundedHeight
+        val actionsHeightLimit = if (stackedHeightIsBounded) constraints.maxHeight - minLineHeight else constraints.maxHeight
+        val actionsPlaceable = actionsRow.measure(childConstraints.copy(maxHeight = actionsHeightLimit))
+        val titleWidth = if (compact) contentWidth else contentWidth - actionsPlaceable.width
+        val titleHeightLimit = if (stackedHeightIsBounded) constraints.maxHeight - actionsPlaceable.height else constraints.maxHeight
+        val titlePlaceable = titleRow.measure(
+            childConstraints.copy(minWidth = titleWidth, maxWidth = titleWidth, maxHeight = titleHeightLimit),
+        )
+        val contentHeight = if (compact) {
+            maxOf(minLineHeight, titlePlaceable.height) + actionsPlaceable.height
+        } else {
+            maxOf(minLineHeight, titlePlaceable.height, actionsPlaceable.height)
+        }
+        val height = contentHeight.coerceAtLeast(constraints.minHeight)
+        layout(width, height) {
+            val titleLineHeight = if (compact) height - actionsPlaceable.height else height
+            titlePlaceable.placeRelative(inset, (titleLineHeight - titlePlaceable.height) / 2)
+            val actionsY = if (compact) titleLineHeight else (height - actionsPlaceable.height) / 2
+            actionsPlaceable.placeRelative(width - inset - actionsPlaceable.width, actionsY)
+        }
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class, ExperimentalComposeUiApi::class)
 @Composable
 private fun ConversationPane(
@@ -581,8 +622,6 @@ private fun ConversationPane(
     modifier: Modifier = Modifier,
 ) {
     val selectedTitle = sessions.firstOrNull { it.selected }?.title?.ifBlank { "新会话" } ?: "新会话"
-    val currentTopActions by rememberUpdatedState(topActions)
-    val toolbarActions = remember { movableContentOf { currentTopActions() } }
     val isExternalDragOver = remember { mutableStateOf(false) }
     val addImagesState = rememberUpdatedState(onAddImages)
     val dragTarget = remember {
@@ -627,47 +666,33 @@ private fun ConversationPane(
             ),
     ) {
       Column(Modifier.fillMaxSize()) {
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val compact = maxWidth < 640.dp
-            Column {
-                Row(
-                    modifier = Modifier.fillMaxWidth().heightIn(min = if (compact) 40.dp else 62.dp)
-                        .padding(horizontal = if (compact) 12.dp else 22.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    TextButton(
-                        onClick = onToggleSidebar,
-                        modifier = Modifier.sizeIn(minWidth = 40.dp, minHeight = 40.dp)
-                            .semantics { contentDescription = if (sidebarOpen) "收起最近对话" else "打开最近对话" }
-                            .testTag("sidebar-toggle"),
-                        contentPadding = PaddingValues(0.dp),
-                    ) {
-                        Text(if (sidebarOpen) "‹" else "☰", color = desktopPalette.muted, fontSize = 19.sp)
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            selectedTitle,
-                            color = desktopPalette.ink,
-                            fontSize = 17.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    if (!narrow && !embeddedSidebar && !sidebarOpen) {
-                        TextButton(
-                            onClick = onNewSession,
-                            enabled = canCreate,
-                            modifier = Modifier.testTag("new-session-toolbar-button"),
-                        ) { Text("＋ 新会话", color = desktopPalette.accent, fontSize = 13.sp) }
-                    }
-                    if (!compact) toolbarActions()
-                }
-                if (compact) {
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.End,
-                        verticalAlignment = Alignment.CenterVertically) { toolbarActions() }
-                }
+        ConversationToolbar(actions = topActions) {
+            TextButton(
+                onClick = onToggleSidebar,
+                modifier = Modifier.sizeIn(minWidth = 40.dp, minHeight = 40.dp)
+                    .semantics { contentDescription = if (sidebarOpen) "收起最近对话" else "打开最近对话" }
+                    .testTag("sidebar-toggle"),
+                contentPadding = PaddingValues(0.dp),
+            ) {
+                Text(if (sidebarOpen) "‹" else "☰", color = desktopPalette.muted, fontSize = 19.sp)
+            }
+            Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    selectedTitle,
+                    color = desktopPalette.ink,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (!narrow && !embeddedSidebar && !sidebarOpen) {
+                TextButton(
+                    onClick = onNewSession,
+                    enabled = canCreate,
+                    modifier = Modifier.testTag("new-session-toolbar-button"),
+                ) { Text("＋ 新会话", color = desktopPalette.accent, fontSize = 13.sp) }
             }
         }
         Spacer(Modifier.fillMaxWidth().height(1.dp).background(desktopPalette.line))

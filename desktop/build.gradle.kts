@@ -26,7 +26,7 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation(compose.desktop.uiTestJUnit4)
 }
-val windowsPackageVersion = "0.1.10"
+val windowsPackageVersion = "0.1.11"
 compose.desktop {
     application {
         mainClass = "dev.polarzen.chatbox.DesktopMainKt"
