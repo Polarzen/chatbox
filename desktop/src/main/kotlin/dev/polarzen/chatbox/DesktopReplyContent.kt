@@ -22,6 +22,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.ImageBitmap
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +51,7 @@ internal fun DesktopReplyContent(
     onRetry: (ReplyAttachmentKey) -> Unit,
 ) {
     if (answer.isEmpty() && attachments.isEmpty()) return
+    val urlRanges = remember(answer) { chatUrlRanges(answer) }
     Column {
         var cursor = 0
         var textLabelShown = false
@@ -63,7 +65,7 @@ internal fun DesktopReplyContent(
                 val bodyOffset = cursor
                 val body = prefix + answer.substring(bodyOffset, offset)
                 key(profileId, sessionId, bodyOffset) {
-                    SelectableReplyText(body, bodyOffset, prefix.length)
+                    SelectableReplyText(body, bodyOffset, prefix.length, urlRanges)
                 }
                 textLabelShown = true
             }
@@ -84,10 +86,10 @@ internal fun DesktopReplyContent(
 }
 
 @Composable
-private fun SelectableReplyText(text: String, bodyOffset: Int, prefixLength: Int) {
+private fun SelectableReplyText(text: String, bodyOffset: Int, prefixLength: Int, urlRanges: List<TextRange>) {
     val parent = LocalSelectionRegistrar.current
     if (parent == null) {
-        SearchHitText(text, isAnswer = true, bodyOffset = bodyOffset, prefixLength = prefixLength)
+        SearchHitText(text, isAnswer = true, bodyOffset = bodyOffset, prefixLength = prefixLength, urlRanges = urlRanges)
         return
     }
     // Compose 1.7.3 calls onTextLayout immediately before notifying the registrar.
@@ -110,7 +112,7 @@ private fun SelectableReplyText(text: String, bodyOffset: Int, prefixLength: Int
     }
     CompositionLocalProvider(LocalSelectionRegistrar provides registrar) {
         SearchHitText(text, isAnswer = true, bodyOffset = bodyOffset, prefixLength = prefixLength,
-            onTextLayout = { registrar.recordLayout(it.layoutInput.text.text) })
+            urlRanges = urlRanges, onTextLayout = { registrar.recordLayout(it.layoutInput.text.text) })
     }
 }
 

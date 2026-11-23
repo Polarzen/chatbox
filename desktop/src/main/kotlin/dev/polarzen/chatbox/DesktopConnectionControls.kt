@@ -38,6 +38,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import java.awt.Desktop
@@ -415,6 +416,10 @@ private fun ConnectionSettingsDialog(
     var addressDraft by remember(connection.profileId, connection.address) { mutableStateOf(connection.address) }
     var localError by remember { mutableStateOf(false) }
     val selectedProfile = connection.profiles.firstOrNull { it.id == connection.profileId }
+    val addressCaption = MaterialTheme.typography.caption.copy(
+        color = desktopPalette.accent,
+        textDecoration = TextDecoration.Underline,
+    )
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -451,7 +456,7 @@ private fun ConnectionSettingsDialog(
                             )
                             Column {
                                 Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                if (profile.address.isNotBlank()) Text(profile.address, style = MaterialTheme.typography.caption,
+                                if (profile.address.isNotBlank()) Text(profile.address, style = addressCaption,
                                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
@@ -470,7 +475,7 @@ private fun ConnectionSettingsDialog(
                             )
                             Column {
                                 Text("AstrBot Launcher · ${instance.identity.take(8)}")
-                                Text(instance.url, style = MaterialTheme.typography.caption)
+                                Text(instance.url, style = addressCaption)
                             }
                         }
                     }

@@ -4,9 +4,15 @@ Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 
 
 ## Windows 下载
 
-Windows 0.1.9 安装包为 `Chatbox-0.1.9.msi`（55,517,184 字节）。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.9/Chatbox-0.1.9.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.9/SHA256SUMS.txt) · [v0.1.9 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.9)
+Windows 0.1.10 安装包为 `Chatbox-0.1.10.msi`。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.10/Chatbox-0.1.10.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.10/SHA256SUMS.txt) · [v0.1.10 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.10)
 
-在 PowerShell 中运行 `Get-FileHash .\Chatbox-0.1.9.msi -Algorithm SHA256`，确认结果与 `SHA256SUMS.txt` 中的 `69af357970b78ca85ad58b0195a05ae5770636c18f45f26b4204f6f4ebbcf2e9` 一致。从 0.1.5、0.1.6、0.1.7 或 0.1.8 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。0.1.1 用户先阅读[旧卸载器升级说明](desktop/README.md#从-011-升级)。
+将 MSI 和 `SHA256SUMS.txt` 下载到同一目录。在该目录打开 PowerShell，运行 `Get-FileHash .\Chatbox-0.1.10.msi -Algorithm SHA256`，确认输出的哈希值与 `SHA256SUMS.txt` 中该 MSI 对应的值一致。从 0.1.5 至 0.1.9 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。0.1.1 用户先阅读[旧卸载器升级说明](desktop/README.md#从-011-升级)。
+
+## Windows 0.1.10
+
+按 Ctrl+K 或点击顶栏放大镜「搜索聊天记录」，即可搜索当前服务档案中所有会话的标题、提问和回复。每个结果显示会话名称、来源和命中片段。点击标题结果打开会话，点击消息结果跳到对应轮次并短暂高亮匹配文字。有多个服务档案时，先切换到要查找的档案。
+
+顶栏图钉「窗口置顶」让 Chatbox 保持在普通窗口上方，同时可继续在其他窗口输入。再次点击「取消置顶」即可恢复普通窗口的前后顺序。在「窗口外观」中选择「浅色（Light）」或「深色（Dark）」，也可将整个窗口的不透明度调至 50% 至 100%。「恢复 100%」让窗口完全不透明，「恢复默认外观」同时恢复浅色、100% 不透明度并取消置顶。[0.1.10 验收记录](docs/WINDOWS_010_RELEASE_ACCEPTANCE.md)
 
 ## Windows 0.1.9
 

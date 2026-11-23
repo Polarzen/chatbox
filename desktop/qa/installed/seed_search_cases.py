@@ -3,6 +3,7 @@
 import argparse
 import json
 from pathlib import Path
+import re
 import shutil
 import uuid
 
@@ -21,7 +22,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("fixture", type=Path, help="fresh Prepare-Fixture run root")
     parser.add_argument("destination", type=Path, help="new private fixture directory")
+    parser.add_argument("--stream-id", default="combo010", help="fresh fixture stream gate prefix")
     args = parser.parse_args()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", args.stream_id):
+        parser.error("Stream ID must match the fixture server's 1–32 character run ID.")
     src, dst = args.fixture, args.destination
     history_path = Path("localappdata/Chatbox/history.json")
     data = json.loads((src / history_path).read_text(encoding="utf-8-sig"))
@@ -41,7 +45,8 @@ def main():
     twin_name = "Twin notebook"
     west = session(1, [turn("Identify TWIN-WEST in the question.", "West shelf, blue volume.")],
                    manualName=twin_name)
-    east = session(2, [turn("Where is the east volume?", "Find TWIN-EAST in the answer.")],
+    link = "https://example.org/fixture/amber-index"
+    east = session(2, [turn("Where is the east volume?", f"Find TWIN-EAST in the answer. Shelf index: {link}")],
                    manualName=twin_name)
     paragraphs = [f"Passage {i:03d}. " + "The sample notebook describes the long reading exercise. " * 9
                   for i in range(1, 91)]
@@ -68,6 +73,7 @@ def main():
             twin_name: [{"session": s["id"], "side": "TITLE"} for s in (west, east)],
             "TWIN-WEST": [{"session": west["id"], "side": "USER", "entry": 0}],
             "TWIN-EAST": [{"session": east["id"], "side": "ASSISTANT", "entry": 0}],
+            link: [{"session": east["id"], "side": "ASSISTANT", "entry": 0}],
             "WRAP-LANTERN": [{"session": wrapped["id"], "side": "ASSISTANT", "entry": 0,
                               "paragraph": 48}],
             "Legacy ledger": [{"session": wrapped["id"], "side": "TITLE"}],
@@ -85,8 +91,8 @@ def main():
             {"query": "Cobalt sample 40-075", "expected_A_hits": 1},
             {"query": "VOID-NO-MATCH", "expected_A_hits": 0},
         ],
-        "stream_prompt": "fixture:long-stream:combo010 fixture:two-text-batches",
-        "stream_gates": ["long-stream-combo010." + stage for stage in ("text", "text2", "image", "end")],
+        "stream_prompt": f"fixture:long-stream:{args.stream_id} fixture:two-text-batches",
+        "stream_gates": [f"long-stream-{args.stream_id}.{stage}" for stage in ("text", "text2", "image", "end")],
     }
     dst.mkdir(parents=True, exist_ok=False)
     shutil.copytree(src / "localappdata", dst / "localappdata")

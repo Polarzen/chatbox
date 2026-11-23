@@ -4,9 +4,9 @@ Windows 桌面版使用 AstrBot OpenAPI 收发文字和图片，也可播放服�
 
 ## 安装与构建
 
-Windows 0.1.9 安装包为 `Chatbox-0.1.9.msi`（55,517,184 字节）。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.9/Chatbox-0.1.9.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.9/SHA256SUMS.txt) · [v0.1.9 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.9)
+Windows 0.1.10 安装包为 `Chatbox-0.1.10.msi`。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.10/Chatbox-0.1.10.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.10/SHA256SUMS.txt) · [v0.1.10 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.10)
 
-在 PowerShell 中运行 `Get-FileHash .\Chatbox-0.1.9.msi -Algorithm SHA256`，确认结果与 `SHA256SUMS.txt` 中的 `69af357970b78ca85ad58b0195a05ae5770636c18f45f26b4204f6f4ebbcf2e9` 一致。从 0.1.5、0.1.6、0.1.7 或 0.1.8 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。安装完成后从开始菜单打开 Chatbox。0.1.1 用户先阅读[旧卸载器升级说明](#从-011-升级)。
+将 MSI 和 `SHA256SUMS.txt` 下载到同一目录。在该目录打开 PowerShell，运行 `Get-FileHash .\Chatbox-0.1.10.msi -Algorithm SHA256`，确认输出的哈希值与 `SHA256SUMS.txt` 中该 MSI 对应的值一致。从 0.1.5 至 0.1.9 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。安装完成后从开始菜单打开 Chatbox。0.1.1 用户先阅读[旧卸载器升级说明](#从-011-升级)。
 
 如需自行构建，在 Windows 安装 JDK 17 和 WiX Toolset 3.x，然后在仓库根目录运行下列命令。
 
@@ -37,6 +37,18 @@ Chatbox 按实例 UUID 找回上次选择的 Launcher 实例，确认当前回�
 
 如果上传因权限不足被拒绝，消息会显示缺少的权限，更新 Key 后可点「重试这条」。如果回复中断，服务端可能已经收件。退出时仍在等待回复的消息会在重开后标为「上次回复未确认」。Chatbox 保留记录，由用户确认是否重发。
 
+## 搜索本机聊天记录
+
+按 Ctrl+K，或点击顶栏放大镜「搜索聊天记录」，输入标题或正文中的词语。搜索覆盖当前服务档案下所有本机会话，英文匹配忽略大小写。要查另一个服务档案，打开「连接设置」，在「已保存的配置」中选中目标档案，再返回主窗口搜索。
+
+每处匹配单独列出，显示会话名称和高亮片段。来源标为「会话标题」，或注明轮次和发言方，例如「第 2 轮 · 助手」。点击标题结果即可打开对应会话。点击用户或助手消息的结果会跳到那处文字并短暂高亮，同一段中多次出现的词也可分别定位。点击「清空」可换关键词，按 Esc 或点击「取消」可返回聊天。
+
+## 窗口置顶与外观
+
+点击顶栏图钉「窗口置顶」，Chatbox 会保持在其他普通窗口上方。点击另一个窗口后，仍可在其中输入。再次点击图钉「取消置顶」，窗口恢复普通前后顺序。
+
+点击顶栏「窗口外观」，选择「浅色（Light）」或「深色（Dark）」。拖动「窗口不透明度」滑块可即时预览整个窗口的变化，范围为 50% 至 100%，松开即可保存。重启时会沿用本机保存的主题、不透明度和置顶状态。「恢复 100%」让窗口完全不透明。如需一起恢复浅色、100% 不透明度并取消置顶，点击「恢复默认外观」。
+
 ## 本机数据与密钥
 
 聊天记录保存在 `%LOCALAPPDATA%\Chatbox\history.json`，历史与备份均为明文。迁移旧版历史前，Chatbox 会在同一目录保留 `history.json.pre-migration.bak`。若同名备份已存在且内容不同，另存为 `history.json.<UUID>.pre-migration.bak`。
@@ -48,6 +60,8 @@ Chatbox 按实例 UUID 找回上次选择的 Launcher 实例，确认当前回�
 0.1.1 的卸载程序可能递归清理整个安装目录。从 0.1.2 起，新 MSI 已移除自身的递归清理动作，但升级仍会调用已安装的旧版卸载程序。检测到 0.1.1 的旧清理设置时，新安装包会阻止升级。若安装目录与源码、下载文件或其他数据共用，请保留现有安装，避免直接卸载旧版。管理员需先备份共享目录，将旧清理目标重定向到独立空目录，并核实它不是重解析点（包括符号链接和目录联接），再按安装器提示继续升级。
 
 ## 发布与验收记录
+
+0.1.10 的本机历史搜索、窗口置顶与外观设置见[0.1.10 验收记录](../docs/WINDOWS_010_RELEASE_ACCEPTANCE.md)。
 
 0.1.9 的长回复跟随与会话重命名验收见[0.1.9 验收记录](../docs/WINDOWS_019_RELEASE_ACCEPTANCE.md)。0.1.8 增加了 WAV 语音播放和消息正文复制。[0.1.8 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.8)
 
