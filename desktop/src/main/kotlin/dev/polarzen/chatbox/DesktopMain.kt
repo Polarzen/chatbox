@@ -501,6 +501,7 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
     MaterialTheme {
         Surface(Modifier.fillMaxSize()) {
             DesktopChatLayout(
+                profileId = profileId,
                 sessions = sessions,
                 chat = chat,
                 onSelectSession = { sessionId ->
@@ -538,8 +539,13 @@ internal fun DesktopScreen(store: DesktopStore, keys: NamedKeys, replyImageCache
                                 failedProgressByEntry.keys.removeIf { it.key == key }
                                 sessionsRevision.intValue++
                             }
-                            .onFailure { notices[currentKey] = "删除会话失败：${safeDeleteFailureMessage(it)}" }
+                            .onFailure { notices[currentKey] = "删除会话失败：${safeHistoryFailureMessage(it, "删除")}" }
                     }
+                },
+                onRenameSession = { sessionId, name ->
+                    runCatching { store.renameSession(profileId, sessionId, name) }
+                        .onSuccess { sessionsRevision.intValue++ }
+                        .exceptionOrNull()?.let { safeHistoryFailureMessage(it, "写入") }
                 },
                 onNewSession = {
                     if (canCreate) {
@@ -710,14 +716,15 @@ private fun progressStage(event: AstrBotTransportEvent): ProgressStage = when (e
     AstrBotTransportEvent.Completed -> ProgressStage("整理回复", "整理回复失败")
 }
 
-private fun safeDeleteFailureMessage(error: Throwable): String = when (error) {
+private fun safeHistoryFailureMessage(error: Throwable, operation: String): String = when (error) {
     is AccessDeniedException -> "本地历史文件访问被拒绝（AccessDeniedException）。"
+    is SecurityException -> "没有权限访问本地历史文件。"
     is FileSystemException -> "本地历史文件操作失败（FileSystemException）。"
     is IOException -> "本地历史文件读写失败（${error.javaClass.simpleName}）。"
     else -> when (error.message) {
         "Unknown session" -> "所选会话已不存在。"
         "Unknown profile" -> "所选服务档案已不存在。"
-        else -> "删除失败（${error.javaClass.simpleName}）。"
+        else -> "${operation}失败（${error.javaClass.simpleName}）。"
     }
 }
 

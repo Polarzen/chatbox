@@ -32,6 +32,7 @@ import androidx.compose.material.DropdownMenu
 import androidx.compose.material.DropdownMenuItem
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.OutlinedButton
+import androidx.compose.material.OutlinedTextField
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
@@ -52,6 +53,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
@@ -75,6 +78,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -142,6 +146,8 @@ internal fun DesktopChatLayout(
     onDeleteSession: (String) -> Unit = {},
     onMessageRendered: ((String, Int) -> Unit)? = null,
     progress: EntryProgress? = null,
+    profileId: String = "",
+    onRenameSession: (String, String?) -> String? = { _, _ -> "当前无法修改会话名称。" },
 ) {
     BoxWithConstraints(
         modifier = Modifier.fillMaxSize().background(ChatCanvas).testTag("chat-root"),
@@ -161,11 +167,13 @@ internal fun DesktopChatLayout(
                     onNewSession = onNewSession,
                     onSelectSession = onSelectSession,
                     onDeleteSession = onDeleteSession,
+                    onRenameSession = onRenameSession,
                     onDismiss = {},
                     modifier = Modifier.width(232.dp).fillMaxHeight(),
                 )
             }
             ConversationPane(
+                profileId = profileId,
                 sessions = sessions,
                 chat = chat,
                 narrow = narrow,
@@ -207,6 +215,7 @@ internal fun DesktopChatLayout(
                 onNewSession = onNewSession,
                 onSelectSession = onSelectSession,
                 onDeleteSession = onDeleteSession,
+                onRenameSession = onRenameSession,
                 onDismiss = { sidebarOpen = false },
                 modifier = Modifier.align(Alignment.CenterStart)
                     .widthIn(max = 280.dp)
@@ -225,6 +234,7 @@ private fun SessionSidebar(
     onNewSession: () -> Unit,
     onSelectSession: (String) -> Unit,
     onDeleteSession: (String) -> Unit,
+    onRenameSession: (String, String?) -> String?,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
     elevated: Boolean = false,
@@ -232,6 +242,7 @@ private fun SessionSidebar(
     val sessionListState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     var pendingDeletion by remember { mutableStateOf<SessionInfo?>(null) }
+    var pendingRename by remember { mutableStateOf<SessionInfo?>(null) }
     Surface(
         modifier = modifier,
         color = ChatPanel,
@@ -310,6 +321,7 @@ private fun SessionSidebar(
                                         color = if (selected) ChatPurple else ChatInk,
                                         fontSize = 13.sp,
                                         maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
                                     )
                                     if (session.entryCount > 0) {
                                         Spacer(Modifier.height(3.dp))
@@ -328,6 +340,13 @@ private fun SessionSidebar(
                                         DropdownMenuItem(
                                             onClick = {
                                                 menuExpanded = false
+                                                pendingRename = session
+                                            },
+                                            modifier = Modifier.testTag("rename-session-${session.id}"),
+                                        ) { Text("重命名") }
+                                        DropdownMenuItem(
+                                            onClick = {
+                                                menuExpanded = false
                                                 pendingDeletion = session
                                             },
                                             modifier = Modifier.testTag("delete-session-${session.id}"),
@@ -343,6 +362,13 @@ private fun SessionSidebar(
                 }
             }
         }
+    }
+    pendingRename?.let { session ->
+        RenameSessionDialog(
+            session = session,
+            onSave = { name -> onRenameSession(session.id, name) },
+            onDismiss = { pendingRename = null },
+        )
     }
     val deleting = pendingDeletion
     if (deleting != null) {
@@ -367,6 +393,66 @@ private fun SessionSidebar(
             },
         )
     }
+}
+
+@Composable
+private fun RenameSessionDialog(session: SessionInfo, onSave: (String?) -> String?, onDismiss: () -> Unit) {
+    var name by remember(session.id) {
+        val title = session.title.ifBlank { "新会话" }
+        mutableStateOf(TextFieldValue(title, TextRange(0, title.length)))
+    }
+    var error by remember { mutableStateOf<String?>(null) }
+    val fieldFocus = remember { FocusRequester() }
+    fun save(value: String?) {
+        if (value != null && value.isBlank()) {
+            error = "请输入会话名称。"
+        } else {
+            val failure = onSave(value)
+            if (failure == null) {
+                onDismiss()
+                return
+            }
+            error = if (value == null) "恢复默认名称失败：$failure" else "保存会话名称失败：$failure"
+        }
+        fieldFocus.requestFocus()
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("重命名会话") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it; error = null },
+                    singleLine = true,
+                    isError = error != null,
+                    label = { Text("会话名称") },
+                    modifier = Modifier.fillMaxWidth().focusRequester(fieldFocus).testTag("rename-session-name"),
+                )
+                error?.let { Text(it, color = MaterialTheme.colors.error, modifier = Modifier.testTag("rename-session-error")) }
+                if (session.manualName != null) {
+                    TextButton(onClick = { save(null) }, modifier = Modifier.testTag("restore-session-name")) {
+                        Text("恢复默认名称")
+                    }
+                }
+                LaunchedEffect(session.id) { fieldFocus.requestFocus() }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { save(name.text.trim()) }, modifier = Modifier.testTag("confirm-rename-session")) {
+                Text("保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, modifier = Modifier.testTag("cancel-rename-session")) { Text("取消") }
+        },
+        modifier = Modifier.testTag("rename-session-dialog").onPreviewKeyEvent { event ->
+            if (event.key == Key.Escape && event.type == KeyEventType.KeyDown) {
+                onDismiss()
+                true
+            } else false
+        },
+    )
 }
 
 @Composable
@@ -466,6 +552,7 @@ private fun SessionScrollArrow(
 @OptIn(ExperimentalFoundationApi::class, ExperimentalComposeUiApi::class)
 @Composable
 private fun ConversationPane(
+    profileId: String,
     sessions: List<SessionInfo>,
     chat: Chat,
     narrow: Boolean,
@@ -573,24 +660,11 @@ private fun ConversationPane(
         }
         Spacer(Modifier.fillMaxWidth().height(1.dp).background(ChatLine))
 
-        val listState = rememberLazyListState()
-        val lastEntry = chat.entries.lastOrNull()
-        LaunchedEffect(chat.session, chat.entries.size) {
-            if (chat.entries.isEmpty()) listState.scrollToItem(0)
-            else listState.scrollToItem(chat.entries.lastIndex, scrollOffset = Int.MAX_VALUE)
-        }
-        LaunchedEffect(chat.session, lastEntry?.answer, lastEntry?.replyAttachments, lastEntry?.status) {
-            val layout = listState.layoutInfo
-            val lastVisibleIndex = layout.visibleItemsInfo.lastOrNull()?.index
-            if (chat.entries.isNotEmpty() && lastVisibleIndex == layout.totalItemsCount - 1) {
-                listState.scrollToItem(chat.entries.lastIndex, scrollOffset = Int.MAX_VALUE)
-            }
-        }
-        LazyColumn(
-            modifier = Modifier.weight(1f).fillMaxWidth().testTag("message-region"),
-            state = listState,
-            contentPadding = PaddingValues(horizontal = 22.dp, vertical = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+        MessageViewport(
+            profileId = profileId,
+            session = chat.session,
+            entryCount = chat.entries.size,
+            modifier = Modifier.weight(1f).fillMaxWidth(),
         ) {
             if (chat.entries.isEmpty()) {
                 item {

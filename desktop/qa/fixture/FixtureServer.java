@@ -17,6 +17,7 @@ import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -35,6 +36,7 @@ public final class FixtureServer {
     private static final int PORT_B = 18444;
     private static final Pattern SESSION = Pattern.compile("\"session_id\"\\s*:\\s*\"([0-9a-fA-F-]{36})\"");
     private static final Pattern USERNAME = Pattern.compile("[?&]username=([^&]*)");
+    private static final Pattern LONG_STREAM = Pattern.compile("fixture:long-stream:([A-Za-z0-9_-]{1,32})(?![A-Za-z0-9_-])");
     private static final String PNG_ID_A = "reply-image-a";
     private static final String PNG_ID_B = "reply-image-b";
 
@@ -194,6 +196,11 @@ public final class FixtureServer {
             output.flush();
             return 200;
         }
+        Matcher longStream = LONG_STREAM.matcher(request);
+        if (longStream.find()) {
+            serveLongStream(profile, output, longStream.group(1), request.contains("fixture:two-text-batches"));
+            return 200;
+        }
         if (request.contains("fixture:voice-reply")) {
             String id = "reply-voice-" + profile.toLowerCase(java.util.Locale.ROOT);
             writeEvent(output, "{\"type\":\"plain\",\"data\":\"语音前文\"}");
@@ -220,12 +227,57 @@ public final class FixtureServer {
         if (uploadedImage) {
             writeEvent(output, "{\"type\":\"plain\",\"data\":\" 图片已接收。\"}");
         }
-        String attachment = profile.equals("A") ? PNG_ID_A : PNG_ID_B;
-        writeEvent(output, "{\"type\":\"image\",\"data\":\"[IMAGE]fixture.png\"}");
-        writeEvent(output, "{\"type\":\"attachment_saved\",\"data\":{\"id\":\"" + attachment + "\",\"type\":\"image\"}}");
+        writeReplyImage(profile, output);
         writeEvent(output, "{\"type\":\"end\"}");
         output.flush();
         return 200;
+    }
+
+    private void serveLongStream(String profile, OutputStream output, String runId, boolean twoTextBatches) throws IOException {
+        writeParagraphs(output, 1, 90);
+        if (!awaitStage(output, runId, "text")) return;
+        if (twoTextBatches) {
+            writeParagraphs(output, 91, 99);
+            if (!awaitStage(output, runId, "text2")) return;
+            writeParagraphs(output, 100, 108);
+        } else {
+            writeParagraphs(output, 91, 108);
+        }
+        if (!awaitStage(output, runId, "image")) return;
+        writeReplyImage(profile, output);
+        output.flush();
+        if (!awaitStage(output, runId, "end")) return;
+        writeEvent(output, "{\"type\":\"end\"}");
+        output.flush();
+    }
+
+    private static void writeParagraphs(OutputStream output, int first, int last) throws IOException {
+        for (int number = first; number <= last; number++) {
+            String label = String.format(java.util.Locale.ROOT, "Paragraph %03d", number);
+            writeEvent(output, "{\"type\":\"plain\",\"streaming\":true,\"data\":\"" +
+                    label + " | The sample transcript contains numbered observations for reading-position checks.\\n\\n\"}");
+        }
+        output.flush();
+    }
+
+    private boolean awaitStage(OutputStream output, String runId, String stage) throws IOException {
+        Path gate = controlsFile.resolveSibling("long-stream-" + runId + "." + stage);
+        int polls = 0;
+        while (!Files.exists(gate)) {
+            if (!pause(100)) return false;
+            if (++polls % 50 == 0) {
+                // Keep manual exercises alive and detect when the client has disconnected.
+                output.write(": waiting\n\n".getBytes(StandardCharsets.UTF_8));
+                output.flush();
+            }
+        }
+        return true;
+    }
+
+    private static void writeReplyImage(String profile, OutputStream output) throws IOException {
+        String attachment = profile.equals("A") ? PNG_ID_A : PNG_ID_B;
+        writeEvent(output, "{\"type\":\"image\",\"data\":\"[IMAGE]fixture.png\"}");
+        writeEvent(output, "{\"type\":\"attachment_saved\",\"data\":{\"id\":\"" + attachment + "\",\"type\":\"image\"}}");
     }
 
     private int serveUpload(String profile, HttpExchange exchange) throws IOException {

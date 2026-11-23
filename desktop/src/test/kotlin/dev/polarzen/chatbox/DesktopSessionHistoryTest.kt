@@ -82,6 +82,55 @@ class DesktopSessionHistoryTest {
         }
     }
 
+    @Test fun renamingOnlyUpdatesTheTargetNameAndResetRestoresItsOriginalTitle() {
+        val temp = Files.createTempDirectory("chatbox-session-rename-")
+        try {
+            val file = temp.resolve("history.json")
+            val store = DesktopStore(file)
+            val profile = store.ensureProfile("profile-a", "https://first.example.invalid")
+            val id = profile.currentSession
+            store.saveSessionContent(profile.id, Chat(id, listOf(Entry("question", "answer", "已完成"))))
+            val sibling = store.createSession(profile.id)
+            store.ensureProfile("profile-b", "https://second.example.invalid")
+            store.saveProfile("profile-b", Chat(id, listOf(Entry("other profile", "", "已完成"))))
+
+            val original = JSONObject(Files.readString(file))
+            val target = original.getJSONArray("profiles").getJSONObject(0).getJSONArray("sessions").getJSONObject(1)
+            target.put("title", "Legacy title").put("createdAt", 11).put("lastUsedAt", 22)
+            target.getJSONArray("entries").getJSONObject(0).put("extraMetadata", "preserved")
+            Files.writeString(file, original.toString())
+
+            val imported = DesktopStore(file)
+            val name = "我的 🧪 " + "session ".repeat(7).trimEnd()
+            imported.renameSession(profile.id, id, "  $name  ")
+            val renamed = imported.sessions(profile.id).single { it.id == id }
+            assertEquals(name, renamed.title)
+            assertEquals(name, renamed.manualName)
+            assertEquals(renamed, DesktopStore(file).sessions(profile.id).single { it.id == id })
+            assertEquals("other profile", imported.sessions("profile-b").single { it.id == id }.title)
+            assertThrows(IllegalArgumentException::class.java) { imported.renameSession(profile.id, id, " \t ") }
+            assertEquals(name, imported.sessions(profile.id).single { it.id == id }.title)
+
+            imported.renameSession(profile.id, sibling.session, name)
+            assertEquals(listOf(name, name), imported.sessions(profile.id).map { it.title })
+            imported.renameSession(profile.id, id, null)
+            imported.renameSession(profile.id, sibling.session, null)
+            assertTrue("Rename and reset must preserve the full original history", original.similar(JSONObject(Files.readString(file))))
+            val restored = DesktopStore(file).sessions(profile.id).single { it.id == id }
+            assertEquals("Legacy title", restored.title)
+            assertEquals(null, restored.manualName)
+            assertEquals("新会话", imported.sessions(profile.id).single { it.id == sibling.session }.title)
+
+            imported.renameSession(profile.id, sibling.session, name)
+            imported.saveSessionContent(profile.id, sibling.copy(entries = listOf(Entry("New question", "", "已完成"))))
+            assertEquals(name, imported.sessions(profile.id).single { it.id == sibling.session }.title)
+            imported.renameSession(profile.id, sibling.session, null)
+            assertEquals("New question", DesktopStore(file).sessions(profile.id).single { it.id == sibling.session }.title)
+        } finally {
+            temp.toFile().deleteRecursively()
+        }
+    }
+
     @Test fun targetedLateReplyPreservesSelectionContentAndSessionMetadataAcrossRestart() {
         val temp = Files.createTempDirectory("chatbox-targeted-session-")
         try {

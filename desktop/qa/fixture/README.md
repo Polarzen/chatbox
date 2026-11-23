@@ -57,6 +57,24 @@ Return to normal acceptance behavior with the same command and -Reject $false. T
 
 ## Run the desktop app
 
+### Exercise reading position during a streamed reply
+
+Send `fixture:long-stream:run1` in a synthetic conversation. The fixture streams paragraphs 001–090 through the ordinary AstrBot chat endpoint, then waits. Scroll up until you can read a paragraph number near the top of the viewport. Record that number and its position before advancing each stage.
+
+In PowerShell, set `$runRoot` to the path printed by the preparation script. Run each line separately and inspect the viewport after each one.
+
+    New-Item -ItemType File -Path (Join-Path $runRoot 'private\long-stream-run1.text')
+    New-Item -ItemType File -Path (Join-Path $runRoot 'private\long-stream-run1.image')
+    New-Item -ItemType File -Path (Join-Path $runRoot 'private\long-stream-run1.end')
+
+The text stage appends paragraphs 091–108. The image stage sends the image and its attachment ID. The end stage completes the reply. While waiting, the fixture sends SSE comments every five seconds to keep the connection alive.
+
+To release two separate text batches, send `fixture:long-stream:run2 fixture:two-text-batches`. Create `private\long-stream-run2.text` for paragraphs 091–099, then `private\long-stream-run2.text2` for paragraphs 100–108. Continue with the `.image` and `.end` files for `run2`.
+
+For another run, use a fresh ID in both the prompt and filenames. IDs accept 1–32 ASCII letters, digits, underscores or hyphens. To exercise follow resumption, scroll back to the bottom before advancing a stage. To exercise session switching, select another conversation before advancing the original stream.
+
+### Launch against the isolated fixture
+
 The launch script directs Chatbox to the isolated run's local app data and passes the Java truststore only to that process:
 
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\desktop\qa\fixture\Launch-Fixture-App.ps1 -RunRoot 'D:\Chatbox验收 V1\ui-redesign\chatbox-fixture\run-...'
