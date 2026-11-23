@@ -26,7 +26,23 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation(compose.desktop.uiTestJUnit4)
 }
-val windowsPackageVersion = "0.1.13"
+if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
+    val nativeDir = layout.buildDirectory.dir("native/reply-toast")
+    val toastDll = nativeDir.map { it.file("chatbox_toast.dll") }
+    val nativeSource = layout.projectDirectory.dir("native")
+    val buildReplyToast by tasks.registering(Exec::class) {
+        inputs.files(nativeSource.file("reply-toast.cpp"), nativeSource.file("build-toast.cmd"))
+        outputs.file(toastDll)
+        workingDir(nativeDir.get().asFile)
+        doFirst { workingDir.mkdirs() }
+        commandLine("cmd.exe", "/d", "/c", "call", nativeSource.file("build-toast.cmd").asFile.absolutePath)
+    }
+    tasks.processResources {
+        dependsOn(buildReplyToast)
+        from(toastDll) { into("win32-x86-64") }
+    }
+}
+val windowsPackageVersion = "0.1.14"
 compose.desktop {
     application {
         mainClass = "dev.polarzen.chatbox.DesktopMainKt"

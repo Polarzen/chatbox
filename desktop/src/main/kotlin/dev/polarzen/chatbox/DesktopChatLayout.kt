@@ -158,13 +158,15 @@ internal fun DesktopChatLayout(
     onCancelRecording: () -> Unit = {},
     onReplaceMissingAttachment: ((Path) -> Unit)? = null,
     composerCommitInProgress: Boolean = false,
+    composerFocusSerial: Long = 0L,
+    replyNavigation: ReplyTurnNavigation? = null,
 ) {
     BoxWithConstraints(
         modifier = Modifier.fillMaxSize().background(desktopPalette.canvas).testTag("chat-root"),
     ) {
         val narrow = maxWidth < 790.dp
         var sidebarOpen by remember { mutableStateOf(!narrow) }
-        LaunchedEffect(narrow, searchSelectionSerial) {
+        LaunchedEffect(narrow, searchSelectionSerial, composerFocusSerial, replyNavigation?.serial) {
             if (narrow) sidebarOpen = false
         }
         val embeddedSidebar = sidebarOpen && !narrow
@@ -185,6 +187,8 @@ internal fun DesktopChatLayout(
             ConversationPane(
                 profileId = profileId,
                 navigation = searchNavigation,
+                replyNavigation = replyNavigation,
+                composerFocusSerial = composerFocusSerial,
                 sessions = sessions,
                 chat = chat,
                 narrow = narrow,
@@ -382,6 +386,7 @@ private fun SessionSidebar(
             }
         }
     }
+    DesktopModalGuard(pendingRename != null || pendingDeletion != null)
     pendingRename?.let { session ->
         RenameSessionDialog(
             session = session,
@@ -663,6 +668,8 @@ private fun ConversationToolbar(
 private fun ConversationPane(
     profileId: String,
     navigation: SearchHitNavigation?,
+    replyNavigation: ReplyTurnNavigation?,
+    composerFocusSerial: Long,
     sessions: List<SessionInfo>,
     chat: Chat,
     narrow: Boolean,
@@ -761,6 +768,7 @@ private fun ConversationPane(
             session = chat.session,
             entryCount = chat.entries.size,
             navigation = navigation,
+            replyNavigation = replyNavigation,
             modifier = Modifier.weight(1f).fillMaxWidth(),
         ) {
             if (chat.entries.isEmpty()) {
@@ -838,7 +846,7 @@ private fun ConversationPane(
                         LaunchedEffect(renderedState.value) {
                             if (renderedState.value) renderCallback?.invoke(chat.session, index)
                         }
-                        BoxWithConstraints(Modifier.fillMaxWidth()) {
+                        BoxWithConstraints(Modifier.fillMaxWidth().replyTurnAnchor(index)) {
                             Surface(
                                 modifier = Modifier.align(Alignment.CenterStart)
                                     .widthIn(max = minOf(760.dp, maxWidth * .86f))
@@ -937,6 +945,7 @@ private fun ConversationPane(
             Text(it, color = MaterialTheme.colors.error, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 22.dp, vertical = 2.dp))
         }
         Composer(
+            composerFocusSerial = composerFocusSerial,
             draft = draft,
             onDraft = onDraft,
             onPasteAttachment = onPasteAttachment,
@@ -1062,7 +1071,12 @@ internal fun Composer(
     onCancelRecording: () -> Unit = {},
     onReplaceMissingAttachment: ((Path) -> Unit)? = null,
     composerCommitInProgress: Boolean = false,
+    composerFocusSerial: Long = 0L,
 ) {
+    val fieldFocus = remember { FocusRequester() }
+    LaunchedEffect(composerFocusSerial) {
+        if (composerFocusSerial > 0L) fieldFocus.requestFocus()
+    }
     Surface(
         modifier = modifier.testTag("composer"),
         color = desktopPalette.panel,
@@ -1127,6 +1141,7 @@ internal fun Composer(
                     onValueChange = { if (!composerCommitInProgress) onDraft(it) },
                     modifier = Modifier.weight(1f).heightIn(min = 39.dp, max = 112.dp)
                         .padding(vertical = 9.dp)
+                        .focusRequester(fieldFocus)
                         .onPreviewKeyEvent { event ->
                             if (event.type == KeyEventType.KeyDown && event.key == Key.V && event.isCtrlPressed &&
                                 !event.isShiftPressed && !event.isAltPressed && !event.isMetaPressed

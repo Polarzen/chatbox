@@ -44,6 +44,7 @@ internal class DesktopConnection internal constructor(
     val keyErrors: Map<String, String>,
     val activeLabel: String?,
     private val selectProfileAction: (String, String) -> Unit,
+    private val adoptSelectedProfileAction: (Profile) -> Unit,
     private val useAddressAction: (String) -> Unit,
     private val verifyAction: () -> Unit,
     private val selectKeyAction: (String) -> Unit,
@@ -54,6 +55,8 @@ internal class DesktopConnection internal constructor(
     private val invalidateAction: (DesktopSendTarget) -> Unit,
 ) {
     fun selectProfile(id: String, address: String) = selectProfileAction(id, address)
+    /** Call on the UI thread inside the same synchronized(store) block as selectReplyIfPresent. */
+    fun adoptSelectedProfileForReply(profile: Profile) = adoptSelectedProfileAction(profile)
     fun useAddress(address: String) = useAddressAction(address)
     fun verify() = verifyAction()
     fun selectKey(id: String) = selectKeyAction(id)
@@ -146,6 +149,7 @@ internal fun rememberDesktopConnection(
     var keyErrors by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var pendingLegacySession by remember { mutableStateOf<String?>(null) }
     var autoRejectedFor by remember { mutableStateOf<String?>(null) }
+    var viewingLocalHistory by remember { mutableStateOf(false) }
     var discoveryRevision by remember { mutableLongStateOf(0L) }
 
     val requestGate = remember { DesktopConnectionRequestGate() }
@@ -213,6 +217,7 @@ internal fun rememberDesktopConnection(
     }
 
     fun selectProfile(id: String, requestedAddress: String) {
+        viewingLocalHistory = false
         val oldProfile = store.profile(profileId)
         pendingLegacySession = if (oldProfile?.offlineOnly == true && id != profileId) oldProfile.currentSession else null
         val cleanAddress = runCatching { canonicalConnectionAddress(requestedAddress) }.getOrDefault(requestedAddress)
@@ -228,11 +233,13 @@ internal fun rememberDesktopConnection(
             val selected = storeMutex.withLock {
                 withContext(Dispatchers.IO) {
                     runCatching {
-                        if (requestGate.currentGeneration() != generation) kotlin.error("stale")
-                        if (store.profile(id) == null) store.ensureProfile(id, cleanAddress)
-                        store.selectProfile(id)
-                        store.readProfile(id)
-                        store.profiles
+                        synchronized(store) {
+                            if (requestGate.currentGeneration() != generation) kotlin.error("stale")
+                            if (store.profile(id) == null) store.ensureProfile(id, cleanAddress)
+                            store.selectProfile(id)
+                            store.readProfile(id)
+                            store.profiles
+                        }
                     }
                 }
             }
@@ -240,6 +247,32 @@ internal fun rememberDesktopConnection(
             selected.fold({ profiles = it }, { if (it.message != "stale") error = "无法切换本地聊天档案。" })
         }
         refreshKeys(id, generation)
+    }
+
+    fun adoptSelectedProfileForReply(selected: Profile) {
+        val profileChanged = profileId != selected.id
+        val changed = profileChanged || address != selected.address
+        val wasVerifying = verifyingRequest != 0L
+        val generation = nextRequest(ConnectionSelection(selected.id, selected.address, null))
+        pendingLegacySession = null
+        if (changed || wasVerifying) {
+            viewingLocalHistory = true
+            pendingKeyId = null
+            error = null
+        }
+        if (changed) {
+            verified = null
+            profileId = selected.id
+            address = selected.address
+            keyList = KeyList(emptyList(), null)
+            keyErrors = emptyMap()
+            autoRejectedFor = null
+        }
+        if (!profileChanged && keyList.keys.isEmpty()) {
+            // An initial key-list read may have been superseded by the navigation.
+            refreshKeys(selected.id, generation)
+        }
+        profiles = store.profiles
     }
 
     fun useAddress(input: String) {
@@ -257,6 +290,7 @@ internal fun rememberDesktopConnection(
     }
 
     fun verifyCandidate(candidateId: String?, automatic: Boolean) {
+        if (!automatic) viewingLocalHistory = false
         val profileAtStart = profileId
         val addressAtStart = address
         if (profileAtStart.isBlank()) {
@@ -315,24 +349,31 @@ internal fun rememberDesktopConnection(
                                 check(isCurrent(generation, selection)) { "stale" }
                                 val latest = keys.list(profileAtStart)
                                 check(latest.keys.any { it.id == candidateId }) { "key-removed" }
-                                if (store.profile(profileAtStart) == null) store.ensureProfile(profileAtStart, probe.binding.address)
+                                synchronized(store) {
+                                    check(isCurrent(generation, selection)) { "stale" }
+                                    if (store.profile(profileAtStart) == null) store.ensureProfile(profileAtStart, probe.binding.address)
+                                }
                                 latest
                             }
                             val adopt: suspend () -> Set<String> = {
                                 withContext(Dispatchers.IO) {
-                                    check(isCurrent(generation, selection)) { "stale" }
-                                    store.adoptVerifiedSessions(profileAtStart, probe.binding.address, probe.sessions)
+                                    synchronized(store) {
+                                        check(isCurrent(generation, selection)) { "stale" }
+                                        store.adoptVerifiedSessions(profileAtStart, probe.binding.address, probe.sessions)
+                                    }
                                 }
                             }
                             val offlineIds = profiles.filter { it.offlineOnly }.map { it.id }.toSet()
                             val adoptedSessions = if (offlineIds.isEmpty() || probe.sessions.isEmpty()) adopt()
                                 else withLegacyDraftsSaved(offlineIds, probe.sessions, adopt)
                             withContext(Dispatchers.IO) {
-                                check(isCurrent(generation, selection)) { "stale" }
-                                legacySessionAtStart?.takeIf { it in adoptedSessions }?.let { legacySession ->
-                                    runCatching { store.selectSession(profileAtStart, legacySession) }
+                                synchronized(store) {
+                                    check(isCurrent(generation, selection)) { "stale" }
+                                    legacySessionAtStart?.takeIf { it in adoptedSessions }?.let { legacySession ->
+                                        runCatching { store.selectSession(profileAtStart, legacySession) }
+                                    }
+                                    VerificationCommit(probe.binding, latestKeys, store.profiles)
                                 }
-                                VerificationCommit(probe.binding, latestKeys, store.profiles)
                             }
                         }
                     }
@@ -510,7 +551,8 @@ internal fun rememberDesktopConnection(
         }
     }
 
-    LaunchedEffect(profileId, address, instances) {
+    LaunchedEffect(profileId, address, instances, viewingLocalHistory) {
+        if (viewingLocalHistory) return@LaunchedEffect
         if (profileId.startsWith("launcher:")) {
             val selectedProfileId = profileId
             val identity = selectedProfileId.removePrefix("launcher:")
@@ -526,10 +568,12 @@ internal fun rememberDesktopConnection(
                     val updated = storeMutex.withLock {
                         withContext(Dispatchers.IO) {
                             runCatching {
-                                if (requestGate.currentGeneration() == generation) {
-                                    store.updateProfileAddress(selectedProfileId, current.url)
+                                synchronized(store) {
+                                    if (requestGate.currentGeneration() == generation) {
+                                        store.updateProfileAddress(selectedProfileId, current.url)
+                                    }
+                                    store.profiles
                                 }
-                                store.profiles
                             }
                         }
                     }
@@ -541,7 +585,8 @@ internal fun rememberDesktopConnection(
         }
     }
 
-    LaunchedEffect(profileId, keyList.activeId, address, instances, verified, discoveryRevision) {
+    LaunchedEffect(profileId, keyList.activeId, address, instances, verified, discoveryRevision, viewingLocalHistory) {
+        if (viewingLocalHistory) return@LaunchedEffect
         val activeId = keyList.activeId ?: return@LaunchedEffect
         val profile = store.profile(profileId)
         if (profile == null || profile.offlineOnly) return@LaunchedEffect
@@ -621,6 +666,7 @@ internal fun rememberDesktopConnection(
         keyErrors = keyErrors,
         activeLabel = keyList.keys.firstOrNull { it.id == keyList.activeId }?.name,
         selectProfileAction = ::selectProfile,
+        adoptSelectedProfileAction = ::adoptSelectedProfileForReply,
         useAddressAction = ::useAddress,
         verifyAction = ::verify,
         selectKeyAction = ::selectKey,

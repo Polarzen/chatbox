@@ -26,6 +26,8 @@ internal data class Chat(val session: String, val entries: List<Entry> = emptyLi
 
 internal data class SessionKey(val profileId: String, val sessionId: String)
 
+internal data class ReplyDestination(val key: SessionKey, val entryIndex: Int)
+
 internal data class ComposerDraft(val text: String = "", val attachments: List<Path> = emptyList())
 
 internal data class Profile(
@@ -234,6 +236,22 @@ internal class DesktopStore(private val file: Path) {
             profile.put("currentSession", sessionId)
             copy.put("activeProfileId", profileId)
         }
+    }
+
+    @Synchronized
+    fun selectReplyIfPresent(target: ReplyDestination): Boolean {
+        val (profileId, sessionId) = target.key
+        val profile = findProfile(state, profileId) ?: return false
+        val session = findSession(profile, sessionId) ?: return false
+        val entry = session.getJSONArray("entries").optJSONObject(target.entryIndex) ?: return false
+        if (entry.getString("status") != "已完成") return false
+        if (activeProfileId != profileId || profile.getString("currentSession") != sessionId) {
+            persist(requireAtomic = true) { copy ->
+                requireProfile(copy, profileId).put("currentSession", sessionId)
+                copy.put("activeProfileId", profileId)
+            }
+        }
+        return true
     }
 
     /** Sets the local display name, or restores the original title when name is null. */

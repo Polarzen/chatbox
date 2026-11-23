@@ -10,7 +10,6 @@ import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -21,26 +20,20 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.TextFieldValue
-import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Window
-import androidx.compose.ui.window.application
-import androidx.compose.ui.window.rememberWindowState
-import java.awt.Dimension
 import java.io.File
 import java.io.IOException
-import java.nio.channels.FileChannel
 import java.nio.file.AccessDeniedException
 import java.nio.file.Files
 import java.nio.file.FileSystemException
 import java.nio.file.InvalidPathException
 import java.nio.file.Path
-import java.nio.file.StandardOpenOption
 import java.net.SocketTimeoutException
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
@@ -54,7 +47,9 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.concurrent.thread
@@ -82,88 +77,7 @@ fun main(args: Array<String>) {
         return
     }
 
-    val dataDir = System.getenv("LOCALAPPDATA")?.takeIf { it.isNotBlank() }?.let { Path.of(it, "Chatbox") }
-        ?: Path.of(System.getProperty("user.home"), ".chatbox")
-    var lockChannel: FileChannel? = null
-    var historyLock: java.nio.channels.FileLock? = null
-    var lockFailure: Throwable? = null
-    val lockAcquired = runCatching {
-        Files.createDirectories(dataDir)
-        lockChannel = FileChannel.open(
-            dataDir.resolve("history.lock"),
-            StandardOpenOption.CREATE,
-            StandardOpenOption.WRITE,
-        )
-        historyLock = lockChannel?.tryLock()
-        historyLock != null
-    }.onFailure { lockFailure = it }.getOrDefault(false)
-    val store = if (lockAcquired) runCatching { DesktopStore(dataDir.resolve("history.json")) }.getOrNull() else null
-    // No process can be producing or uploading managed media at this point.
-    store?.let { runCatching { it.cleanupUnreferencedManagedMedia() } }
-    val credentials = DesktopCredentials(dataDir.resolve("credentials"))
-    val keys = NamedKeys(dataDir, credentials)
-    val replyImageCache = ReplyImageCache(dataDir.resolve("reply-images"))
-    try {
-        val appearanceStore = DesktopAppearanceStore(dataDir)
-        application {
-            var appearance by remember { mutableStateOf(appearanceStore.load()) }
-            var appearanceError by remember { mutableStateOf<String?>(null) }
-            var closeRequested by remember { mutableStateOf(false) }
-            val historySearchOpen = remember { mutableStateOf(false) }
-            Window(
-                onCloseRequest = { if (store == null) exitApplication() else closeRequested = true },
-                title = "chatbox",
-                onPreviewKeyEvent = { event ->
-                    if (event.opensHistorySearch() && lockAcquired && store != null) {
-                        historySearchOpen.value = true
-                        true
-                    } else false
-                },
-                state = rememberWindowState(size = DpSize(1000.dp, 760.dp)),
-            ) {
-                DesktopWindowEffects(window, appearance) { appearanceError = it }
-                LaunchedEffect(window) {
-                    window.minimumSize = Dimension(480, 400)
-                }
-                DesktopTheme(appearance.dark) {
-                    Surface(Modifier.fillMaxSize()) {
-                        when {
-                            !lockAcquired && lockFailure == null -> Text("Chatbox 已在运行，请使用已打开的窗口。", Modifier.padding(16.dp))
-                            !lockAcquired -> Text("无法锁定本地聊天历史文件，请检查数据目录权限。", Modifier.padding(16.dp))
-                            store == null -> Text("无法读取本地聊天历史。请先备份历史文件，再检查数据目录。", Modifier.padding(16.dp))
-                            else -> DesktopScreen(
-                                store, keys, replyImageCache, window, historySearchOpen,
-                                closeRequested = closeRequested,
-                                isClosing = { closeRequested },
-                                onCloseResult = { ready -> if (ready) exitApplication() else closeRequested = false },
-                            ) {
-                                DesktopAppearanceControls(
-                                    appearance,
-                                    onPreview = { appearance = it },
-                                    onCommit = { updated ->
-                                        appearance = updated
-                                        if (runCatching { appearanceStore.save(updated) }.isFailure) {
-                                            appearanceError = "无法保存窗口外观设置。"
-                                        }
-                                    },
-                                )
-                            }
-                        }
-                    }
-                    appearanceError?.let { message ->
-                        AlertDialog(
-                            onDismissRequest = { appearanceError = null },
-                            text = { Text(message) },
-                            confirmButton = { TextButton(onClick = { appearanceError = null }) { Text("关闭") } },
-                        )
-                    }
-                }
-            }
-        }
-    } finally {
-        runCatching { historyLock?.release() }
-        runCatching { lockChannel?.close() }
-    }
+    runDesktopShell(args)
 }
 
 private data class SendOperation(
@@ -210,6 +124,14 @@ internal fun DesktopScreen(
     closeRequested: Boolean = false,
     onCloseResult: (Boolean) -> Unit = {},
     isClosing: () -> Boolean = { closeRequested },
+    hideRequested: Boolean = false,
+    onHideResult: (Boolean) -> Unit = {},
+    composerFocusSerial: Long = 0,
+    openReply: ReplyDestination? = null,
+    onOpenReplyHandled: () -> Unit = {},
+    canNavigateReply: () -> Boolean = { true },
+    mayNotifyReply: () -> Boolean = { false },
+    onReplyNotification: (ReplyDestination) -> Unit = {},
     appearanceActions: @Composable () -> Unit = {},
 ) {
     val replyAudioCache = remember(replyImageCache) { ReplyAudioCache(replyImageCache.directory.resolveSibling("reply-audio")) }
@@ -229,17 +151,25 @@ internal fun DesktopScreen(
     val connection = rememberDesktopConnection(store, keys, composer::withLegacyDraftsSaved)
     var preparing by remember { mutableStateOf<Job?>(null) }
     var closeError by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(closeRequested) {
-        if (closeRequested) {
-            preparing?.join()
-            try {
-                closeError = composer.flushForExit()
-                onCloseResult(closeError == null)
-            } catch (error: Exception) {
-                closeError = "无法保存草稿，窗口保持打开。请检查本地数据目录后重试。（${error.javaClass.simpleName}）"
-                onCloseResult(false)
-            }
+    val windowCommit = closeRequested || hideRequested
+    val closingNow by rememberUpdatedState(isClosing)
+    val closeResult by rememberUpdatedState(onCloseResult)
+    val hideResult by rememberUpdatedState(onHideResult)
+    val mayNotify by rememberUpdatedState(mayNotifyReply)
+    val notifyReply by rememberUpdatedState(onReplyNotification)
+    val replyHandled by rememberUpdatedState(onOpenReplyHandled)
+    val canNavigateNow by rememberUpdatedState(canNavigateReply)
+    LaunchedEffect(windowCommit) {
+        if (!windowCommit) return@LaunchedEffect
+        preparing?.join()
+        closeError = try {
+            composer.flushForExit()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            "无法保存草稿，窗口保持打开。请检查本地数据目录后重试。（${error.javaClass.simpleName}）"
         }
+        if (closingNow()) closeResult(closeError == null) else hideResult(closeError == null)
     }
     var sending by remember { mutableStateOf<SendOperation?>(null) }
     val activeOperationId = remember { AtomicInteger(0) }
@@ -253,12 +183,15 @@ internal fun DesktopScreen(
     var nextOperationId by remember { mutableIntStateOf(0) }
     var cacheGeneration by remember { mutableStateOf<Map<ReplyAttachmentKey, Int>>(emptyMap()) }
     var attachmentFailures by remember { mutableStateOf<Map<ReplyAttachmentKey, String>>(emptyMap()) }
-    var fetchingAttachments by remember { mutableStateOf<Set<ReplyAttachmentKey>>(emptySet()) }
+    // A repeated attachment ID may share one in-flight download across two live replies.
+    val fetchingAttachments = remember { mutableStateMapOf<ReplyAttachmentKey, MutableList<() -> Unit>>() }
 
     val profileId = connection.profileId
     var searchOpen by historySearchOpen
     var searchSerial by remember { mutableStateOf(0L) }
     var searchDestination by remember(profileId) { mutableStateOf<Pair<SessionKey, SearchHitNavigation>?>(null) }
+    var replySerial by remember { mutableStateOf(0L) }
+    var replyDestination by remember { mutableStateOf<Pair<SessionKey, ReplyTurnNavigation>?>(null) }
     val selectedProfile = connection.profiles.firstOrNull { it.id == profileId }
     val sessions = remember(profileId, connection.profiles, sessionsRevision.intValue) {
         profileId.takeIf(String::isNotBlank)?.let { runCatching { store.sessions(it) }.getOrDefault(emptyList()) }
@@ -303,7 +236,48 @@ internal fun DesktopScreen(
     val draft = editor?.field ?: TextFieldValue()
     val currentImages = editor?.draft?.attachments.orEmpty()
     val isOffline = selectedProfile?.offlineOnly == true
-    val isBusy = sending != null || preparing != null || closeRequested
+    fun hasScreenModal() = searchOpen || whaleLoginTarget != null || retryConfirmation != null || closeError != null || closingNow()
+    val screenModal = hasScreenModal()
+    DesktopModalGuard(screenModal)
+    val navigating = openReply != null && !screenModal
+    val composerLocked = windowCommit || navigating
+    val isBusy = sending != null || preparing != null || composerLocked
+    LaunchedEffect(openReply, screenModal, windowCommit) {
+        val target = openReply ?: return@LaunchedEffect
+        if (screenModal || windowCommit) return@LaunchedEffect
+        try {
+            preparing?.join()
+            if (target.key != currentKey) {
+                val issue = composer.flushForExit()
+                if (issue != null) {
+                    notices[currentKey] = issue
+                    replyHandled()
+                    return@LaunchedEffect
+                }
+            }
+            // A modal can open while a recording or an import finishes, including inside AWT's nested event loop.
+            while (hasScreenModal() || !canNavigateNow()) delay(100)
+            val selected = synchronized(store) {
+                store.selectReplyIfPresent(target).also { found ->
+                    if (found) connection.adoptSelectedProfileForReply(checkNotNull(store.profile(target.key.profileId)))
+                }
+            }
+            if (selected) {
+                chats[target.key] = latestChat(target.key)
+                sessionsRevision.intValue++
+                searchDestination = null
+                replyDestination = target.key to ReplyTurnNavigation(++replySerial, target.entryIndex)
+            } else notices[currentKey] = "这条回复已不存在。"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            notices[currentKey] = safeHistoryFailureMessage(error, "打开回复")
+        }
+        replyHandled()
+    }
+    DisposableEffect(currentKey) {
+        onDispose { if (replyDestination?.first == currentKey) replyDestination = null }
+    }
     val currentOperation = sending?.takeIf { it.key == currentKey }
     val currentProgress = currentOperation?.let {
         EntryProgress(it.entryIndex, it.stage, it.stageStartedAtNanos)
@@ -312,6 +286,7 @@ internal fun DesktopScreen(
     }?.let { index -> failedProgressByEntry[TimedEntryKey(currentKey, index)] }
 
     fun chooseImages(replacing: Path? = null) {
+        if (composerLocked) return
         val origin = currentKey
         val originEditor = composer.editor(origin)?.takeUnless { it.commitInProgress } ?: return
         originEditor.editSerial++
@@ -340,10 +315,14 @@ internal fun DesktopScreen(
         }
     }
 
-    fun fetchReplyAttachment(target: DesktopSendTarget, key: ReplyAttachmentKey) {
+    fun fetchReplyAttachment(target: DesktopSendTarget, key: ReplyAttachmentKey, onInitialSave: (() -> Unit)? = null) {
         val sessionKey = SessionKey(key.profileId, key.sessionId)
-        if (sessionKey in deletedSessionKeys || key in fetchingAttachments) return
-        fetchingAttachments = fetchingAttachments + key
+        if (sessionKey in deletedSessionKeys) return
+        fetchingAttachments[key]?.let { listeners ->
+            onInitialSave?.let(listeners::add)
+            return
+        }
+        fetchingAttachments[key] = listOfNotNull(onInitialSave).toMutableList()
         thread(isDaemon = true, name = "chatbox-reply-attachment") {
             val result = runCatching {
                 target.checkTarget()
@@ -362,11 +341,12 @@ internal fun DesktopScreen(
             if (sessionKey !in deletedSessionKeys) result.exceptionOrNull()?.let { invalidateOnFailure(target, it) }
             SwingUtilities.invokeLater {
                 if (sessionKey in deletedSessionKeys) return@invokeLater
-                fetchingAttachments = fetchingAttachments - key
+                val listeners = fetchingAttachments.remove(key).orEmpty()
                 val failure = result.exceptionOrNull()
                 if (failure == null) {
                     attachmentFailures = attachmentFailures - key
                     cacheGeneration = cacheGeneration + (key to ((cacheGeneration[key] ?: 0) + 1))
+                    listeners.forEach { it() }
                 } else {
                     attachmentFailures = attachmentFailures + (key to safeAttachmentFailureMessage(failure, key.type))
                 }
@@ -402,6 +382,11 @@ internal fun DesktopScreen(
         timingByEntry[TimedEntryKey(targetKey, entryIndex)] = timing
         sending = operation
         activeOperationId.set(operationId)
+        val notification = LiveReplyNotification {
+            if (scope.isActive && !closingNow() && targetKey !in deletedSessionKeys && !operation.cancellation.get()) {
+                notifyReply(ReplyDestination(targetKey, entryIndex))
+            }
+        }
         val query = entry.question
         thread(isDaemon = true, name = "chatbox-request") {
             fun operationIsActive() = !operation.cancellation.get() && activeOperationId.get() == operationId
@@ -447,7 +432,7 @@ internal fun DesktopScreen(
                         sending = active.copy(answer = updatedEntry.answer, replyAttachments = updatedEntry.replyAttachments)
                     }
                     if (save.isFailure) notices[targetKey] = "本地保存失败；收到的${type.label}可能无法在重启后恢复。"
-                    if (key != null && fetch) fetchReplyAttachment(target, key)
+                    if (key != null && fetch) fetchReplyAttachment(target, key, notification::initialAttachmentSaved)
                 }
             }
 
@@ -555,6 +540,7 @@ internal fun DesktopScreen(
                         result.isSuccess -> notices.remove(targetKey)
                         else -> notices[targetKey] = observedFailureStage + "：" + safeFailureMessage(failure!!, observedFailureStage)
                     }
+                    notification.complete(completed.entries.last(), saved.isSuccess) { !closingNow() && mayNotify() }
                 }
             }
         }
@@ -562,7 +548,7 @@ internal fun DesktopScreen(
 
     fun dispatch(retryEntry: Entry? = null, targetKey: SessionKey = currentKey) {
         val clickedAtNanos = System.nanoTime()
-        if (targetKey != currentKey || editor == null || closeRequested || sending != null || preparing != null ||
+        if (targetKey != currentKey || editor == null || composerLocked || sending != null || preparing != null ||
             composer.recordingKey == targetKey || (retryEntry == null && editor.field.composition != null)
         ) return
         if (retryEntry?.blocksWhaleTaskRetry(targetKey.profileId) == true) {
@@ -702,6 +688,7 @@ internal fun DesktopScreen(
             return false
         }
         chats[key] = selected
+        replyDestination = null
         searchSerial++
         searchDestination = if (hit.side == HistorySide.TITLE) null else key to SearchHitNavigation(
             searchSerial, hit.entryIndex, hit.side == HistorySide.ASSISTANT, hit.start, hit.endExclusive,
@@ -710,11 +697,12 @@ internal fun DesktopScreen(
         return true
     }
 
-    val canCreate = profileId.isNotBlank() && selectedProfile != null && !selectedProfile.offlineOnly
+    val canCreate = profileId.isNotBlank() && selectedProfile != null && !selectedProfile.offlineOnly && !composerLocked
     val canSend = selectedSessionId.isNotBlank() && !isBusy && !isOffline && connection.connected && !connection.verifying &&
         editor != null && draft.composition == null && composer.recordingKey != currentKey &&
         (draft.text.isNotBlank() || currentImages.isNotEmpty() || composer.pendingImport(currentKey) != null)
     val canRetry = !isBusy && !isOffline && connection.connected && !connection.verifying && composer.recordingKey != currentKey
+    val retryingAttachments = fetchingAttachments.keys.toSet()
 
     Surface(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
         if (event.opensHistorySearch()) {
@@ -723,13 +711,15 @@ internal fun DesktopScreen(
         } else false
     }) {
         DesktopChatLayout(
+            composerFocusSerial = composerFocusSerial,
+            replyNavigation = replyDestination?.takeIf { it.first == currentKey }?.second,
             searchSelectionSerial = searchSerial,
             searchNavigation = searchDestination?.takeIf { it.first == currentKey }?.second,
             profileId = profileId,
             sessions = sessions,
             chat = chat,
             onSelectSession = { sessionId ->
-                if (profileId.isNotBlank()) {
+                if (!composerLocked && profileId.isNotBlank()) {
                     runCatching {
                         store.selectSession(profileId, sessionId)
                         searchDestination = null
@@ -740,7 +730,7 @@ internal fun DesktopScreen(
                 }
             },
             onDeleteSession = { sessionId ->
-                if (profileId.isNotBlank() && sessions.any { it.id == sessionId }) {
+                if (!composerLocked && profileId.isNotBlank() && sessions.any { it.id == sessionId }) {
                     val key = SessionKey(profileId, sessionId)
                     runCatching { store.deleteSession(profileId, sessionId) }
                         .onSuccess {
@@ -756,7 +746,7 @@ internal fun DesktopScreen(
                             unsavedReplies.remove(key)
                             composer.forget(key)
                             notices.remove(key)
-                            fetchingAttachments = fetchingAttachments.filterNot { it.profileId == key.profileId && it.sessionId == key.sessionId }.toSet()
+                            fetchingAttachments.keys.removeIf { it.profileId == key.profileId && it.sessionId == key.sessionId }
                             attachmentFailures = attachmentFailures.filterKeys { it.profileId != key.profileId || it.sessionId != key.sessionId }
                             cacheGeneration = cacheGeneration.filterKeys { it.profileId != key.profileId || it.sessionId != key.sessionId }
                             timingByEntry.keys.removeIf { it.key == key }
@@ -798,21 +788,21 @@ internal fun DesktopScreen(
                 DesktopConnectionControls(connection)
             },
             draft = draft,
-            onDraft = { value -> if (!closeRequested) composer.input(currentKey, value) },
+            onDraft = { value -> if (!composerLocked) composer.input(currentKey, value) },
             selectedImage = currentImages.firstOrNull(),
             selectedImages = currentImages,
             onChooseImage = { chooseImages() },
             onReplaceMissingAttachment = { path -> chooseImages(path) },
-            composerCommitInProgress = closeRequested || editor?.commitInProgress == true,
-            onAddImages = { files -> composer.addFiles(currentKey, files) },
-            onRemoveImage = { composer.remove(currentKey, null) },
-            onRemoveImagePath = { composer.remove(currentKey, it) },
-            onPasteAttachment = { selectedSessionId.isNotBlank() && composer.paste(currentKey) },
-            canRecord = selectedSessionId.isNotBlank() && editor?.commitInProgress == false && composer.recordingKey == null && !closeRequested,
+            composerCommitInProgress = composerLocked || editor?.commitInProgress == true,
+            onAddImages = { files -> if (!composerLocked) composer.addFiles(currentKey, files) },
+            onRemoveImage = { if (!composerLocked) composer.remove(currentKey, null) },
+            onRemoveImagePath = { if (!composerLocked) composer.remove(currentKey, it) },
+            onPasteAttachment = { composerLocked || (selectedSessionId.isNotBlank() && composer.paste(currentKey)) },
+            canRecord = selectedSessionId.isNotBlank() && editor?.commitInProgress == false && composer.recordingKey == null && !composerLocked,
             recordingMillis = composer.elapsed.takeIf { composer.recordingKey == currentKey },
-            onStartRecording = { composer.startMic(currentKey) },
-            onStopRecording = { composer.stopMic(currentKey) },
-            onCancelRecording = { composer.stopMic(currentKey, discard = true) },
+            onStartRecording = { if (!composerLocked) composer.startMic(currentKey) },
+            onStopRecording = { if (!composerLocked) composer.stopMic(currentKey) },
+            onCancelRecording = { if (!composerLocked) composer.stopMic(currentKey, discard = true) },
             onSend = { dispatch() },
             canSend = canSend,
             notice = if (loadedDraft.isFailure) "本地草稿无法读取。" else notices[currentKey],
@@ -832,7 +822,7 @@ internal fun DesktopScreen(
                     audioCache = replyAudioCache,
                     cacheGeneration = cacheGeneration,
                     failures = attachmentFailures,
-                    retrying = fetchingAttachments,
+                    retrying = retryingAttachments,
                     retryEnabled = canRetry,
                     onRetry = ::retryReplyAttachment,
                 )
