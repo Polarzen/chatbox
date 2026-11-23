@@ -178,7 +178,12 @@ public final class FixtureServer {
         exchange.getResponseHeaders().set("Cache-Control", "no-cache");
         exchange.sendResponseHeaders(200, 0);
         var output = exchange.getResponseBody();
-        if (delayBeforeFirstEvent && !pause(controlMillis("chat.delay.before.first.event.ms", 1_500))) return 200;
+        if (delayBeforeFirstEvent) {
+            // Flush an SSE comment to open the stream before delaying its first data event.
+            output.write(": stream open\n\n".getBytes(StandardCharsets.UTF_8));
+            output.flush();
+            if (!pause(controlMillis("chat.delay.before.first.event.ms", 1_500))) return 200;
+        }
         if (truncate) {
             writeEvent(output, "{\"type\":\"plain\",\"data\":\"回复流中断前的部分内容。\"}");
             output.flush();
