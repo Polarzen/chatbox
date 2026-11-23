@@ -12,7 +12,7 @@ static HRESULT showReplyToast(const wchar_t* uri) {
     xml.LoadXml(LR"(<toast activationType="protocol"><visual><binding template="ToastGeneric"><text>Chatbox · 回复已完成</text><text>点击查看回复</text></binding></visual></toast>)");
     xml.DocumentElement().SetAttribute(L"launch", uri);
     auto notifier = ToastNotificationManager::CreateToastNotifier(L"Polarzen.Chatbox");
-    if (notifier.Setting() != NotificationSetting::Enabled) return S_FALSE;
+    // Windows applies notification preferences on Show. Setting() can fail before the first delivery.
     notifier.Show(ToastNotification(xml));
     return S_OK;
 }
