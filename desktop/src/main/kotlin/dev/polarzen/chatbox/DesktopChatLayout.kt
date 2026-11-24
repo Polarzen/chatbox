@@ -162,6 +162,8 @@ internal fun DesktopChatLayout(
     replyNavigation: ReplyTurnNavigation? = null,
     profileTextOnly: Boolean = false,
     onRecoverPending: (() -> Unit)? = null,
+    recentDetails: Map<String, DesktopRecentRow> = emptyMap(),
+    deletionScope: (String) -> String? = { null },
 ) {
     BoxWithConstraints(
         modifier = Modifier.fillMaxSize().background(desktopPalette.canvas).testTag("chat-root"),
@@ -177,6 +179,7 @@ internal fun DesktopChatLayout(
             if (embeddedSidebar) {
                 SessionSidebar(
                     sessions = sessions,
+                    recentDetails = recentDetails, deletionScope = deletionScope,
                     profileTextOnly = profileTextOnly,
                     canCreate = canCreate,
                     onNewSession = onNewSession,
@@ -239,6 +242,7 @@ internal fun DesktopChatLayout(
             )
             SessionSidebar(
                 sessions = sessions,
+                recentDetails = recentDetails, deletionScope = deletionScope,
                 profileTextOnly = profileTextOnly,
                 canCreate = canCreate,
                 onNewSession = onNewSession,
@@ -259,6 +263,8 @@ internal fun DesktopChatLayout(
 @Composable
 private fun SessionSidebar(
     sessions: List<SessionInfo>,
+    recentDetails: Map<String, DesktopRecentRow>,
+    deletionScope: (String) -> String?,
     profileTextOnly: Boolean,
     canCreate: Boolean,
     onNewSession: () -> Unit,
@@ -321,7 +327,9 @@ private fun SessionSidebar(
                     }
                 }
             }
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(10.dp))
+            Text("最近对话", color = desktopPalette.muted, fontSize = 12.sp)
+            Spacer(Modifier.height(6.dp))
             if (sessions.isEmpty()) {
                 Box(Modifier.weight(1f).fillMaxWidth().padding(end = SidebarInset), contentAlignment = Alignment.Center) {
                     Text("还没有对话", color = desktopPalette.muted, fontSize = 13.sp)
@@ -334,6 +342,7 @@ private fun SessionSidebar(
                         verticalArrangement = Arrangement.spacedBy(5.dp),
                     ) {
                         itemsIndexed(sessions, key = { _, session -> session.id }) { index, session ->
+                            val tagId = recentDetails[session.id]?.tagId ?: session.id
                             val selected = session.selected
                             var menuExpanded by remember(session.id) { mutableStateOf(false) }
                             Row(
@@ -353,6 +362,7 @@ private fun SessionSidebar(
                                         maxLines = 2,
                                         overflow = TextOverflow.Ellipsis,
                                     )
+                                    recentDetails[session.id]?.label?.let { Text(it, color = desktopPalette.muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                                     if (session.entryCount > 0) {
                                         Spacer(Modifier.height(3.dp))
                                         Text("${session.entryCount} 轮", color = desktopPalette.muted, fontSize = 11.sp)
@@ -363,7 +373,7 @@ private fun SessionSidebar(
                                         onClick = { menuExpanded = true },
                                         modifier = Modifier.sizeIn(minWidth = 36.dp, minHeight = 36.dp)
                                             .semantics { contentDescription = "会话 ${session.title.ifBlank { "新会话" }} 菜单" }
-                                            .testTag("session-menu-${session.id}"),
+                                            .testTag("session-menu-$tagId"),
                                         contentPadding = PaddingValues(0.dp),
                                     ) { Text("⋯", color = desktopPalette.muted, fontSize = 18.sp) }
                                     DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
@@ -372,14 +382,14 @@ private fun SessionSidebar(
                                                 menuExpanded = false
                                                 pendingRename = session
                                             },
-                                            modifier = Modifier.testTag("rename-session-${session.id}"),
+                                            modifier = Modifier.testTag("rename-session-$tagId"),
                                         ) { Text("重命名") }
                                         DropdownMenuItem(
                                             onClick = {
                                                 menuExpanded = false
                                                 pendingDeletion = session
                                             },
-                                            modifier = Modifier.testTag("delete-session-${session.id}"),
+                                            modifier = Modifier.testTag("delete-session-$tagId"),
                                         ) { Text("删除会话", color = MaterialTheme.colors.error) }
                                     }
                                 }
@@ -407,7 +417,7 @@ private fun SessionSidebar(
         AlertDialog(
             onDismissRequest = { pendingDeletion = null },
             title = { Text("删除会话？") },
-            text = { Text(if (profileTextOnly)
+            text = { Text(deletionScope(deleting.id)?.let { "“$title”\n$it 此操作无法撤销。" } ?: if (profileTextOnly)
                 "将删除本机保存的“$title”。下次同步会将它从手机目录移除，共享服务按原房间规则保留记录。此操作无法撤销。"
                 else "将删除本机保存的这段聊天记录“$title”。确定删除吗？此操作无法撤销。") },
             confirmButton = {
@@ -816,20 +826,7 @@ private fun ConversationPane(
                                         val references = entry.attachmentReferences.ifEmpty {
                                             listOfNotNull(entry.attachmentReference)
                                         }
-                                        references.forEachIndexed { attachmentIndex, reference ->
-                                            val path = runCatching { Path.of(reference) }.getOrNull()
-                                            if (path != null && path.isWaveRecording()) {
-                                                ReplyAudioPlayback(path)
-                                            } else MessageAttachmentPreview(
-                                                path = path,
-                                                displayName = path?.fileName?.toString()
-                                                    ?: if (attachmentIndex == 0) entry.attachmentDisplayName.orEmpty() else "图片",
-                                            )
-                                            if (attachmentIndex < references.lastIndex) Spacer(Modifier.height(5.dp))
-                                        }
-                                        if (references.isEmpty() && entry.attachmentDisplayName != null) {
-                                            Text("图片 · ${entry.attachmentDisplayName}", color = desktopPalette.muted, fontSize = 11.sp)
-                                        }
+                                        DesktopStoredAttachments(entry, references)
                                         if (references.isNotEmpty() && entry.question.isNotBlank()) {
                                             Spacer(Modifier.height(5.dp))
                                         }
@@ -1215,6 +1212,26 @@ internal fun Composer(
     }
 }
 
+@Composable
+internal fun DesktopStoredAttachments(entry: Entry, references: List<String> = entry.attachmentReferences.ifEmpty { listOfNotNull(entry.attachmentReference) }) {
+    references.forEachIndexed { attachmentIndex, reference ->
+        val path = runCatching {
+            if (reference.startsWith("file:", ignoreCase = true)) Path.of(java.net.URI(reference)) else Path.of(reference)
+        }.getOrNull()
+        if (path != null && path.isWaveRecording()) {
+            ReplyAudioPlayback(path)
+        } else MessageAttachmentPreview(
+            path = path,
+            displayName = path?.fileName?.toString()
+                ?: if (attachmentIndex == 0) entry.attachmentDisplayName.orEmpty() else "图片",
+        )
+        if (attachmentIndex < references.lastIndex) Spacer(Modifier.height(5.dp))
+    }
+    if (references.isEmpty() && entry.attachmentDisplayName != null) {
+        Text("图片 · ${entry.attachmentDisplayName}", color = desktopPalette.muted, fontSize = 11.sp)
+    }
+}
+
 private fun Path.isWaveRecording() = fileName?.toString()?.endsWith(".wav", ignoreCase = true) == true
 
 @Composable
@@ -1271,6 +1288,8 @@ private fun SelectedAttachmentPreview(
 @Composable
 private fun MessageAttachmentPreview(path: Path?, displayName: String) {
     var bitmap by remember(path) { mutableStateOf<ImageBitmap?>(null) }
+    var openFailed by remember(path) { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     LaunchedEffect(path) {
         bitmap = path?.let { withContext(Dispatchers.IO) { readBoundedImagePreview(it) } }
     }
@@ -1298,6 +1317,13 @@ private fun MessageAttachmentPreview(path: Path?, displayName: String) {
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+        if (bitmap != null && path != null && path.fileName.toString().substringAfterLast('.').lowercase() in setOf("jpg", "jpeg", "png")) {
+            TextButton(onClick = {
+                scope.launch { openFailed = withContext(Dispatchers.IO) {
+                    runCatching { java.awt.Desktop.getDesktop().open(path.toFile()) }.isFailure
+                } }
+            }) { Text(if (openFailed) "无法打开原图" else "打开原图", fontSize = 11.sp) }
+        }
     }
 }
 

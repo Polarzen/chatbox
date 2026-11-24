@@ -268,6 +268,9 @@ private fun runPrimaryWindow(
     val store = loaded.getOrNull()
     val keys = NamedKeys(dataDir, DesktopCredentials(dataDir.resolve("credentials")))
     val images = ReplyImageCache(dataDir.resolve("reply-images"))
+    val deviceSync = store?.let { DesktopDeviceSync(it, keys) }
+    val setupMarker = dataDir.resolve("device-setup-seen")
+    val firstDeviceSetup = store?.profiles?.isEmpty() == true && !Files.exists(setupMarker)
     val appearanceStore = DesktopAppearanceStore(dataDir)
     val settingsStore = DesktopShellSettingsStore(dataDir)
     application(exitProcessOnExit = false) {
@@ -371,6 +374,12 @@ private fun runPrimaryWindow(
                         ).joinToString("\n"), Modifier.padding(16.dp))
                         else DesktopScreen(
                             store, keys, images, window, historySearchOpen,
+                            deviceSync = deviceSync,
+                            firstDeviceSetup = firstDeviceSetup,
+                            onDeviceSetupSeen = {
+                                if (!Files.exists(setupMarker) && runCatching { Files.createFile(setupMarker) }.isFailure)
+                                    shellError = "无法保存首启设置。请检查本地数据目录的写入权限。"
+                            },
                             closeRequested = visibility.exiting,
                             isClosing = { visibility.exiting },
                             onCloseResult = { saved -> visibility.finishExit(saved, ::exitApplication) { foreground(false) } },

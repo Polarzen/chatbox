@@ -9,16 +9,23 @@ import android.os.Handler
 import android.os.Looper
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -34,6 +41,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -59,6 +67,21 @@ private fun addPickedImages(context: Context, uris: List<Uri>, add: (List<Mobile
             }, onFailure = { note("无法添加图片，请重新选择或复制。${it.localizedMessage.orEmpty()}") })
         }
     }
+}
+
+internal fun pasteMobileImages(context: Context, add: (List<MobileAsset>) -> Unit, note: (String) -> Unit): Boolean {
+    val images = runCatching {
+        val clip = context.getSystemService(ClipboardManager::class.java)?.primaryClip ?: return false
+        (0 until clip.itemCount).mapNotNull { index ->
+            clip.getItemAt(index).uri?.takeIf { uri ->
+                uri.scheme == "content" && (context.contentResolver.getType(uri)?.startsWith("image/")
+                    ?: clip.description.hasMimeType("image/*"))
+            }
+        }
+    }.getOrDefault(emptyList())
+    if (images.isEmpty()) return false
+    addPickedImages(context, images, add, note)
+    return true
 }
 
 @Composable
@@ -149,42 +172,43 @@ internal fun AndroidMediaActions(
 
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box {
-                IconButton(onClick = { menu = true }, enabled = enabled,
-                    modifier = Modifier.semantics { contentDescription = "添加附件" }) { Text("＋") }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text("选择图片（可多选）") }, onClick = {
-                        menu = false
-                        pickerOrigin = scopeId
-                        pickerDelivery = { addPickedImages(context, it, onAdd, onNote) }
-                        runCatching { picker.launch(arrayOf("image/png", "image/jpeg")) }
-                            .onFailure { pickerOrigin = null; pickerDelivery = null; onNote("系统图片选择器不可用。") }
-                    })
-                    DropdownMenuItem(text = { Text("粘贴图片") }, onClick = {
-                        menu = false
-                        val uris = runCatching {
-                            val clip = context.getSystemService(ClipboardManager::class.java)?.primaryClip
-                            if (clip == null) emptyList() else (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }
-                        }.getOrNull().orEmpty()
-                        if (uris.isEmpty()) onNote("剪贴板里没有可读取的图片，请复制截图后再粘贴。")
-                        else addPickedImages(context, uris, onAdd, onNote)
-                    })
-                }
-            }
             if (recording == null) {
-                TextButton(enabled = enabled, modifier = Modifier.semantics { contentDescription = "开始麦克风录音" },
+                Box {
+                    IconButton(onClick = { menu = true }, enabled = enabled, modifier = Modifier.size(48.dp)) {
+                        Icon(Icons.Default.Add, "添加附件")
+                    }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text("选择图片（可多选）") }, onClick = {
+                            menu = false
+                            pickerOrigin = scopeId
+                            pickerDelivery = { addPickedImages(context, it, onAdd, onNote) }
+                            runCatching { picker.launch(arrayOf("image/png", "image/jpeg")) }
+                                .onFailure { pickerOrigin = null; pickerDelivery = null; onNote("系统图片选择器不可用。") }
+                        })
+                        DropdownMenuItem(text = { Text("粘贴图片") }, onClick = {
+                            menu = false
+                            if (!pasteMobileImages(context, onAdd, onNote)) onNote("剪贴板里没有可读取的图片，请复制截图后再粘贴。")
+                        })
+                    }
+                }
+                IconButton(enabled = enabled, modifier = Modifier.size(48.dp),
                     onClick = {
                         if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) begin()
                         else { permissionOrigin = scopeId; permission.launch(Manifest.permission.RECORD_AUDIO) }
                     }) {
-                    Icon(painterResource(android.R.drawable.ic_btn_speak_now), null, Modifier.size(20.dp))
-                    Text("录音")
+                    Icon(painterResource(android.R.drawable.ic_btn_speak_now), "开始麦克风录音", Modifier.size(22.dp))
                 }
             } else {
-                TextButton(onClick = { recording?.stop() }) { Text("停止") }
-                TextButton(onClick = { recording?.cancel() }) { Text("取消") }
+                IconButton(onClick = { recording?.stop() }, modifier = Modifier.size(48.dp)
+                    .semantics { contentDescription = "停止并附上录音" }) {
+                    Box(Modifier.size(16.dp).background(LocalContentColor.current, RoundedCornerShape(2.dp)))
+                }
+                IconButton(onClick = { recording?.cancel() }, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.Default.Close, "取消录音")
+                }
             }
         }
-        if (recording != null) Text("正在录音 ${mobileMediaDuration(elapsed)}")
+        if (recording != null) Text(mobileMediaDuration(elapsed), Modifier.width(96.dp),
+            maxLines = 1, textAlign = TextAlign.Center, style = MaterialTheme.typography.labelSmall)
     }
 }

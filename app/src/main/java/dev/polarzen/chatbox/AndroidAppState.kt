@@ -10,6 +10,8 @@ import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -30,8 +32,10 @@ internal class AndroidAppState private constructor(private val app: Context) {
     private val prefs = app.getSharedPreferences("personal_chat", Context.MODE_PRIVATE)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     val pairingScope: CoroutineScope get() = scope
+    val device by lazy { AndroidDeviceSync(app, this, scope) }
+    private var devicePoll: Job? = null
     val computerHistory by lazy { AndroidPcHistory.get(app) }
-    private val sharedSessions = mutableMapOf<Pair<String, String>, AndroidSharedSession>()
+    private val sharedSessions = mutableStateMapOf<Pair<String, String>, AndroidSharedSession>()
     private val notes = mutableStateMapOf<Pair<String, String>, String>()
     private var startedActivities = 0
 
@@ -48,11 +52,23 @@ internal class AndroidAppState private constructor(private val app: Context) {
         set(value) { prefs.edit().putBoolean("notification.permission.asked", value).apply() }
 
     fun activityStarted() {
-        if (startedActivities++ == 0) delivery.setForeground(true)
+        if (startedActivities++ == 0) {
+            delivery.setForeground(true)
+            if (devicePoll?.isActive != true) devicePoll = scope.launch {
+                while (isActive) { device.refresh(); delay(5000L) }
+            }
+        }
     }
 
     fun activityStopped(changingConfiguration: Boolean) {
-        if (--startedActivities == 0 && !changingConfiguration) delivery.setForeground(false)
+        if (--startedActivities == 0 && !changingConfiguration) {
+            delivery.setForeground(false)
+            devicePoll?.cancel()
+            computerHistory.flushDraft()
+            sharedSessions.values.forEach { it.state.flushDraft() }
+            history.flushDrafts()
+            device.flushDrafts()
+        }
     }
 
     fun note(base: String, session: String): String = notes[base to session].orEmpty()
@@ -78,6 +94,8 @@ internal class AndroidAppState private constructor(private val app: Context) {
 
     fun detachShared(session: MobileSession, room: AndroidSharedSession) {
         room.heart = null
+        if (device.bound) device.legacyChanged(session)
+        if (!room.state.flushDraft()) return
         val key = sharedKey(session)
         if (room.storage.hasRecord || (!room.state.busy && !room.state.saveFailed)) {
             sharedSessions.remove(key, room)
@@ -95,6 +113,11 @@ internal class AndroidAppState private constructor(private val app: Context) {
         (it.busy && it.local.binding == null) || it.saveFailed
     } == true
 
+    fun legacyIdle(session: MobileSession): Boolean = sharedSessions[sharedKey(session)]?.state?.let {
+        it.local.binding?.owner == true && !it.local.revoked && it.local.pending == null &&
+            !it.busy && !it.saveFailed && !it.unreadable
+    } ?: true
+
     /** The notification payload is untrusted. Validate all three components before selecting anything. */
     fun openReply(base: String, session: String, turn: String): Boolean {
         if (session.isBlank() || turn.isBlank() || base !in history.legacyBases()) return false
@@ -108,10 +131,17 @@ internal class AndroidAppState private constructor(private val app: Context) {
     }
 
     fun send(base: String, session: MobileSession, retry: MobileDraft?, heart: LiveHeartRate): Boolean {
-        if (base != connections.base || delivery.busy(base, session.id) ||
-            storage(session).hasState() || pairingInProgress(session)) return false
+        if (base != connections.base || delivery.busy(base, session.id) || pairingInProgress(session)) return false
+        if (storage(session).hasState() && !device.managesLegacyNative(base,session.id)) return false
         val current = history.selected(base)
         if (current.id != session.id) return false
+        if (device.pendingJoin) {
+            showNote(base,session.id,"正在核对设备配对结果，请稍后再发送。")
+            return false
+        }
+        if (device.bound && base.isNotBlank()) {
+            return device.sendNative(base,current,retry ?: current.draft,heart,retry == null)
+        }
         delivery.send(base, session.id, connections.token().orEmpty(), history.user, retry ?: current.draft, heart,
             consumeDraft = retry == null) { message ->
             showNote(base, session.id, message)

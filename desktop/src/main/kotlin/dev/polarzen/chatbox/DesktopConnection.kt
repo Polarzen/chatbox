@@ -196,7 +196,10 @@ internal fun rememberDesktopConnection(
         }
     }
 
+    fun canLoadKeys(id: String) = id.isNotBlank() && store.profile(id)?.offlineOnly != true
+
     fun refreshKeys(forProfile: String, expectedGeneration: Long) {
+        if (!canLoadKeys(forProfile)) return
         scope.launch {
             val result = withContext(Dispatchers.IO) { runCatching { keys.list(forProfile) } }
             if (requestGate.currentGeneration() != expectedGeneration || profileId != forProfile) return@launch
@@ -209,6 +212,7 @@ internal fun rememberDesktopConnection(
 
     LaunchedEffect(profileId) {
         val selectedProfileId = profileId
+        if (!canLoadKeys(selectedProfileId)) return@LaunchedEffect
         val generation = requestGate.currentGeneration()
         val result = withContext(Dispatchers.IO) { runCatching { keys.list(selectedProfileId) } }
         if (requestGate.currentGeneration() == generation && profileId == selectedProfileId) {

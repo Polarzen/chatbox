@@ -1,9 +1,5 @@
 package dev.polarzen.chatbox
 
-import android.content.ClipboardManager
-import android.content.Context
-import android.net.Uri
-import android.view.KeyEvent as NativeKeyEvent
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -26,26 +22,25 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
-import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
@@ -54,19 +49,14 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
-import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.Date
@@ -82,6 +72,12 @@ internal fun AndroidChatScreen(
     onRetryMedia: (MobileTurn, MobileAsset) -> Unit,
     onSettings: () -> Unit, onAppearance: () -> Unit, onShared: () -> Unit, onHeart: () -> Unit,
     onComputerHistory: () -> Unit,
+    onRecent: (() -> Unit)? = null,
+    onDeviceSettings: (() -> Unit)? = null,
+    readDraft: (() -> String)? = null,
+    draftEvent: Any? = null,
+    mediaAvailable: Boolean = true,
+    deviceStatus: String? = null,
 ) {
     val base = connections.base
     val scopeId = "${base.length}:$base:${session.id}"
@@ -92,6 +88,8 @@ internal fun AndroidChatScreen(
     var selectedHit by remember(history, base) { mutableStateOf<MobileHistoryHit?>(null) }
     var retry by rememberSaveable(scopeId) { mutableStateOf<String?>(null) }
     var mediaNote by rememberSaveable(scopeId) { mutableStateOf("") }
+    var recording by remember(scopeId) { mutableStateOf(false) }
+    val context = LocalContext.current
     val focus = LocalFocusManager.current
     val screenFocus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
@@ -106,7 +104,7 @@ internal fun AndroidChatScreen(
     }
     BoxWithConstraints(
         Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
-            .systemBarsPadding().imePadding().onPreviewKeyEvent {
+            .systemBarsPadding().onPreviewKeyEvent {
                 if (it.type == KeyEventType.KeyDown && it.isCtrlPressed && it.key == Key.K) {
                     openSearch(); true
                 } else false
@@ -114,8 +112,17 @@ internal fun AndroidChatScreen(
     ) {
         LaunchedEffect(Unit) { screenFocus.requestFocus() }
         val wide = maxWidth >= 720.dp
-        val compactHeight = maxHeight < 320.dp
-        var sidebarVisible by rememberSaveable { mutableStateOf(true) }
+        val ime = rememberChatIme()
+        val compactHeight = maxHeight < 480.dp
+        var sidebarVisible by rememberSaveable { mutableStateOf(onRecent == null) }
+        val openLocalHistory = {
+            if (wide) sidebarVisible = !sidebarVisible else {
+                focus.clearFocus()
+                keyboard?.hide()
+                scope.launch { drawer.open() }
+            }
+            Unit
+        }
         val drawerWidth = minOf(310.dp, maxWidth * .87f)
         LaunchedEffect(wide) { if (wide) drawer.close() }
         BackHandler(!wide && drawer.isOpen) { closeDrawer() }
@@ -130,8 +137,9 @@ internal fun AndroidChatScreen(
                 onDismiss = if (overlay) ::closeDrawer else null)
         }
         ModalNavigationDrawer(
+            modifier = Modifier.chatImeHeight(ime),
             drawerState = drawer,
-            gesturesEnabled = !wide,
+            gesturesEnabled = !wide && (onRecent == null || drawer.isOpen),
             drawerContent = {
                 if (!wide) ModalDrawerSheet(modifier = Modifier.width(drawerWidth),
                     windowInsets = WindowInsets(0, 0, 0, 0)) {
@@ -145,36 +153,54 @@ internal fun AndroidChatScreen(
                     VerticalDivider()
                 }
                 Column(Modifier.weight(1f).fillMaxHeight()) {
-                    ChatHeader(connections, session.title, hit?.takeIf { it.side == MobileHistorySide.TITLE },
-                        compactHeight, wide && sidebarVisible,
-                        onSidebar = {
-                            if (wide) sidebarVisible = !sidebarVisible else {
-                                focus.clearFocus(); keyboard?.hide(); scope.launch { drawer.open() }
+                    Column(Modifier.weight(1f)) {
+                        ChatHeader(connections, session.title, hit?.takeIf { it.side == MobileHistorySide.TITLE },
+                            compactHeight, onRecent == null && wide && sidebarVisible,
+                            onSidebar = onRecent ?: openLocalHistory,
+                            onSearch = ::openSearch, onSettings = onSettings, onAppearance = onAppearance,
+                            onShared = onShared, onHeart = onHeart, onDeviceSettings = onDeviceSettings,
+                            onLocalHistory = openLocalHistory.takeIf { onRecent != null && deviceStatus == null },
+                            deviceStatus = deviceStatus)
+                        HorizontalDivider()
+                        Box(Modifier.weight(1f)) {
+                            readings.SaveableStateProvider(scopeId) {
+                                ChatTimeline(session, busy, bound, hit, jumpTurn, onJumpHandled, ime,
+                                    onHitShown = { selectedHit = null }, onCreate = onCreate,
+                                    onRetry = { retry = it.id }, onRetryMedia = onRetryMedia)
                             }
-                        },
-                        onSearch = ::openSearch, onSettings = onSettings, onAppearance = onAppearance,
-                        onShared = onShared, onHeart = onHeart)
-                    HorizontalDivider()
-                    Box(Modifier.weight(1f)) {
-                        readings.SaveableStateProvider(scopeId) {
-                            ChatTimeline(session, busy, bound, hit, jumpTurn, onJumpHandled,
-                                onHitShown = { selectedHit = null }, onCreate = onCreate,
-                                onRetry = { retry = it.id }, onRetryMedia = onRetryMedia)
                         }
-                    }
-                    val notice = listOf(note, mediaNote).filter(String::isNotBlank).distinct().joinToString("\n")
-                    if (notice.isNotBlank()) {
-                        Box(Modifier.fillMaxWidth().heightIn(max = if (compactHeight) 38.dp else 84.dp)
-                            .verticalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
-                            Text(notice, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.bodySmall)
+                        val notice = listOf(note, mediaNote).filter(String::isNotBlank).distinct().joinToString("\n")
+                        if (notice.isNotBlank()) {
+                            Box(Modifier.fillMaxWidth().moveWithChatIme(ime).background(MaterialTheme.colorScheme.background)
+                                .heightIn(max = if (compactHeight) 38.dp else 84.dp)
+                                .verticalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
+                                Text(notice, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                        if (!bound && session.draft.attachments.isNotEmpty()) {
+                            Box(Modifier.fillMaxWidth().moveWithChatIme(ime).background(MaterialTheme.colorScheme.background)
+                                .heightIn(max = if (compactHeight) 52.dp else 110.dp)
+                                .verticalScroll(rememberScrollState()).padding(horizontal = 8.dp)) {
+                                AndroidAssetList(session.draft.attachments, onRemove = onRemoveAsset)
+                            }
                         }
                     }
                     if (bound) {
-                        TextButton(onClick = onShared, modifier = Modifier.fillMaxWidth()) { Text("打开共享会话") }
+                        TextButton(onClick = onShared, modifier = Modifier.fillMaxWidth().moveWithChatIme(ime)) { Text("打开共享会话") }
                     } else {
-                        ChatComposer(scopeId, session.draft, busy, compactHeight, onDraftText,
-                            onRemoveAsset, onAddAssets, onSend, onNote = { mediaNote = it })
+                        Surface(Modifier.moveWithChatIme(ime), tonalElevation = 1.dp) {
+                            AndroidChatComposer(sessionKey = scopeId,
+                                readDraft = readDraft ?: { history.sessions(base).firstOrNull { it.id == session.id }?.draft?.text.orEmpty() },
+                                draftEvent = Triple(draftEvent, session.turns.lastOrNull()?.id, session.draft.text.isEmpty()),
+                                onDraftText = onDraftText, onSend = onSend, sendEnabled = !busy && !recording,
+                                hasAttachments = session.draft.attachments.isNotEmpty(), compact = compactHeight,
+                                onPasteImages = { mediaAvailable && !busy && pasteMobileImages(context, onAddAssets) { mediaNote = it } },
+                                actions = {
+                                    if (mediaAvailable) AndroidMediaActions(scopeId, enabled = !busy, onAdd = onAddAssets,
+                                        onNote = { mediaNote = it }, onRecordingChanged = { recording = it })
+                                })
+                        }
                     }
                 }
             }
@@ -203,6 +229,7 @@ private fun ChatHeader(
     connections: AndroidConnections, title: String, titleHit: MobileHistoryHit?, short: Boolean,
     sidebarOpen: Boolean, onSidebar: () -> Unit, onSearch: () -> Unit, onSettings: () -> Unit,
     onAppearance: () -> Unit, onShared: () -> Unit, onHeart: () -> Unit,
+    onDeviceSettings: (() -> Unit)?, onLocalHistory: (() -> Unit)?, deviceStatus: String?,
 ) {
     var more by remember { mutableStateOf(false) }
     val annotated = if (titleHit == null) AnnotatedString(title)
@@ -213,7 +240,9 @@ private fun ChatHeader(
                 Icon(Icons.Default.Menu, if (sidebarOpen) "收起最近对话" else "打开最近对话")
             }
             Column(Modifier.weight(1f)) {
-                Text("Chatbox", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                if (short && deviceStatus != null) Text(deviceStatus, style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                else Text("Chatbox", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                 if (short) Text(annotated, style = MaterialTheme.typography.labelMedium,
                     maxLines = if (titleHit == null) 1 else 2, overflow = TextOverflow.Ellipsis)
             }
@@ -221,8 +250,10 @@ private fun ChatHeader(
             Box {
                 IconButton(onClick = { more = true }) { Icon(Icons.Default.MoreVert, "更多操作") }
                 DropdownMenu(more, onDismissRequest = { more = false }) {
-                    listOf("连接设置" to onSettings, "窗口外观" to onAppearance,
-                        "跨设备共享会话" to onShared, "心率" to onHeart).forEach { (label, action) ->
+                    listOfNotNull(("连接设置" to onSettings).takeIf { deviceStatus == null },
+                        onDeviceSettings?.let { "设备设置" to it },
+                        "窗口外观" to onAppearance, onLocalHistory?.let { "本机历史" to it },
+                        ("跨设备共享会话" to onShared).takeIf { deviceStatus == null }, "心率" to onHeart).forEach { (label, action) ->
                         DropdownMenuItem(text = { Text(label) }, onClick = { more = false; action() })
                     }
                 }
@@ -234,13 +265,14 @@ private fun ChatHeader(
                 Column(Modifier.weight(1f).padding(bottom = 6.dp)) {
                     Text(annotated, maxLines = if (titleHit == null) 1 else 3, overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text(connections.status, style = MaterialTheme.typography.labelSmall,
+                    Text(deviceStatus ?: connections.status, style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
                         overflow = TextOverflow.Ellipsis)
                 }
                 Box(Modifier.weight(.8f), contentAlignment = Alignment.CenterEnd) {
                     TextButton(onClick = onSettings) {
-                        Text(connections.keyName.ifBlank { "连接设置" }, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(if (deviceStatus == null) connections.keyName.ifBlank { "连接设置" } else "设备设置",
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
             }
@@ -342,12 +374,12 @@ private fun AndroidSessionSidebar(
 @Composable
 private fun ChatTimeline(
     session: MobileSession, busy: Boolean, bound: Boolean, hit: MobileHistoryHit?,
-    jumpTurn: String?, onJumpHandled: () -> Unit, onHitShown: () -> Unit,
+    jumpTurn: String?, onJumpHandled: () -> Unit, ime: AndroidChatIme, onHitShown: () -> Unit,
     onCreate: () -> Unit, onRetry: (MobileTurn) -> Unit, onRetryMedia: (MobileTurn, MobileAsset) -> Unit,
 ) {
     if (session.turns.isEmpty()) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(Modifier.fillMaxSize().clipToBounds(), contentAlignment = Alignment.Center) {
+            Column(Modifier.graphicsLayer { translationY = ime.translation() / 2f }, horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("开始一段对话", style = MaterialTheme.typography.titleMedium)
                 Text("在下方输入消息。", style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -358,28 +390,17 @@ private fun ChatTimeline(
         return
     }
     val list = rememberLazyListState()
-    var follow by rememberSaveable { mutableStateOf(true) }
     var center by remember { mutableFloatStateOf(0f) }
     var targetLine by remember(hit) { mutableStateOf<Float?>(null) }
     var markedTurn by remember { mutableStateOf<String?>(null) }
     val finished by rememberUpdatedState(onHitShown)
     val handled by rememberUpdatedState(onJumpHandled)
     val bodyHit = hit?.takeIf { it.turnId != null }
-    val lastIndex = session.turns.size * 2 // A short end marker also follows growing, multi-screen replies.
-    val nearTail = with(LocalDensity.current) { 24.dp.roundToPx() }
-    val observer = remember(list, lastIndex, nearTail) {
+    val messageCount = session.turns.size * 2
+    val observer = remember {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                if (available.y != 0f) { follow = false; finished() }
-                return Offset.Zero
-            }
-            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-                if (consumed.y < 0f) {
-                    val info = list.layoutInfo
-                    val last = info.visibleItemsInfo.lastOrNull()
-                    if (!list.canScrollForward || (last != null && last.index >= lastIndex - 1 &&
-                            last.offset + last.size - info.viewportEndOffset <= nearTail)) follow = true
-                }
+                if (available.y != 0f) finished()
                 return Offset.Zero
             }
         }
@@ -388,13 +409,12 @@ private fun ChatTimeline(
         if (bodyHit == null) return@LaunchedEffect
         val round = session.turns.indexOfFirst { it.id == bodyHit.turnId }
         if (round < 0) return@LaunchedEffect
-        follow = false
-        list.scrollToItem(round * 2 + if (bodyHit.side == MobileHistorySide.ASSISTANT) 1 else 0)
+        list.scrollToItem(messageCount - round * 2 - if (bodyHit.side == MobileHistorySide.ASSISTANT) 1 else 0)
         snapshotFlow { targetLine }.filterNotNull().first()
         // Follow the measured line while the search keyboard closes and media previews acquire their size.
         withTimeoutOrNull(2000) {
             snapshotFlow { targetLine?.minus(center) }.filterNotNull().collect { delta ->
-                if (kotlin.math.abs(delta) >= 1f) list.scrollBy(delta)
+                if (kotlin.math.abs(delta) >= 1f) list.scrollBy(-delta)
             }
         }
         finished()
@@ -403,8 +423,12 @@ private fun ChatTimeline(
         if (jumpTurn == null) return@LaunchedEffect
         val round = session.turns.indexOfFirst { it.id == jumpTurn }
         if (round >= 0) {
-            follow = false
-            list.scrollToItem(round * 2 + 1)
+            val index = messageCount - round * 2 - 1
+            list.scrollToItem(index)
+            val layout = list.layoutInfo
+            layout.visibleItemsInfo.firstOrNull { it.index == index }?.let { row ->
+                list.scrollBy((row.size - (layout.viewportEndOffset - layout.viewportStartOffset)).toFloat())
+            }
             markedTurn = jumpTurn
         }
         handled()
@@ -412,21 +436,21 @@ private fun ChatTimeline(
     LaunchedEffect(markedTurn) {
         if (markedTurn != null) { delay(2000); markedTurn = null }
     }
-    LaunchedEffect(follow, bodyHit, jumpTurn, lastIndex) {
-        if (!follow || bodyHit != null || jumpTurn != null) return@LaunchedEffect
-        snapshotFlow {
-            val info = list.layoutInfo
-            !list.isScrollInProgress && info.totalItemsCount == lastIndex + 1 &&
-                info.viewportSize.height > 0 && list.canScrollForward
-        }.collect { behind -> if (behind && follow) list.scrollToItem(lastIndex) }
-    }
+    val scope = rememberCoroutineScope()
     Box(Modifier.fillMaxSize()) {
-        LazyColumn(Modifier.fillMaxSize().nestedScroll(observer).onGloballyPositioned {
+        val hitGeometry = if (bodyHit == null) Modifier else Modifier.nestedScroll(observer).onGloballyPositioned {
             center = it.positionInRoot().y + it.size.height / 2f
-        }.testTag("message-region"), state = list,
+        }
+        LazyColumn(Modifier.fillMaxSize().clipToBounds().chatImeReverseHistory(ime, list)
+            .then(hitGeometry).testTag("message-region"), state = list, reverseLayout = true,
             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(lastIndex, key = { index -> "${session.turns[index / 2].id}/${index % 2}" }) { index ->
+            item(key = "end-of-chat") { Spacer(Modifier.height(1.dp)) }
+            items(messageCount, key = { reversed ->
+                val index = messageCount - 1 - reversed
+                "${session.turns[index / 2].id}/${index % 2}"
+            }) { reversed ->
+                val index = messageCount - 1 - reversed
                 val turn = session.turns[index / 2]
                 val user = index % 2 == 0
                 val side = if (user) MobileHistorySide.USER else MobileHistorySide.ASSISTANT
@@ -435,11 +459,10 @@ private fun ChatTimeline(
                     canRetry = !busy && !bound, onRetry = { onRetry(turn) },
                     onRetryMedia = { asset -> onRetryMedia(turn, asset) }, onLine = { targetLine = it })
             }
-            item(key = "end-of-chat") { Spacer(Modifier.height(1.dp)) }
         }
-        if (!follow && list.canScrollForward) {
-            OutlinedButton(onClick = { finished(); follow = true },
-                modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
+        if (list.canScrollBackward) {
+            OutlinedButton(onClick = { finished(); scope.launch { list.scrollToItem(0) } },
+                modifier = Modifier.align(Alignment.BottomEnd).moveWithChatIme(ime).padding(8.dp),
                 colors = ButtonDefaults.outlinedButtonColors(containerColor = MaterialTheme.colorScheme.surface)) {
                 Text("回到最新")
             }
@@ -521,120 +544,6 @@ private fun ChatBubble(
                         Text("复制正文", style = MaterialTheme.typography.labelSmall)
                     }
                     if (!user && canRetry && turn.status != "已完成") TextButton(onClick = onRetry) { Text("重试") }
-                }
-            }
-        }
-    }
-}
-
-private fun clipboardImages(context: Context): List<Uri> {
-    val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return emptyList()
-    val clip = clipboard.primaryClip ?: return emptyList()
-    return (0 until clip.itemCount).mapNotNull { i ->
-        clip.getItemAt(i).uri?.takeIf { uri ->
-            uri.scheme == "content" && (runCatching { context.contentResolver.getType(uri) }.getOrNull()
-                ?.startsWith("image/") ?: clip.description.hasMimeType("image/*"))
-        }
-    }
-}
-
-@Composable
-private fun ChatComposer(
-    scopeId: String, draft: MobileDraft, busy: Boolean, short: Boolean,
-    onDraftText: (String) -> Unit, onRemoveAsset: (MobileAsset) -> Unit,
-    onAddAssets: (List<MobileAsset>) -> Unit, onSend: () -> Unit, onNote: (String) -> Unit,
-) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var recording by remember(scopeId) { mutableStateOf(false) }
-    val canSend = !busy && !recording && (draft.text.isNotBlank() || draft.attachments.isNotEmpty())
-    // Draft text is already durable. Saving only the selection keeps large drafts out of the Activity bundle.
-    val fieldSaver = Saver<TextFieldValue, IntArray>(
-        save = { intArrayOf(it.selection.start, it.selection.end) },
-        restore = { TextFieldValue(draft.text, TextRange(it[0], it[1])) },
-    )
-    var field by rememberSaveable(scopeId, stateSaver = fieldSaver) {
-        mutableStateOf(TextFieldValue(draft.text, TextRange(draft.text.length)))
-    }
-    val displayed = if (field.text == draft.text) field else field.copy(text = draft.text, composition = null)
-    SideEffect { if (field != displayed) field = displayed }
-    fun edit(value: TextFieldValue) {
-        val textChanged = value.text != field.text
-        field = value
-        if (textChanged) onDraftText(value.text)
-    }
-    fun pasteImages(): Boolean {
-        val uris = runCatching { clipboardImages(context) }.getOrDefault(emptyList())
-        if (uris.isEmpty()) return false
-        scope.launch {
-            try {
-                val added = withContext(Dispatchers.IO) { importMobileImages(context, uris) }
-                onAddAssets(added)
-                onNote(if (added.size < uris.distinct().size) "部分图片无法读取，请重新选择。" else "")
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (e: Exception) { onNote(e.message ?: "无法读取剪贴板图片，请重新选择。") }
-        }
-        return true
-    }
-    Surface(Modifier.fillMaxWidth(), tonalElevation = 1.dp) {
-        Column(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
-            if (draft.attachments.isNotEmpty()) {
-                Box(Modifier.fillMaxWidth().heightIn(max = if (short) 52.dp else 110.dp)
-                    .verticalScroll(rememberScrollState())) {
-                    AndroidAssetList(draft.attachments, onRemove = onRemoveAsset)
-                }
-            }
-            Layout(modifier = Modifier.fillMaxWidth(), content = {
-                Box {
-                    AndroidMediaActions(scopeId = scopeId, enabled = !busy, onAdd = onAddAssets, onNote = onNote,
-                        onRecordingChanged = { recording = it })
-                }
-                OutlinedTextField(value = displayed, onValueChange = ::edit,
-                    modifier = Modifier.testTag("composer-field").onPreviewKeyEvent { event ->
-                        if (event.type != KeyEventType.KeyDown || event.nativeKeyEvent.flags and
-                            NativeKeyEvent.FLAG_SOFT_KEYBOARD != 0) return@onPreviewKeyEvent false
-                        when {
-                            event.key == Key.V && event.isCtrlPressed && !busy -> pasteImages()
-                            (event.key == Key.Enter || event.key == Key.NumPadEnter) && displayed.composition != null -> false
-                            (event.key == Key.Enter || event.key == Key.NumPadEnter) && event.isShiftPressed -> {
-                                val from = displayed.selection.min
-                                val to = displayed.selection.max
-                                edit(TextFieldValue(displayed.text.replaceRange(from, to, "\n"), TextRange(from + 1)))
-                                true
-                            }
-                            (event.key == Key.Enter || event.key == Key.NumPadEnter) && !event.isCtrlPressed -> {
-                                if (canSend && event.nativeKeyEvent.repeatCount == 0) onSend()
-                                true
-                            }
-                            else -> false
-                        }
-                    },
-                    placeholder = { Text(if (draft.attachments.isEmpty()) "输入消息…" else "添加附件说明…",
-                        maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    shape = RoundedCornerShape(14.dp), maxLines = if (short) 2 else 4,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default))
-                Button(onClick = onSend, enabled = canSend, shape = RoundedCornerShape(12.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp)) { Text("发送") }
-            }) { children, constraints ->
-                val loose = constraints.copy(minWidth = 0, minHeight = 0)
-                val send = children[2].measure(loose)
-                val gap = 4.dp.roundToPx()
-                val media = children[0].measure(loose.copy(maxWidth = (constraints.maxWidth - send.width - gap).coerceAtLeast(0)))
-                val fieldSpace = constraints.maxWidth - media.width - send.width - gap * 2
-                val stacked = fieldSpace < (128.dp * fontScale.coerceAtMost(1.6f)).roundToPx()
-                val actionsHeight = maxOf(media.height, send.height)
-                val fieldWidth = if (stacked) constraints.maxWidth else fieldSpace
-                val fieldMaxHeight = if (stacked) (loose.maxHeight - actionsHeight).coerceAtLeast(0) else loose.maxHeight
-                val fieldPlace = children[1].measure(loose.copy(minWidth = fieldWidth, maxWidth = fieldWidth,
-                    maxHeight = fieldMaxHeight))
-                val height = if (stacked) fieldPlace.height + actionsHeight else maxOf(fieldPlace.height, actionsHeight)
-                layout(constraints.maxWidth, height) {
-                    val rowY = if (stacked) fieldPlace.height else 0
-                    val rowHeight = height - rowY
-                    media.placeRelative(0, rowY + (rowHeight - media.height) / 2)
-                    send.placeRelative(constraints.maxWidth - send.width, rowY + (rowHeight - send.height) / 2)
-                    fieldPlace.placeRelative(if (stacked) 0 else media.width + gap,
-                        if (stacked) 0 else (height - fieldPlace.height) / 2)
                 }
             }
         }

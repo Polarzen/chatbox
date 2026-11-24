@@ -120,7 +120,7 @@ internal class DesktopStore(private val file: Path) {
                 row.getString("id"),
                 row.getJSONArray("entries").length(),
                 row.getString("id") == current,
-                manualName ?: defaultSessionTitle(row),
+                manualName ?: sessionTitle(row),
                 manualName,
                 sessionTimestamp(row, "lastActivityAt") ?: sessionTimestamp(row, "lastUsedAt") ?: sessionTimestamp(row, "createdAt") ?: 0L,
             )
@@ -137,7 +137,7 @@ internal class DesktopStore(private val file: Path) {
             for (index in 0 until rows.length()) {
                 checkHistorySearchCancellation(cancelled)
                 val row = rows.getJSONObject(index)
-                val title = manualSessionName(row) ?: defaultSessionTitle(row)
+                val title = manualSessionName(row) ?: sessionTitle(row)
                 val entries = row.getJSONArray("entries")
                 val textEntries = buildList {
                     for (entryIndex in 0 until entries.length()) {
@@ -153,6 +153,9 @@ internal class DesktopStore(private val file: Path) {
 
     private fun manualSessionName(session: JSONObject): String? =
         (session.opt("manualName") as? String)?.takeIf { it.isNotBlank() }
+
+    private fun sessionTitle(session: JSONObject): String =
+        session.optString("deviceTitle").takeIf { it.isNotBlank() } ?: defaultSessionTitle(session)
 
     /** Finds or creates a manual profile by normalized address and selects its current session. */
     @Synchronized
@@ -281,6 +284,11 @@ internal class DesktopStore(private val file: Path) {
             val profile = requireProfile(copy, profileId)
             val session = findSession(profile, sessionId) ?: error("Unknown session")
             if (trimmed == null) session.remove("manualName") else session.put("manualName", trimmed)
+            if (profile.has("deviceProfile") && profile.optString("kind") != "device" && !session.optBoolean("deviceRemote") &&
+                !session.has("deviceAuthority")) {
+                session.remove("deviceTitle")
+                session.put("deviceRename", true)
+            }
         }
     }
 
@@ -293,9 +301,27 @@ internal class DesktopStore(private val file: Path) {
             val sessions = profile.getJSONArray("sessions")
             val deletedIndex = indexOfSession(profile, sessionId)
             val wasCurrent = profile.optString("currentSession") == sessionId
+            require(deletedIndex >= 0) { "Unknown session" }
+            if (profile.has("deviceProfile")) {
+                val row = sessions.getJSONObject(deletedIndex)
+                val sid = row.optString("deviceSid", sessionId)
+                if (row.has("deviceSid") || row.optJSONArray("deviceQueue")?.length()?.let { it > 0 } == true ||
+                    row.getJSONArray("entries").length() > 0) {
+                    val owner = if (!row.has("deviceAuthority")) profile else {
+                        val all = profileArray(copy)
+                        (0 until all.length()).map { all.getJSONObject(it) }.single {
+                            it.optJSONObject("deviceProfile")?.optString("profile") == row.getString("deviceAuthority")
+                        }
+                    }
+                    val removed = owner.optJSONObject("deviceRemoved") ?: JSONObject().also { owner.put("deviceRemoved", it) }
+                    removed.put(sid, true)
+                }
+            }
             if (profile.has("profileAuthorization")) {
                 val removed = profile.optJSONObject("profileRemoved") ?: JSONObject().also { profile.put("profileRemoved", it) }
-                removed.put(sessionId, true)
+                // A proven alias has a separate canonical device tombstone above. Its old
+                // per-profile permission still needs the original SID removed on the legacy API.
+                removed.put(sessionId, !sessions.getJSONObject(deletedIndex).has("deviceAuthority"))
             }
             sessions.remove(deletedIndex)
 
@@ -465,8 +491,10 @@ internal class DesktopStore(private val file: Path) {
      * textual shared projection, which intentionally lacks its original attachment references. */
     @Synchronized
     fun mergeProfilePage(key: SessionKey, remoteProfile: String, page: List<SharedTurn>, activity: Long = 0): Boolean {
-        val terminal = page.takeWhile { it.status != "running" }
-        check(page.drop(terminal.size).all { it.status == "running" }) { "共享服务返回了异常的轮次次序。" }
+        val finished = page.takeWhile { it.status != "running" }
+        check(page.drop(finished.size).all { it.status == "running" }) { "共享服务返回了异常的轮次次序。" }
+        val waitingMedia = nextDeviceSend(key)?.takeIf { it.entry != null && it.phase != "confirmed" }
+        val terminal = finished.takeWhile { it.id != waitingMedia?.id }
         if (terminal.isEmpty()) return false
         var changed = false
         persist(requireAtomic = true) { copy ->
@@ -481,15 +509,31 @@ internal class DesktopStore(private val file: Path) {
                     check(entries.getJSONObject(row.seq.toInt() - 1).getString("profileTurnId") == row.id) { "共享轮次编号与本机不同。" }
                 } else {
                     require(row.status == "complete" || row.status == "unknown")
-                    entries.put(JSONObject().put("profileTurnId", row.id).put("profileTurnSeq", row.seq)
-                        .put("question", row.question).put("answer", row.answer)
-                        .put("status", if (row.status == "complete") "已完成" else "上次回复未确认"))
+                    val operation = session.optJSONArray("deviceQueue")?.optJSONObject(0)
+                        ?.takeIf { it.getString("id") == row.id }
+                    val status = if (row.status == "complete") "已完成" else "上次回复未确认"
+                    val local = operation?.optJSONObject("entry")
+                    val result = if (local != null) {
+                        val native = chatEntryFrom(local)
+                        check(desktopSharedSeedTurn(native).question == row.question) { "媒体操作与服务返回的消息不同。" }
+                        val projection = desktopSharedSeedTurn(native)
+                        check(projection.answer == row.answer && projection.status == row.status) { "媒体回执与本机结果不同。" }
+                        entryToJson(native.copy(status = status))
+                    } else JSONObject().put("question", row.question).put("answer", row.answer).put("status", status)
+                    entries.put(result.put("profileTurnId", row.id).put("profileTurnSeq", row.seq))
                     if (activity > session.optLong("lastActivityAt")) session.put("lastActivityAt", activity)
                     changed = true
                 }
                 if (pending?.getString("id") == row.id) {
                     check(pending.getString("question") == row.question)
                     meta.remove("pending")
+                }
+                val queue = session.optJSONArray("deviceQueue")
+                val op = queue?.optJSONObject(0)
+                if (op?.getString("id") == row.id) {
+                    check(op.getString("question") == row.question) { "设备发送回执正文不一致。" }
+                    queue.remove(0)
+                    changed = true
                 }
             }
         }
@@ -501,6 +545,12 @@ internal class DesktopStore(private val file: Path) {
         requireProfile(state, profileId).optJSONObject("profileRemoved")?.keySet()?.toList().orEmpty()
 
     @Synchronized
+    fun legacyDeviceRemovals(profileId: String): Set<String> =
+        requireProfile(state, profileId).optJSONObject("profileRemoved")?.let { rows ->
+            rows.keySet().filterTo(mutableSetOf()) { rows.optBoolean(it, true) }
+        }.orEmpty()
+
+    @Synchronized
     fun acknowledgeProfileRemoval(profileId: String, sid: String) {
         persist(requireAtomic = true) { copy ->
             requireProfile(copy, profileId).optJSONObject("profileRemoved")?.remove(sid)
@@ -509,6 +559,226 @@ internal class DesktopStore(private val file: Path) {
 
     @Synchronized
     fun hasLegacySharedRecord(key: SessionKey): Boolean = historySession(state, key).keySet().any { it.startsWith("shared-") }
+
+    @Synchronized
+    fun deviceOwner(): Pair<String, String>? = state.optJSONObject("deviceOwner")?.let {
+        it.getString("instance") to it.getString("device")
+    }
+
+    @Synchronized
+    fun saveDeviceOwner(instance: String, device: String) {
+        val existing = deviceOwner()
+        if (existing == instance to device) return
+        check(existing == null) { "此电脑历史已绑定另一共享服务实例，请选择原数据库。" }
+        persist(requireAtomic = true) { it.put("deviceOwner", JSONObject().put("instance", instance).put("device", device)) }
+    }
+
+    @Synchronized
+    fun deviceProfile(profileId: String): DeviceProfile? = findProfile(state, profileId)?.optJSONObject("deviceProfile")?.let {
+        DeviceProfile(it.getString("profile"), it.getString("sourceId"), it.getString("base"), it.getString("username"),
+            it.getString("name"), it.getString("originDevice"), it.getString("upstream"), it.getBoolean("available"))
+    }
+
+    /** Remote source ids belong to their originating installation. Only the publisher may associate
+     * a local native profile. All other profiles get a separate, stable device namespace. */
+    @Synchronized
+    fun cacheDeviceProfile(remote: DeviceProfile, nativeId: String? = null): String {
+        val (instance, owner) = checkNotNull(deviceOwner())
+        if (nativeId != null) check(remote.originDevice == owner && remote.username == username && remote.sourceId == nativeId)
+        val mapped = profiles.firstOrNull { deviceProfile(it.id)?.profile == remote.profile }?.id
+        val id = nativeId ?: mapped ?: "device:$instance:${remote.profile}"
+        check(mapped == null || mapped == id) { "设备目录与本机来源映射不一致。" }
+        val old = deviceProfile(id)
+        if (old == remote) return id
+        check(old == null || old.profile == remote.profile && old.username == remote.username && old.originDevice == remote.originDevice)
+        persist(requireAtomic = true) { copy ->
+            val profile = findProfile(copy, id) ?: JSONObject().put("id", id).put("address", "")
+                .put("kind", "device").put("offlineOnly", true).put("currentSession", "").put("sessions", JSONArray())
+                .also { profileArray(copy).put(it) }
+            profile.put("deviceProfile", JSONObject().put("profile", remote.profile).put("sourceId", remote.sourceId)
+                .put("base", remote.base).put("username", remote.username).put("name", remote.name)
+                .put("originDevice", remote.originDevice).put("upstream", remote.upstream).put("available", remote.available))
+        }
+        return id
+    }
+
+    @Synchronized
+    fun prepareDeviceHistory(key: SessionKey, remote: String) {
+        val row = historySession(state, key)
+        if (row.has("profileHistory")) {
+            profileMetadata(row, remote)
+            return
+        }
+        val entries = row.getJSONArray("entries")
+        check((0 until entries.length()).none { entries.getJSONObject(it).getString("status") == "发送中" }) { "本机会话仍在发送，请稍后同步。" }
+        persist(requireAtomic = true) {
+            historySession(it, key).put("profileHistory", JSONObject().put("profile", remote).put("prefix", entries.length()))
+        }
+    }
+
+    @Synchronized
+    fun deviceSessionState(key: SessionKey): DesktopDeviceSessionState {
+        val row = findProfile(state, key.profileId)?.let { findSession(it, key.sessionId) }
+            ?: return DesktopDeviceSessionState("", false, "本机会话已删除。", false, 0)
+        return DesktopDeviceSessionState(row.optString("deviceSid"), row.optBoolean("deviceRemote"),
+            row.optString("deviceReason"), row.optBoolean("deviceRename"), row.optJSONArray("deviceQueue")?.length() ?: 0,
+            row.optString("deviceAuthority"))
+    }
+
+    /** Called only for a server-returned canonical key after presentation of the original owner proof. */
+    @Synchronized
+    fun bindProvenRoom(key: SessionKey, localScope: String, remote: DeviceSession, snapshot: Chat, aligned: Boolean) {
+        val before = historySession(state, key)
+        check(chatFrom(before) == snapshot && (!before.has("deviceAuthority") ||
+            before.getString("deviceAuthority") == remote.profile && before.getString("deviceSid") == remote.sid))
+        persist(requireAtomic = true) { copy ->
+            val row = historySession(copy, key)
+            val meta = profileMetadata(row, localScope)
+            if (!aligned) {
+                check(!row.has("deviceOriginal"))
+                row.put("deviceOriginal", JSONObject().put("id", key.sessionId).put("entries", row.getJSONArray("entries")))
+                row.put("entries", JSONArray())
+                meta.put("prefix", 0)
+            }
+            row.put("deviceAuthority", remote.profile).put("deviceSid", remote.sid)
+            row.put("deviceTitle", remote.title).put("deviceReason", remote.reason)
+            row.remove("deviceRename")
+        }
+    }
+
+    @Synchronized
+    fun deviceOriginal(key: SessionKey): Chat? =
+        findProfile(state, key.profileId)?.let { findSession(it, key.sessionId) }?.optJSONObject("deviceOriginal")?.let(::chatFrom)
+
+    @Synchronized
+    fun recordedTurnIds(key: SessionKey): List<String?> {
+        val entries = historySession(state, key).getJSONArray("entries")
+        return List(entries.length()) { entries.getJSONObject(it).opt("profileTurnId") as? String }
+    }
+
+    private fun authorityKeys(): Map<SessionKey, SessionKey> = buildMap {
+        val profiles = profileArray(state)
+        for (i in 0 until profiles.length()) {
+            val profile = profiles.getJSONObject(i)
+            val scope = profile.optJSONObject("deviceProfile")?.getString("profile") ?: continue
+            val rows = profile.getJSONArray("sessions")
+            for (j in 0 until rows.length()) {
+                val row = rows.getJSONObject(j)
+                val sid = row.optString("deviceSid")
+                if (sid.isNotEmpty()) put(SessionKey(profile.getString("id"), row.getString("id")),
+                    SessionKey(row.optString("deviceAuthority", scope), sid))
+            }
+        }
+    }
+
+    @Synchronized
+    fun deviceRelatedKeys(key: SessionKey): List<SessionKey> {
+        val authorities = authorityKeys()
+        val authority = authorities[key] ?: return listOf(key)
+        return authorities.filterValues { it == authority }.keys.toList()
+    }
+
+    @Synchronized
+    fun deviceRecentRepresentatives(selected: SessionKey, keys: List<SessionKey>): Set<SessionKey> {
+        val groups = keys.groupBy(authorityKeys()::get)
+        return buildSet {
+            addAll(groups[null].orEmpty())
+            for ((authority, members) in groups) if (authority != null) {
+                add(members.firstOrNull { it == selected } ?: members.firstOrNull { it.profileId == selected.profileId } ?: members.first())
+            }
+        }
+    }
+
+    /** The directory may contain sessions created by a different device even in our own profile. */
+    @Synchronized
+    fun cacheDeviceSession(profileId: String, remote: DeviceSession, native: SessionKey? = null, publishedTitle: String? = null): SessionKey {
+        val localScope = checkNotNull(deviceProfile(profileId)).profile
+        check(localScope == remote.profile || native != null && historySession(state, native).optString("deviceAuthority") == remote.profile)
+        val profile = requireProfile(state, profileId)
+        val rows = profile.getJSONArray("sessions")
+        val match = (0 until rows.length()).map { rows.getJSONObject(it) }.firstOrNull {
+            it.optString("deviceSid") == remote.sid && it.optString("deviceAuthority", localScope) == remote.profile
+        }
+        val key = native ?: SessionKey(profileId, match?.getString("id") ?: remote.sid)
+        check(key.profileId == profileId && remote.sid !in deviceRemoved(profileId))
+        val old = findSession(profile, key.sessionId)
+        check(old == null || !old.has("deviceSid") || old.getString("deviceSid") == remote.sid)
+        val renameAck = publishedTitle != null && old != null && (manualSessionName(old) ?: sessionTitle(old)) == publishedTitle
+        val dirty = old?.optBoolean("deviceRename") == true && !renameAck
+        if (old != null && old.optString("deviceSid") == remote.sid && old.optString("deviceReason") == remote.reason &&
+            old.optLong("lastActivityAt") >= remote.activity && (dirty || old.optString("deviceTitle") == remote.title) &&
+            (!renameAck || !old.optBoolean("deviceRename"))) return key
+        persist(requireAtomic = true) { copy ->
+            val target = requireProfile(copy, profileId)
+            val row = findSession(target, key.sessionId) ?: newSession(key.sessionId).put("deviceRemote", true)
+                .put("profileHistory", JSONObject().put("profile", remote.profile).put("prefix", 0)).also {
+                    target.getJSONArray("sessions").put(it)
+                }
+            row.put("deviceSid", remote.sid).put("deviceReason", remote.reason)
+            if (!dirty) row.put("deviceTitle", remote.title)
+            if (renameAck) row.remove("deviceRename")
+            if (remote.activity > row.optLong("lastActivityAt")) row.put("lastActivityAt", remote.activity)
+        }
+        return key
+    }
+
+    @Synchronized
+    fun deviceRemoved(profileId: String): Set<String> =
+        requireProfile(state, profileId).optJSONObject("deviceRemoved")?.keySet()?.toSet().orEmpty()
+
+    @Synchronized
+    fun acknowledgeDeviceRemoval(profileId: String, sid: String) {
+        persist(requireAtomic = true) { requireProfile(it, profileId).optJSONObject("deviceRemoved")?.remove(sid) }
+    }
+
+    @Synchronized
+    fun queueDeviceSend(key: SessionKey, question: String, revision: Long, entry: Entry? = null): String {
+        check(revision >= (appliedDraftRevisions[key] ?: Long.MIN_VALUE)) { "草稿已更新，请重新发送。" }
+        val id = UUID.randomUUID().toString()
+        persist(requireAtomic = true) { copy ->
+            val row = historySession(copy, key)
+            check(revision != appliedDraftRevisions[key] || row.has("draft")) { "此草稿已提交。" }
+            check(revision != appliedDraftRevisions[key] || entry != null || readDraft(key).attachments.isEmpty())
+            val queue = row.optJSONArray("deviceQueue") ?: JSONArray().also { row.put("deviceQueue", it) }
+            val op = JSONObject().put("id", id).put("question", question)
+            entry?.let { op.put("entry", entryToJson(it)) }
+            queue.put(op)
+            row.remove("draft")
+        }
+        appliedDraftRevisions[key] = revision
+        return id
+    }
+
+    @Synchronized
+    fun nextDeviceSend(key: SessionKey): DesktopDevicePending? =
+        historySession(state, key).optJSONArray("deviceQueue")?.optJSONObject(0)?.let {
+            DesktopDevicePending(it.getString("id"), it.getString("question"), it.optString("method"),
+                it.optString("phase"), it.optJSONObject("entry")?.let(::chatEntryFrom))
+        }
+
+    @Synchronized
+    fun hasLegacyProfilePending(key: SessionKey): Boolean =
+        historySession(state, key).optJSONObject("profileHistory")?.has("pending") == true
+
+    /** Desktop's process-wide history lock and this atomic comparison grant one native upload. */
+    @Synchronized
+    fun claimDeviceMedia(key: SessionKey, id: String): Boolean {
+        val pending = nextDeviceSend(key) ?: return false
+        if (pending.id != id || pending.entry == null || pending.method != "media" || pending.phase.isNotEmpty()) return false
+        markDeviceSend(key, id, "media", "dispatch")
+        return true
+    }
+
+    /** The method and native execution boundary must survive loss of an HTTP receipt or process exit. */
+    @Synchronized
+    fun markDeviceSend(key: SessionKey, id: String, method: String, phase: String = "", entry: Entry? = null) {
+        persist(requireAtomic = true) { copy ->
+            val op = historySession(copy, key).getJSONArray("deviceQueue").getJSONObject(0)
+            check(op.getString("id") == id && (!op.has("method") || op.getString("method") == method))
+            op.put("method", method).put("phase", phase)
+            entry?.let { op.put("entry", entryToJson(it)) }
+        }
+    }
 
     @Synchronized
     fun saveDraft(key: SessionKey, revision: Long, draft: ComposerDraft) {
@@ -581,11 +851,17 @@ internal class DesktopStore(private val file: Path) {
                 val session = sessions.getJSONObject(j)
                 val attachments = session.optJSONObject("draft")?.getJSONArray("attachments")
                 if (attachments != null) for (k in 0 until attachments.length()) keep(attachments.getString(k))
-                val entries = session.getJSONArray("entries")
-                for (k in 0 until entries.length()) {
-                    val entry = entries.getJSONObject(k)
-                    (entry.opt("attachmentReference") as? String)?.takeIf { it.isNotEmpty() }?.let(::keep)
-                    attachmentReferencesFrom(entry).forEach(::keep)
+                val queue = session.optJSONArray("deviceQueue")
+                if (queue != null) for (k in 0 until queue.length()) {
+                    val media = queue.getJSONObject(k).optJSONObject("entry") ?: continue
+                    attachmentReferencesFrom(media).forEach(::keep)
+                }
+                for (entries in listOfNotNull(session.getJSONArray("entries"), session.optJSONObject("deviceOriginal")?.getJSONArray("entries"))) {
+                    for (k in 0 until entries.length()) {
+                        val entry = entries.getJSONObject(k)
+                        (entry.opt("attachmentReference") as? String)?.takeIf { it.isNotEmpty() }?.let(::keep)
+                        attachmentReferencesFrom(entry).forEach(::keep)
+                    }
                 }
             }
         }
@@ -597,7 +873,7 @@ internal class DesktopStore(private val file: Path) {
         var chat: Chat? = null
         persist { copy ->
             val profile = requireProfile(copy, profileId)
-            require(!profile.optBoolean("offlineOnly") || profile.optString("kind") == "shared") { "Legacy offline profiles cannot start sessions" }
+            require(!profile.optBoolean("offlineOnly") || profile.optString("kind") in setOf("shared", "device")) { "Legacy offline profiles cannot start sessions" }
             val session = newSession(UUID.randomUUID().toString())
             insertSessionAtHead(profile, session)
             profile.put("currentSession", session.getString("id"))
@@ -668,7 +944,7 @@ internal class DesktopStore(private val file: Path) {
             val rows = profileArray(copy)
             for (index in 0 until rows.length()) {
                 val source = rows.getJSONObject(index)
-                if (!source.optBoolean("offlineOnly") || source.optString("kind") == "shared") continue
+                if (!isAdoptableLegacy(source)) continue
                 val sourceSessions = source.getJSONArray("sessions")
                 for (sessionIndex in 0 until sourceSessions.length()) {
                     val session = sourceSessions.getJSONObject(sessionIndex)
@@ -690,6 +966,7 @@ internal class DesktopStore(private val file: Path) {
 
             for (index in 0 until rows.length()) {
                 val profile = rows.getJSONObject(index)
+                if (profile.optString("kind") == "device") continue
                 val sessionsArray = profile.getJSONArray("sessions")
                 val selected = profile.optString("currentSession")
                 if ((0 until sessionsArray.length()).none { sessionsArray.getJSONObject(it).getString("id") == selected }) {
@@ -706,13 +983,15 @@ internal class DesktopStore(private val file: Path) {
             }
             for (index in rows.length() - 1 downTo 0) {
                 val profile = rows.getJSONObject(index)
-                if (profile.optBoolean("offlineOnly") && profile.optString("kind") != "shared" &&
-                    profile.getJSONArray("sessions").length() == 0) rows.remove(index)
+                if (isAdoptableLegacy(profile) && profile.getJSONArray("sessions").length() == 0) rows.remove(index)
             }
             adopted = moved
         }
         return adopted
     }
+
+    private fun isAdoptableLegacy(profile: JSONObject): Boolean = profile.optBoolean("offlineOnly") &&
+        profile.optString("kind") != "shared" && profile.optString("kind") != "device"
 
     private fun readProfileInternal(profile: JSONObject, requestedSession: String?): Chat {
         val sessionId = requestedSession?.takeIf { it.isNotBlank() }
@@ -741,23 +1020,19 @@ internal class DesktopStore(private val file: Path) {
     private fun writeSessionContent(session: JSONObject, chat: Chat) {
         check(!session.has("profileHistory")) { "档案已授权，请通过原会话的档案共享入口发送。" }
         val entries = JSONArray()
-        chat.entries.forEach { entry ->
-            val row = JSONObject()
-                .put("question", entry.question)
-                .put("answer", entry.answer)
-                .put("status", entry.status)
-            val references = entry.attachmentReferences.ifEmpty {
-                entry.attachmentReference?.let(::listOf) ?: emptyList()
-            }
+        chat.entries.forEach { entries.put(entryToJson(it)) }
+        if (!entries.similar(session.optJSONArray("entries"))) session.put("lastActivityAt", System.currentTimeMillis())
+        session.put("entries", entries)
+    }
+
+    private fun entryToJson(entry: Entry): JSONObject = JSONObject()
+        .put("question", entry.question).put("answer", entry.answer).put("status", entry.status).also { row ->
+            val references = entry.attachmentReferences.ifEmpty { listOfNotNull(entry.attachmentReference) }
             (entry.attachmentReference ?: references.firstOrNull())?.let { row.put("attachmentReference", it) }
             entry.attachmentDisplayName?.let { row.put("attachmentDisplayName", it) }
             row.put("attachmentReferences", JSONArray(references))
             row.put("replyImages", replyAttachmentsToJson(entry.replyAttachments, entry.answer))
-            entries.put(row)
         }
-        if (!entries.similar(session.optJSONArray("entries"))) session.put("lastActivityAt", System.currentTimeMillis())
-        session.put("entries", entries)
-    }
 
     private fun newSession(id: String): JSONObject = JSONObject()
         .put("createdAt", System.currentTimeMillis())

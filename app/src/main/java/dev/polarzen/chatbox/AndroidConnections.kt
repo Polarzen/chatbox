@@ -177,6 +177,12 @@ internal class AndroidConnections internal constructor(private val storage: Andr
         else -> "离线"
     }
     fun token(): String? = activeToken
+
+    /** Resolve the credential captured by a queued native upload without selecting its profile. */
+    fun savedToken(address: String, id: String): String? {
+        val key = services.singleOrNull { it.base == address }?.keys?.singleOrNull { it.id == id } ?: return null
+        return try { storage.open(address,key) } catch (_: Exception) { null }
+    }
     private var revision = 0L
 
     private fun save(next: AndroidConnectionCatalog) {

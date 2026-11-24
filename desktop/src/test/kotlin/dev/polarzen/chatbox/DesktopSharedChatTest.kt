@@ -24,7 +24,9 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Assume.assumeTrue
@@ -120,6 +122,47 @@ class DesktopSharedChatTest {
             legacy.retryPending(old.id)
             assertEquals(old, legacy.local.pending)
             assertEquals(3, room.posts.size)
+        }
+    }
+
+    @Test fun draftsCoalesceAndFlushTheLatestEditAfterAnIdleWriteStarts() = runBlocking {
+        Room().use { room ->
+            val writes = CopyOnWriteArrayList<String?>()
+            val idleStarted = CompletableDeferred<Unit>()
+            val finishIdle = CountDownLatch(1)
+            val storage = object : SharedLocalStorage {
+                override fun load() = room.record
+                override fun save(value: String?) {
+                    val draft = value?.let { SharedLocal.decode(it, true).draft }
+                    if (draft == "正在保存") {
+                        idleStarted.complete(Unit)
+                        check(finishIdle.await(5, TimeUnit.SECONDS))
+                    }
+                    writes.add(draft)
+                    room.record = value
+                }
+            }
+            val state = SharedChatState(storage, true)
+            state.editDraft("正")
+            state.editDraft("正在")
+            state.editDraft("正在保存")
+            assertTrue(writes.isEmpty())
+            assertEquals("正在保存", state.local.draft)
+            withTimeout(5000) { idleStarted.await() }
+            try {
+                state.editDraft("最新")
+                assertEquals("最新", state.local.draft)
+            } finally {
+                finishIdle.countDown()
+            }
+            assertTrue(state.flushDraft())
+            assertEquals(listOf("正在保存", "最新"), writes)
+            assertEquals("最新", SharedChatState(storage, true).local.draft)
+
+            state.editDraft("即将离开")
+            state.leave {}
+            assertTrue(state.flushDraft())
+            assertNull(room.record)
         }
     }
 

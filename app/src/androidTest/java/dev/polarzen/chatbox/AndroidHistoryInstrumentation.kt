@@ -35,6 +35,8 @@ class AndroidHistoryInstrumentation : Instrumentation() {
         val phone = runCatching {
             try {
                 verifyHistory(fixture)
+                AndroidHistory(fixture).use { AndroidDeviceStoreChecks.verify(host,it) }
+                verifyDraftRevision(fixture)
             } finally {
                 host.deleteDatabase(testPrefix + "mobile-history.db")
                 host.deleteSharedPreferences(testPrefix + "personal_chat")
@@ -173,6 +175,27 @@ class AndroidHistoryInstrumentation : Instrumentation() {
                 owned.delete()
                 outside.delete()
                 pending.delete()
+            }
+        }
+    }
+
+    private fun verifyDraftRevision(fixture: Context) {
+        val base = "https://draft-test.invalid"
+        AndroidHistory(fixture).use { h ->
+            val sid = h.create(base).id
+            h.draftText(base,sid,"将发送的文字")
+            val captured = h.selected(base).draftRevision
+            h.draftText(base,sid,"编辑过")
+            h.draftText(base,sid,"将发送的文字")
+            h.begin(base,sid,MobileTurn("first","将发送的文字"),expectedDraftRevision = captured)
+            check(h.selected(base).draft.text == "将发送的文字")
+            h.begin(base,sid,MobileTurn("second","将发送的文字"),expectedDraftRevision = h.selected(base).draftRevision)
+            check(h.selected(base).draft.text.isEmpty())
+            h.draftText(base,sid,"保留到下次启动")
+            h.create(base)
+            AndroidHistory(fixture).use { reopened ->
+                val saved = reopened.sessions(base).single { it.id == sid }
+                check(saved.turns.map { it.id } == listOf("first","second") && saved.draft.text == "保留到下次启动")
             }
         }
     }

@@ -17,11 +17,15 @@ import time
 from urllib.parse import parse_qs, quote, urlsplit
 import uuid
 
+# Device modules import the common service contracts in both script and package mode.
+if __name__ == "__main__":
+    sys.modules[(__package__ + "." if __package__ else "") + "service"] = sys.modules[__name__]
+
 if __package__:
-    from . import astrbot
+    from . import astrbot, device_routes
     from .profile_service import migrate_profiles, profile_activity, reconcile
 else:
-    import astrbot
+    import astrbot, device_routes
     from profile_service import migrate_profiles, profile_activity, reconcile
 
 
@@ -92,14 +96,31 @@ def normalized_base(value):
 
 
 @contextmanager
-def database(path, write=False):
+def database(path, write=False, *, rebuild_rooms=False):
     uri = Path(path).resolve().as_uri() + "?mode=rw"
     with closing(sqlite3.connect(uri, uri=True, isolation_level=None, timeout=10)) as db:
         db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys=ON")
+        # SQLite's documented parent-table rebuild requires disabling FK actions before BEGIN.
+        # migrate_routes runs foreign_key_check before this migration transaction commits.
+        db.execute("PRAGMA foreign_keys=OFF" if rebuild_rooms else "PRAGMA foreign_keys=ON")
         db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
         with db:
             yield db
+
+
+def migrate_database(path):
+    with database(path, write=True, rebuild_rooms=True) as db:
+        device_routes.migrate_routes(db)
+        migrate_profiles(db)
+        device_api_module().migrate_device(db)
+
+
+def device_api_module():
+    if __package__:
+        from . import device_service
+    else:
+        import device_service
+    return device_service
 
 
 def launcher_module():
@@ -108,6 +129,13 @@ def launcher_module():
     else:
         import launcher
     return launcher
+
+
+def verified_launcher_base(identity):
+    try:
+        return normalized_base(launcher_module().url_for_identity(identity))
+    except Exception as exc:
+        raise astrbot.NotDispatched("无法核实已绑定的 Launcher 实例，请确认该实例正在运行。") from exc
 
 
 def initialize(path, upstream, aliases=(), launcher_bound=False):
@@ -124,11 +152,13 @@ def initialize(path, upstream, aliases=(), launcher_bound=False):
     os.close(fd)
     instance = str(uuid.uuid4())
     with closing(sqlite3.connect(path)) as db:
+        db.row_factory = sqlite3.Row
         db.execute("PRAGMA journal_mode=WAL")
         db.executescript("BEGIN IMMEDIATE;\n" + SCHEMA)
         migrate_profiles(db)
         db.execute("INSERT INTO config VALUES(?,?,?)", (instance, upstream, launcher_id))
         db.executemany("INSERT INTO sources VALUES(?)", [(base,) for base in sources])
+        device_routes.migrate_routes(db)
         db.commit()
     return instance
 
@@ -176,6 +206,9 @@ def consume_code(db, code, create):
 
 
 def grant(db, room, owner):
+    if not db.execute("SELECT 1 FROM rooms JOIN config ON rooms.upstream=config.instance WHERE rooms.id=? AND rooms.legacy=1",
+                      (room,)).fetchone():
+        raise ApiError(403, "原房间凭据只适用于默认上游。")
     token = secrets.token_urlsafe(32)
     db.execute("INSERT INTO devices VALUES(?,?,?,?)", (str(uuid.uuid4()), digest(token), room, int(owner)))
     instance = db.execute("SELECT instance FROM config").fetchone()[0]
@@ -243,8 +276,9 @@ def seed(body):
     return source, username, session, history
 
 
-def check_unclaimed(db, session):
-    if db.execute("SELECT 1 FROM rooms WHERE session=?", (session,)).fetchone():
+def check_unclaimed(db, upstream, session):
+    # Legacy room creation reserves a SID across its single configured instance.
+    if db.execute("SELECT 1 FROM rooms WHERE upstream=? AND session=?", (upstream, session)).fetchone():
         raise ApiError(409, "此 AstrBot 会话已绑定共享房间。")
 
 
@@ -279,9 +313,20 @@ def turn_page(rows, limit):
 PROFILE_READ = {"/v1/profile/" + action for action in ("sessions", "turns", "turn", "devices")}
 PROFILE_WRITE = {"/v1/profile/" + action for action in
                  ("create", "invite", "join", "revoke", "status", "session", "import", "remove", "send")}
-READ_ROUTES = {"/v1/turn", "/v1/turns"} | PROFILE_READ
+DEVICE_READ = {"/v1/device/" + action for action in
+               ("health", "me", "profiles", "sessions", "turns", "turn", "operation", "devices")}
+DEVICE_WRITE = {"/v1/device/" + action for action in
+                ("invite", "preview", "join", "endpoint", "prove", "revoke", "profile", "session", "import",
+                 "start", "send", "remove", "media-begin", "media-end")}
+READ_ROUTES = {"/v1/turn", "/v1/turns"} | PROFILE_READ | DEVICE_READ
 OWNER_ROUTES = {"/v1/invite", "/v1/cancel-invite", "/v1/revoke-guests"}
-WRITE_ROUTES = {"/v1/create", "/v1/join", "/v1/send"} | OWNER_ROUTES | PROFILE_WRITE
+WRITE_ROUTES = {"/v1/create", "/v1/join", "/v1/send"} | OWNER_ROUTES | PROFILE_WRITE | DEVICE_WRITE
+
+# The source device owns native media delivery, so restarting the bridge does not
+# establish whether that upstream request has started or stopped.
+MEDIA_RESERVATION = """EXISTS(SELECT 1 FROM device_operations op WHERE op.id=turns.id
+                              AND op.room=turns.room AND op.action='media-begin')"""
+MEDIA_RESOLVE_NOTICE = "仅在主人核实来源设备的发送已停止且 AstrBot 上游已空闲后，才可解除指定媒体轮次的预留。"
 
 
 class Service:
@@ -290,23 +335,30 @@ class Service:
         self.key = key
         self.workers = workers
         self.profiles = ProfileApi(self)
+        self.routes = device_routes.DeviceRoutes(self)
+        migrate_database(path)
         with database(path, write=True) as db:
-            migrate_profiles(db)
             config = dict(db.execute("SELECT * FROM config").fetchone())
+            self.default_upstream = config["instance"]
             self.upstream = config["upstream"]
             self.launcher_id = config.get("launcher_id")
             self.aliases = {row[0] for row in db.execute("SELECT base FROM sources")}
+            abandoned = "status='running' AND NOT " + MEDIA_RESERVATION
             db.execute("UPDATE profile_sessions SET fresh=0 WHERE fresh=1 AND room IN "
-                       "(SELECT room FROM turns WHERE status='running')")
-            db.execute("UPDATE turns SET status='unknown',needs_review=1 WHERE status='running'")
+                       "(SELECT room FROM turns WHERE " + abandoned + ")")
+            db.execute("UPDATE turns SET status='unknown',needs_review=1 WHERE " + abandoned)
+        self.devices = device_api_module().DeviceApi(self)
 
     def current_base(self):
-        if self.launcher_id is None:
-            return self.upstream
-        try:
-            return normalized_base(launcher_module().url_for_identity(self.launcher_id))
-        except Exception as exc:
-            raise astrbot.NotDispatched("无法核实已绑定的 Launcher 实例，请确认该实例正在运行。") from exc
+        return verified_launcher_base(self.launcher_id) if self.launcher_id else self.upstream
+
+    def proves_launcher_profile(self, original, source_id):
+        if not self.launcher_id or source_id != "launcher:" + self.launcher_id:
+            return False
+        # Before per-profile UUIDs, only a non-alias loopback address needed
+        # verification against this service's immutable Launcher identity.
+        return original["launcher_id"] == self.launcher_id or (
+            original["launcher_id"] is None and launcher_endpoint(original["base"]) and original["base"] not in self.aliases)
 
     def create(self, body):
         fields(body, ("code", "sourceBase", "username", "session", "history"))
@@ -314,7 +366,7 @@ class Service:
         with database(self.path) as db:
             check_code(db, code, create=True)
             source, username, session, history = seed(body)
-            check_unclaimed(db, session)
+            check_unclaimed(db, self.default_upstream, session)
         if source:
             try:
                 base = self.current_base()
@@ -332,9 +384,8 @@ class Service:
         # No database transaction spans network I/O. Recheck grant, expiry, and uniqueness together.
         with database(self.path, write=True) as db:
             consume_code(db, code, create=True)
-            check_unclaimed(db, session)
-            room = str(uuid.uuid4())
-            db.execute("INSERT INTO rooms VALUES(?,?,?)", (room, username, session))
+            check_unclaimed(db, self.default_upstream, session)
+            room = self.routes.ensure_room(db, self.default_upstream, username, session, legacy=True)
             for seq, turn in enumerate(history, 1):
                 unresolved = seq == len(history) and turn["status"] == "unknown"
                 db.execute("INSERT INTO turns(room,seq,id,question,answer,status,needs_review) VALUES(?,?,?,?,?,?,?)",
@@ -342,6 +393,8 @@ class Service:
             return grant(db, room, True)
 
     def read(self, route, token, params):
+        if route in DEVICE_READ:
+            return self.devices.read(route.rsplit("/", 1)[1], token, params)
         if route in PROFILE_READ:
             return self.profiles.read(route.rsplit("/", 1)[1], token, params)
         with database(self.path) as db:
@@ -362,6 +415,8 @@ class Service:
             return turn_page(rows, limit)
 
     def write(self, route, token, body):
+        if route in DEVICE_WRITE:
+            return self.devices.write(route.rsplit("/", 1)[1], token, body)
         if route in PROFILE_WRITE:
             return self.profiles.write(route.rsplit("/", 1)[1], token, body)
         if route == "/v1/create":
@@ -394,7 +449,7 @@ class Service:
                 return existing
             result = self.enqueue(db, room, turn_id, question)
             identity = db.execute("SELECT username,session FROM rooms WHERE id=?", (room,)).fetchone()
-        return self.dispatch_turn(room, result, identity["username"], identity["session"])
+        return self.dispatch_turn(room, result, identity["username"], identity["session"], legacy=True)
 
     @staticmethod
     def retry(db, room, turn_id, question):
@@ -418,11 +473,11 @@ class Service:
         profile_activity(db, room)
         return find_turn(db, room, turn_id)
 
-    def dispatch_turn(self, room, result, username, session):
+    def dispatch_turn(self, room, result, username, session, *, legacy=False):
         # Commit before contacting AstrBot. A lost HTTP response never owns this job's lifetime.
         turn_id = result["id"]
         try:
-            self.workers.submit(self.generate, room, turn_id, username, session, result["question"])
+            self.workers.submit(self.generate, room, turn_id, username, session, result["question"], legacy=legacy)
         except RuntimeError:
             self.finish(room, turn_id, "unknown", needs_review=False)
             raise ApiError(503, "服务正在停止，请查询该轮结果。")
@@ -436,7 +491,7 @@ class Service:
                     db.execute("UPDATE profile_sessions SET fresh=0 WHERE room=? AND fresh=1", (room,))
                 profile_activity(db, room)
 
-    def generate(self, room, turn_id, username, session, question):
+    def generate(self, room, turn_id, username, session, question, *, legacy=False):
         last_answer = ""
 
         def publish(answer):
@@ -453,8 +508,13 @@ class Service:
         status = "unknown"
         needs_review = True
         try:
-            astrbot.send(self.current_base(), self.key, username, session, question, publish,
-                         self.current_base if self.launcher_id else None)
+            with database(self.path) as db:
+                identity = db.execute("SELECT upstream FROM rooms WHERE id=? AND username=? AND session=?",
+                                      (room, username, session)).fetchone()
+            if not identity:
+                raise astrbot.NotDispatched("无法确认此房间的上游身份。")
+            base, key, verify = self.routes.target(identity[0], legacy=legacy)
+            astrbot.send(base, key, username, session, question, publish, verify)
             status = "complete"
             needs_review = False
         except astrbot.NotDispatched:
@@ -577,12 +637,7 @@ class ProfileApi:
                 if not original:
                     raise ApiError(403, "恢复码与原电脑档案、地址或用户身份不匹配。")
                 if original["base"] != base:
-                    # Before per-profile UUIDs were recorded, a non-alias source could only
-                    # have been admitted by current_base() on this same immutable service
-                    # binding. A historically accepted alias alone supplies no such proof.
-                    historical_proof = (original["launcher_id"] is None and launcher_endpoint(original["base"])
-                                        and original["base"] not in self.service.aliases)
-                    if not verify_launcher or (original["launcher_id"] != launcher_id and not historical_proof):
+                    if not verify_launcher or not self.service.proves_launcher_profile(original, source_id):
                         raise ApiError(403, "无法核实原档案与新地址属于同一 Launcher 实例，无法更换原地址。")
                     if existing:
                         raise ApiError(409, "此地址已有同来源的其他档案，无法合并。请核对 profiles 列出的编号。")
@@ -701,18 +756,7 @@ class ProfileApi:
             return 200, {}
 
     def check_origin(self, username, sid):
-        try:
-            # Leave time to persist and return a readable, read-only entry before the
-            # PC client's 12-second response timeout if the upstream index stalls.
-            deadline = time.monotonic() + 8
-            exists = astrbot.session_exists(self.service.current_base(), self.service.key, username, sid,
-                                           self.service.current_base if self.service.launcher_id else None,
-                                           deadline=deadline)
-            return exists, ""
-        except (astrbot.NotDispatched, astrbot.SessionIndexError) as exc:
-            return False, str(exc)
-        except (OSError, http.client.HTTPException):
-            return False, "无法核实 AstrBot 原会话，请检查上游连接。"
+        return self.service.routes.check_origin(self.service.default_upstream, username, sid, legacy=True)
 
     @staticmethod
     def origin_reason(fresh, exists, failure):
@@ -751,28 +795,29 @@ class ProfileApi:
                 raise ApiError(409, "发布期间会话已被移除，请主人明确恢复。")
             if previous and total < previous["total"]:
                 raise ApiError(409, f"电脑历史范围缩短。原声明 {previous['total']} 轮，已导入 {previous['imported']} 轮。")
-            bound = db.execute("SELECT id,username FROM rooms WHERE session=?", (sid,)).fetchone()
+            upstream = self.service.default_upstream
+            bound = self.service.routes.find_room(db, upstream, username, sid)
+            other_user = not bound and db.execute("SELECT 1 FROM rooms WHERE upstream=? AND session=?",
+                                                  (upstream, sid)).fetchone()
             room = previous["room"] if previous else None
             # Only an unclaimed, genuinely new empty conversation can acquire its upstream
             # identity on first send. Once an original is observed, its disappearance is final
             # until AstrBot's index confirms it again, including for an originally empty chat.
-            unclaimed = not bound and not legacy
+            unclaimed = not bound and not other_user and not legacy
             already_fresh = previous is not None and bool(previous["fresh"]) and room is not None
             fresh = not total and not exists and (unclaimed or already_fresh)
             reason = self.origin_reason(fresh, exists, failure)
-            if not room and (bound or legacy):
-                proof = db.execute("SELECT room FROM devices WHERE digest=? AND owner=1", (digest(legacy),)).fetchone()
+            if not room and (bound or other_user or legacy):
                 claimed = bound and db.execute("SELECT 1 FROM profile_sessions WHERE room=? AND profile<>?",
-                                               (bound["id"], profile)).fetchone()
-                if not bound or not proof or proof["room"] != bound["id"] or bound["username"] != username:
+                                               (bound, profile)).fetchone()
+                if not bound or not self.service.routes.prove_room(db, bound, legacy):
                     reason = "无法确认原共享房间的主人授权及会话身份。仅可阅读电脑上传的历史。"
                 elif claimed:
                     reason = "原共享房间已授权给另一档案。本档案可阅读自己上传的历史，无法接续该房间。"
                 elif not reason:
-                    room = bound["id"]
+                    room = bound
             elif not room and not reason:
-                room = str(uuid.uuid4())
-                db.execute("INSERT INTO rooms VALUES(?,?,?)", (room, username, sid))
+                room = self.service.routes.ensure_room(db, upstream, username, sid, legacy=True)
             db.execute("""INSERT INTO profile_sessions(profile,sid,title,activity,total,room,fresh) VALUES(?,?,?,?,?,?,?)
                           ON CONFLICT(profile,sid) DO UPDATE SET title=excluded.title,
                             activity=MAX(activity,excluded.activity),ready=(ready AND total=excluded.total),
@@ -857,7 +902,7 @@ class ProfileApi:
                     db.execute("UPDATE profile_sessions SET fresh=0 WHERE profile=? AND sid=?", (profile, sid))
         if reason:
             raise ApiError(409, reason)
-        return self.service.dispatch_turn(room, result, username, sid)
+        return self.service.dispatch_turn(room, result, username, sid, legacy=True)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -915,14 +960,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def dispatch(self):
         try:
-            route, _, raw_query = self.path.partition("?")
+            route, _, raw_query = self.requestline.split()[1].partition("?")
             if route not in READ_ROUTES | WRITE_ROUTES:
                 raise ApiError(404, "接口不存在。")
-            public = ("/v1/create", "/v1/join", "/v1/profile/create", "/v1/profile/join")
+            public = ("/v1/create", "/v1/join", "/v1/profile/create", "/v1/profile/join",
+                      "/v1/device/health", "/v1/device/preview", "/v1/device/join", "/v1/device/prove")
             token = "" if route in public else self.bearer()
             if self.command == "GET" and route in READ_ROUTES:
                 try:
-                    params = parse_qs(raw_query, keep_blank_values=True, strict_parsing=True, max_num_fields=3)
+                    params = parse_qs(raw_query, keep_blank_values=True, strict_parsing=True,
+                                      max_num_fields=4 if route in DEVICE_READ else 3)
                 except ValueError as exc:
                     raise ApiError(400, "查询参数无效。") from exc
                 if any(len(values) != 1 for values in params.values()):
@@ -954,10 +1001,14 @@ class Server(ThreadingHTTPServer):
         pass
 
 
-@contextmanager
-def open_server(path, key, port=8765):
+def validate_chat_key(key):
     if not isinstance(key, str) or not key or not key.isascii() or any(ord(c) < 33 or ord(c) > 126 for c in key):
         raise ApiError(400, "需要有效的 AstrBot 聊天密钥。")
+
+
+@contextmanager
+def open_server(path, key, port=8765):
+    validate_chat_key(key)
     if not Path(path).is_file():
         raise ApiError(400, "请先通过 init 初始化数据库。")
     with serving_lock(path), ThreadPoolExecutor(max_workers=8) as workers:
@@ -975,6 +1026,8 @@ def cli(argv=None):
     init.add_argument("--launcher", action="store_true", help="按 Launcher 实例 UUID 跟随已核实的当前回环端口")
     init.add_argument("--alias", action="append", default=[], help="同一 AstrBot 的已知客户端地址，可重复")
     cmds.add_parser("bootstrap", help="换发十分钟内有效的一次性会话创建码")
+    cmds.add_parser("device-upstream", help="从本机标准输入 JSON 登记设备同步使用的 AstrBot 上游")
+    cmds.add_parser("device-owner", help="从本机标准输入 JSON 登记设备同步主人")
     cmds.add_parser("profile-bootstrap", help="换发十分钟内有效的一次性档案创建码")
     cmds.add_parser("profiles", help="列出可在本机恢复的档案编号、名称及来源")
     profile_recover = cmds.add_parser("profile-recover", help="为指定档案签发十分钟内有效的一次性主人恢复码")
@@ -988,10 +1041,11 @@ def cli(argv=None):
     devices.add_argument("--room", help="仅列出指定房间的设备")
     remove = cmds.add_parser("revoke-device", help="撤销指定设备凭据")
     remove.add_argument("device", help="devices 列出的设备编号")
-    resolve = cmds.add_parser("resolve", help="确认上游已空闲，允许该房间接收新消息。保留原轮次为结果未知")
+    resolve = cmds.add_parser("resolve", help="确认指定轮次已停止，允许该房间接收新消息。",
+                              description="确认上游已空闲，保留指定轮次为结果未知。" + MEDIA_RESOLVE_NOTICE)
     resolve.add_argument("--room", required=True, help="房间编号")
-    resolve.add_argument("--id", required=True, help="结果未知的轮次编号")
-    unresolved = cmds.add_parser("unresolved", help="列出需在 AstrBot 确认已停止的房间与轮次")
+    resolve.add_argument("--id", required=True, help="结果未知或来源已停止的媒体轮次编号")
+    unresolved = cmds.add_parser("unresolved", help="列出待确认轮次与仍由来源设备持有的媒体预留")
     unresolved.add_argument("--room", help="仅列出指定房间")
     run = cmds.add_parser("serve", help="启动回环 HTTP 服务，从 ASTRBOT_CHAT_KEY 或隐藏提示读取密钥")
     run.add_argument("--port", type=int, default=8765)
@@ -999,6 +1053,20 @@ def cli(argv=None):
     path = args.db.resolve()
     if args.command == "init":
         print(initialize(path, args.upstream, args.alias, args.launcher))
+    elif args.command in ("device-upstream", "device-owner"):
+        try:
+            raw = sys.stdin.buffer.read(MAX_BODY + 1)
+            if len(raw) > MAX_BODY:
+                raise ApiError(413, "本机配置请求过大。")
+            body = json.loads(raw.decode("utf-8"))
+            if not isinstance(body, dict):
+                raise ValueError
+        except (ValueError, RecursionError) as exc:
+            raise ApiError(400, "本机配置需要 UTF-8 JSON 对象。") from exc
+        migrate_database(path)
+        result = (device_routes.provision_upstream(path, body) if args.command == "device-upstream"
+                  else device_api_module().provision_owner(path, body))
+        print(json.dumps(result, ensure_ascii=True))
     elif args.command == "serve":
         key = os.environ.get("ASTRBOT_CHAT_KEY") or getpass.getpass("AstrBot 聊天密钥：")
         with open_server(path, key, args.port) as server:
@@ -1006,18 +1074,29 @@ def cli(argv=None):
             server.serve_forever()
     else:
         with database(path, write=args.command not in ("rooms", "devices", "unresolved")) as db:
+            if args.command in ("profiles", "profile-recover"):
+                migrate_profiles(db)
+                has_catalog = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='device_catalog'").fetchone()
+                legacy_profile = ("NOT EXISTS(SELECT 1 FROM device_catalog c WHERE c.profile=profiles.id "
+                                  "AND c.source_id<>profiles.source_id)") if has_catalog else "1"
+            if args.command in ("rooms", "recover-owner"):
+                columns = {row[1] for row in db.execute("PRAGMA table_info(rooms)")}
+                legacy_room = "legacy=1 AND upstream=(SELECT instance FROM config)" if "upstream" in columns else "1"
+            if args.command in ("unresolved", "resolve"):
+                has_devices = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='device_operations'").fetchone()
+                media = MEDIA_RESERVATION if has_devices else "0"
+                reviewable = "(needs_review=1 OR (status='running' AND " + media + "))"
             if args.command == "bootstrap":
                 print(new_code(db, None, "create")["code"])
             elif args.command == "profile-bootstrap":
                 migrate_profiles(db)
                 print(profile_code(db, None)["code"])
             elif args.command == "profiles":
-                migrate_profiles(db)
-                for row in db.execute("SELECT id,name,base,username,source_id FROM profiles ORDER BY rowid"):
+                for row in db.execute("SELECT id,name,base,username,source_id FROM profiles WHERE " + legacy_profile +
+                                      " ORDER BY rowid"):
                     print(json.dumps(dict(row), ensure_ascii=True))
             elif args.command == "profile-recover":
-                migrate_profiles(db)
-                if not db.execute("SELECT 1 FROM profiles WHERE id=?", (args.profile,)).fetchone():
+                if not db.execute("SELECT 1 FROM profiles WHERE id=? AND " + legacy_profile, (args.profile,)).fetchone():
                     raise ApiError(404, "找不到指定的档案。")
                 code = secrets.token_urlsafe(12)
                 expires = int(time.time()) + CODE_LIFETIME
@@ -1025,10 +1104,12 @@ def cli(argv=None):
                            (args.profile, digest(code), expires))
                 print(code)
             elif args.command == "rooms":
-                for row in db.execute("SELECT id,username,session FROM rooms ORDER BY rowid"):
+                for row in db.execute("SELECT id,username,session FROM rooms WHERE " + legacy_room +
+                                      " ORDER BY rowid"):
                     print(json.dumps(dict(row), ensure_ascii=True))
             elif args.command == "recover-owner":
-                if not db.execute("SELECT 1 FROM rooms WHERE id=?", (args.room,)).fetchone():
+                if not db.execute("SELECT 1 FROM rooms WHERE id=? AND " + legacy_room,
+                                  (args.room,)).fetchone():
                     raise ApiError(404, "找不到指定的房间。")
                 print(new_code(db, args.room, "recover")["code"])
             elif args.command == "revoke-code":
@@ -1042,15 +1123,21 @@ def cli(argv=None):
                 if not db.execute("DELETE FROM devices WHERE id=?", (args.device,)).rowcount:
                     raise ApiError(404, "设备不存在或已撤销。")
             elif args.command == "unresolved":
-                rows = db.execute("SELECT room,id FROM turns WHERE needs_review=1 AND (? IS NULL OR room=?)",
-                                  (args.room, args.room))
+                rows = db.execute("SELECT room,id,status," + media + " AS media FROM turns WHERE " + reviewable +
+                                  " AND (? IS NULL OR room=?) ORDER BY room,seq", (args.room, args.room))
                 for row in rows:
-                    print(row["room"], row["id"])
+                    if row["media"]:
+                        print(row["room"], row["id"], "media-" + row["status"], MEDIA_RESOLVE_NOTICE)
+                    else:
+                        print(row["room"], row["id"])
             elif args.command == "resolve":
-                changed = db.execute("UPDATE turns SET needs_review=0 WHERE room=? AND id=? AND needs_review=1",
-                                     (args.room, request_id(args.id))).rowcount
-                if not changed:
+                key = (args.room, request_id(args.id))
+                row = db.execute("SELECT status FROM turns WHERE room=? AND id=? AND " + reviewable, key).fetchone()
+                if not row:
                     raise ApiError(404, "找不到待确认的轮次。")
+                db.execute("UPDATE turns SET status='unknown',needs_review=0 WHERE room=? AND id=?", key)
+                if row["status"] == "running":
+                    profile_activity(db, args.room)
 
 
 if __name__ == "__main__":

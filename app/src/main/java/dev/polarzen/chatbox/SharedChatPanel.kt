@@ -24,6 +24,7 @@ import androidx.compose.material.TabRow
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -37,8 +38,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+
+internal typealias SharedRoomComposer = @Composable (SharedChatState, Boolean, Boolean, () -> Unit) -> Unit
 
 @Composable
 internal fun SharedChatPanel(
@@ -48,27 +52,35 @@ internal fun SharedChatPanel(
     decorateQuestion: (String) -> String = { it },
     retainedState: SharedChatState? = null,
     pairingScope: CoroutineScope? = null,
+    composer: SharedRoomComposer = { state, visible, sendEnabled, send ->
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(if (visible) state.local.draft else "", state::editDraft, Modifier.weight(1f),
+                enabled = visible && state.pending == null, maxLines = 3, label = { Text("消息") })
+            Button(onClick = send, enabled = sendEnabled && state.local.draft.isNotBlank()) { Text("发送") }
+        }
+    },
     onClose: () -> Unit,
 ) {
     key(storage, seed.sourceBase, seed.username, seed.session, allowLoopback) {
         val decorate by rememberUpdatedState(decorateQuestion)
         val state = retainedState ?: remember { SharedChatState(storage, allowLoopback) { decorate(it) } }
+        DisposableEffect(state) { onDispose { state.flushDraft() } }
         val scope = rememberCoroutineScope()
-        val binding = state.local.binding
+        val binding = state.binding
         var verifiedHere by remember(state, binding) { mutableStateOf(false) }
         LaunchedEffect(state, binding) {
             if (binding != null) {
-                while (state.local.binding == binding) {
+                while (state.binding == binding) {
                     state.refresh()
                     if (state.authorized) verifiedHere = true
-                    val active = (state.local.pending != null && !state.pendingMissing) || state.turns.lastOrNull()?.status == "running"
+                    val active = (state.pending != null && !state.pendingMissing) || state.turns.lastOrNull()?.status == "running"
                     delay(if (active && state.authorized) 650L else 2500L)
                 }
             }
         }
         Surface(Modifier.fillMaxSize()) {
             when {
-                state.local.revoked || state.unreadable -> Column(
+                state.revoked || state.unreadable -> Column(
                     Modifier.verticalScroll(rememberScrollState()).padding(20.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
@@ -80,7 +92,7 @@ internal fun SharedChatPanel(
                     Button(onClick = { scope.launch { state.leave(onClose) } }, enabled = !state.busy) { Text("退出共享") }
                 }
                 binding == null -> SharedConnectionForm(seed, state, allowLoopback, pairingScope ?: scope, onClose)
-                else -> SharedRoom(state, binding, retainedState == null || verifiedHere, onClose)
+                else -> SharedRoom(state, binding, retainedState == null || verifiedHere, composer, onClose)
             }
         }
     }
@@ -130,75 +142,75 @@ private fun SharedConnectionForm(
 private enum class SharedDialog { INVITE, REVOKE, LEAVE, RELEASE }
 
 @Composable
-private fun SharedRoom(state: SharedChatState, binding: SharedBinding, verifiedHere: Boolean, onClose: () -> Unit) {
+private fun SharedRoom(state: SharedChatState, binding: SharedBinding, verifiedHere: Boolean,
+                       composer: SharedRoomComposer, onClose: () -> Unit) {
     val scope = rememberCoroutineScope()
     var menu by remember { mutableStateOf(false) }
     var dialog by remember { mutableStateOf<SharedDialog?>(null) }
     val visible = verifiedHere && state.verifiedInView
-    val pending = state.local.pending.takeIf { visible }
+    val pending = state.pending.takeIf { visible }
     val turns = if (visible) state.turns else emptyList()
     val running = turns.any { it.status == "running" }
     Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("共享会话", style = MaterialTheme.typography.h6)
-                Text(state.connection, style = MaterialTheme.typography.caption)
-            }
-            if (binding.owner) TextButton(onClick = { dialog = SharedDialog.INVITE }, enabled = visible) { Text("邀请") }
-            Column {
-                TextButton(onClick = { menu = true }) { Text("更多") }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(onClick = { menu = false; scope.launch { state.refresh() } }) { Text("刷新记录") }
-                    if (binding.owner) DropdownMenuItem(onClick = { menu = false; dialog = SharedDialog.REVOKE }) {
-                        Text("撤销其他设备")
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("共享会话", style = MaterialTheme.typography.h6)
+                    Text(state.connection, style = MaterialTheme.typography.caption)
+                }
+                if (binding.owner) TextButton(onClick = { dialog = SharedDialog.INVITE }, enabled = visible) { Text("邀请") }
+                Column {
+                    TextButton(onClick = { menu = true }) { Text("更多") }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(onClick = { menu = false; scope.launch { state.refresh() } }) { Text("刷新记录") }
+                        if (binding.owner) DropdownMenuItem(onClick = { menu = false; dialog = SharedDialog.REVOKE }) {
+                            Text("撤销其他设备")
+                        }
+                        DropdownMenuItem(onClick = { menu = false; dialog = SharedDialog.LEAVE }) { Text("退出本机共享") }
                     }
-                    DropdownMenuItem(onClick = { menu = false; dialog = SharedDialog.LEAVE }) { Text("退出本机共享") }
+                }
+            }
+            Divider()
+            LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth(), reverseLayout = true,
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (pending != null && turns.none { it.id == pending.id }) {
+                    item(key = pending.id) {
+                        SharedMessages(pending.question, "", "正在核对发送结果…")
+                    }
+                }
+                items(turns.asReversed(), key = { it.id }) { turn ->
+                    val status = when (turn.status) {
+                        "running" -> "回复生成中…"
+                        "unknown" -> "回复完成情况未知，请核对后再继续。"
+                        else -> null
+                    }
+                    SharedMessages(turn.question, turn.answer, status)
+                }
+                if (visible && turns.isEmpty() && pending == null && state.authorized) item {
+                    Text("共享记录为空，发送文字开始对话。", Modifier.padding(vertical = 8.dp))
+                }
+                if ((visible && state.authorized) || turns.isNotEmpty()) item(key = "shared-history-start") {
+                    Text("共享记录起点 · 仅包含创建时发起设备可见的旧记录，以及之后在共享会话中发送的内容。其他设备独有的旧记录可能缺失。",
+                        Modifier.padding(vertical = 6.dp), style = MaterialTheme.typography.caption)
+                }
+            }
+            if (state.saveFailed) {
+                Text("本机保存失败，重新打开后可能无法恢复。", color = MaterialTheme.colors.error)
+                TextButton(onClick = state::retrySave) { Text("重试保存") }
+            }
+            if (state.notice.isNotEmpty()) Text(state.notice, style = MaterialTheme.typography.body2)
+            if (pending != null && state.pendingMissing) {
+                Text("尚未查到这次发送。按原编号重试会先核对记录，服务会将相同编号的提交合并为一轮。", style = MaterialTheme.typography.body2)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { scope.launch { state.retryPending(pending.id) } }, enabled = !state.busy) {
+                        Text("按原编号重试")
+                    }
+                    TextButton(onClick = { dialog = SharedDialog.RELEASE }, enabled = !state.busy) { Text("放弃并恢复草稿") }
                 }
             }
         }
-        Divider()
-        LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth(), reverseLayout = true,
-            verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (pending != null && turns.none { it.id == pending.id }) {
-                item(key = pending.id) {
-                    SharedMessages(pending.question, "", "正在核对发送结果…")
-                }
-            }
-            items(turns.asReversed(), key = { it.id }) { turn ->
-                val status = when (turn.status) {
-                    "running" -> "回复生成中…"
-                    "unknown" -> "回复完成情况未知，请核对后再继续。"
-                    else -> null
-                }
-                SharedMessages(turn.question, turn.answer, status)
-            }
-            if (visible && turns.isEmpty() && pending == null && state.authorized) item {
-                Text("共享记录为空，发送文字开始对话。", Modifier.padding(vertical = 8.dp))
-            }
-            if ((visible && state.authorized) || turns.isNotEmpty()) item(key = "shared-history-start") {
-                Text("共享记录起点 · 仅包含创建时发起设备可见的旧记录，以及之后在共享会话中发送的内容。其他设备独有的旧记录可能缺失。",
-                    Modifier.padding(vertical = 6.dp), style = MaterialTheme.typography.caption)
-            }
-        }
-        if (state.saveFailed) {
-            Text("本机保存失败，重新打开后可能无法恢复。", color = MaterialTheme.colors.error)
-            TextButton(onClick = state::retrySave) { Text("重试保存") }
-        }
-        if (state.notice.isNotEmpty()) Text(state.notice, style = MaterialTheme.typography.body2)
-        if (pending != null && state.pendingMissing) {
-            Text("尚未查到这次发送。按原编号重试会先核对记录，服务会将相同编号的提交合并为一轮。", style = MaterialTheme.typography.body2)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = { scope.launch { state.retryPending(pending.id) } }, enabled = !state.busy) {
-                    Text("按原编号重试")
-                }
-                TextButton(onClick = { dialog = SharedDialog.RELEASE }, enabled = !state.busy) { Text("放弃并恢复草稿") }
-            }
-        }
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(if (visible) state.local.draft else "", state::editDraft, Modifier.weight(1f),
-                enabled = visible && pending == null, maxLines = 3, label = { Text("消息") })
-            Button(onClick = { scope.launch { state.send() } }, enabled = visible && state.authorized && !state.busy &&
-                !running && pending == null && state.local.draft.isNotBlank()) { Text("发送") }
+        composer(state, visible, visible && state.authorized && !state.busy && !running && pending == null) {
+            scope.launch(start = CoroutineStart.UNDISPATCHED) { state.send() }
         }
     }
     when (dialog) {
@@ -250,7 +262,7 @@ private fun SharedMessageBody(text: String) {
 @Composable
 private fun SharedInviteDialog(state: SharedChatState, binding: SharedBinding, close: () -> Unit) {
     val scope = rememberCoroutineScope()
-    val invite = state.local.invite
+    val invite = state.invite
     var now by remember(invite) { mutableStateOf(System.currentTimeMillis()) }
     LaunchedEffect(invite) {
         while (invite != null && now < invite.expiresAt) {

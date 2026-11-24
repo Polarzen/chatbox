@@ -1,6 +1,7 @@
 package dev.polarzen.chatbox
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -17,10 +18,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import java.text.DateFormat
@@ -36,9 +39,11 @@ internal fun AndroidHistorySourceTabs(computer: Boolean, onPhone: () -> Unit, on
 
 @Composable
 internal fun AndroidComputerHistoryPanel(state: AndroidPcHistory, work: CoroutineScope, onPhone: () -> Unit) {
+    DisposableEffect(state) { onDispose { state.flushDraft() } }
     val selected = state.selected
     BackHandler(enabled = state.bound && selected != null, onBack = state::back)
-    Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
+    Column(Modifier.fillMaxSize().systemBarsPadding()
+        .then(if (state.bound && selected != null) Modifier else Modifier.imePadding())) {
         if (!state.bound || selected == null) {
             Text("最近对话", Modifier.padding(start = 16.dp, top = 8.dp), style = MaterialTheme.typography.titleLarge)
             AndroidHistorySourceTabs(computer = true, onPhone = onPhone, onComputer = {})
@@ -206,69 +211,78 @@ private fun ComputerConversation(state: AndroidPcHistory, session: ProfileSessio
     }
     val pending = state.pendingId != null
     val writable = session.reason.isBlank() && !state.busy && !pending
-    Column(Modifier.fillMaxSize().padding(horizontal = 10.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = state::back) { Text("返回") }
-            Column(Modifier.weight(1f)) {
-                Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
-                Text("来自电脑 · " + state.profileName + " · " + computerConnection(state),
-                    maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall)
-            }
-            Box {
-                IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "会话操作") }
-                DropdownMenu(menu, { menu = false }) {
-                    DropdownMenuItem(text = { Text("立即同步") }, onClick = { menu = false; work.launch { state.refresh() } })
-                    DropdownMenuItem(text = { Text("在此手机隐藏") }, onClick = { menu = false; hide = true })
+    val ime = rememberChatIme()
+    Column(Modifier.fillMaxSize().chatImeHeight(ime).padding(horizontal = 10.dp)) {
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = state::back) { Text("返回") }
+                Column(Modifier.weight(1f)) {
+                    Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                    Text("来自电脑 · " + state.profileName + " · " + computerConnection(state),
+                        maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall)
                 }
-            }
-        }
-        HorizontalDivider()
-        LazyColumn(state = list, modifier = Modifier.weight(1f).fillMaxWidth(), reverseLayout = true,
-            contentPadding = PaddingValues(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            // The stable bottom item keeps the newest reply in view while readers at older turns keep their anchor.
-            item("bottom") {
-                Column {
-                    Spacer(Modifier.height(1.dp))
-                    if (!state.connected && state.lastSync > 0L) {
-                        Text("目录上次同步 · " + computerTime(state.lastSync), style = MaterialTheme.typography.bodySmall)
+                Box {
+                    IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "会话操作") }
+                    DropdownMenu(menu, { menu = false }) {
+                        DropdownMenuItem(text = { Text("立即同步") }, onClick = { menu = false; work.launch { state.refresh() } })
+                        DropdownMenuItem(text = { Text("在此手机隐藏") }, onClick = { menu = false; hide = true })
                     }
-                    if (state.notice.isNotBlank()) Text(state.notice, style = MaterialTheme.typography.bodySmall)
                 }
             }
-            parts.forEach { part ->
-                items(part.count, key = { index -> part.id + "/" + (part.count - 1 - index) }) { index ->
-                    ComputerTranscriptPiece(part, part.count - 1 - index)
+            HorizontalDivider()
+            LazyColumn(state = list, modifier = Modifier.weight(1f).fillMaxWidth().clipToBounds()
+                .chatImeReverseHistory(ime, list), reverseLayout = true,
+                contentPadding = PaddingValues(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                // The stable bottom item keeps the newest reply in view while readers at older turns keep their anchor.
+                item("bottom") {
+                    Column {
+                        Spacer(Modifier.height(1.dp))
+                        if (!state.connected && state.lastSync > 0L) {
+                            Text("目录上次同步 · " + computerTime(state.lastSync), style = MaterialTheme.typography.bodySmall)
+                        }
+                        if (state.notice.isNotBlank()) Text(state.notice, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                parts.forEach { part ->
+                    items(part.count, key = { index -> part.id + "/" + (part.count - 1 - index) }) { index ->
+                        ComputerTranscriptPiece(part, part.count - 1 - index)
+                    }
+                }
+                if (state.hasOlder) item("older") {
+                    TextButton(onClick = state::older, modifier = Modifier.fillMaxWidth()) { Text("加载更早的记录") }
+                }
+                if (session.imported < session.total) item("import") {
+                    Text("电脑旧历史已导入 " + session.imported + " / " + session.total + " 轮。",
+                        style = MaterialTheme.typography.bodySmall)
+                }
+                if (turns.isEmpty()) item("empty") {
+                    Text(when {
+                        state.syncing -> "正在读取会话记录…"
+                        !state.connected -> "此手机尚未缓存这段正文。"
+                        state.syncComplete && session.total == 0 -> "这段会话暂无记录。"
+                        else -> "正在等待会话记录同步。"
+                    }, Modifier.padding(vertical = 8.dp))
                 }
             }
-            if (state.hasOlder) item("older") {
-                TextButton(onClick = state::older, modifier = Modifier.fillMaxWidth()) { Text("加载更早的记录") }
-            }
-            if (session.imported < session.total) item("import") {
-                Text("电脑旧历史已导入 " + session.imported + " / " + session.total + " 轮。",
-                    style = MaterialTheme.typography.bodySmall)
-            }
-            if (turns.isEmpty()) item("empty") {
-                Text(when {
-                    state.syncing -> "正在读取会话记录…"
-                    !state.connected -> "此手机尚未缓存这段正文。"
-                    state.syncComplete && session.total == 0 -> "这段会话暂无记录。"
-                    else -> "正在等待会话记录同步。"
-                }, Modifier.padding(vertical = 8.dp))
+            if (session.reason.isNotBlank()) Text("此会话只读 · " + session.reason,
+                Modifier.fillMaxWidth().moveWithChatIme(ime).background(MaterialTheme.colorScheme.surface),
+                style = MaterialTheme.typography.bodySmall)
+            if (pending) Row(Modifier.fillMaxWidth().moveWithChatIme(ime).background(MaterialTheme.colorScheme.surface),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text(if (state.canRetry) "尚未查到这次发送。" else "正在核对这次发送…",
+                    Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                if (state.canRetry) TextButton(enabled = !state.busy && state.connected && session.reason.isBlank(),
+                    onClick = { work.launch { state.retryPending() } }) { Text("按原编号重试") }
             }
         }
-        if (session.reason.isNotBlank()) Text("此会话只读 · " + session.reason, style = MaterialTheme.typography.bodySmall)
-        if (pending) Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(if (state.canRetry) "尚未查到这次发送。" else "正在核对这次发送…",
-                Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-            if (state.canRetry) TextButton(enabled = !state.busy && state.connected && session.reason.isBlank(),
-                onClick = { work.launch { state.retryPending() } }) { Text("按原编号重试") }
-        }
-        Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(state.draft, state::editDraft, Modifier.weight(1f), enabled = writable,
-                maxLines = 3, label = { Text("消息") })
-            Button(enabled = writable && state.connected && state.draft.isNotBlank() && turns.lastOrNull()?.status != "running",
-                onClick = { work.launch { state.send() } }) { Text("发送") }
+        Surface(Modifier.fillMaxWidth().moveWithChatIme(ime)) {
+            AndroidChatComposer(sessionKey = session.sid, readDraft = { if (state.selected?.sid == session.sid) state.draft else "" },
+                draftEvent = state.draftEvent,
+                onDraftText = { if (state.selected?.sid == session.sid) state.editDraft(it) },
+                onSend = {
+                    if (state.selected?.sid == session.sid) work.launch(start = CoroutineStart.UNDISPATCHED) { state.send() }
+                },
+                enabled = writable, sendEnabled = state.connected && turns.lastOrNull()?.status != "running")
         }
     }
     if (hide) AlertDialog(onDismissRequest = { hide = false }, title = { Text("在此手机隐藏会话？") },

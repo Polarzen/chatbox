@@ -33,7 +33,11 @@ internal class AndroidPcHistory(private val cache: AndroidPcHistoryCache) {
     private var networkMessage by mutableStateOf("")
 
     val bound get() = grant != null
-    val notice get() = listOf(actionMessage, networkMessage).filter(String::isNotEmpty).joinToString("\n")
+    private var draftSaveFailed by mutableStateOf(false)
+    val notice get() = listOf(
+        if (draftSaveFailed) "未能保存此会话的草稿，请检查本机存储空间。" else "",
+        actionMessage, networkMessage
+    ).filter(String::isNotEmpty).joinToString("\n")
     var profileName by mutableStateOf("")
         private set
     var syncComplete by mutableStateOf(false)
@@ -68,6 +72,9 @@ internal class AndroidPcHistory(private val cache: AndroidPcHistoryCache) {
         private set
     var draft by mutableStateOf("")
         private set
+    var draftEvent by mutableStateOf(0L)
+        private set
+    private val draftWrites = SharedDraftWrites { draftSaveFailed = !it }
     var pendingId by mutableStateOf<String?>(null)
         private set
     var canRetry by mutableStateOf(false)
@@ -108,6 +115,7 @@ internal class AndroidPcHistory(private val cache: AndroidPcHistoryCache) {
             val current = cache.session(scope, row.sid)
             if (current == null) {
                 expandedWindows.remove(row.sid)
+                draftWrites.discard()
                 back()
             } else selected = current
         }
@@ -139,14 +147,20 @@ internal class AndroidPcHistory(private val cache: AndroidPcHistoryCache) {
 
     fun hide(sid: String, hidden: Boolean) = local {
         val scope = grant?.scope ?: return
+        if (selected?.sid == sid && !flushDraft()) return
         cache.hide(scope, sid, hidden)
         if (selected?.sid == sid) back()
         readList(scope)
     }
 
     private fun readComposer(scope: String, sid: String) {
+        // An idle write may finish while SQLite is reading. Decide who owns the draft first.
+        if (draftWrites.dirty) return
         val composer = cache.composer(scope, sid)
-        draft = composer.draft
+        if (draft != composer.draft) {
+            draft = composer.draft
+            draftEvent++
+        }
         if (pendingId != composer.pending) canRetry = false
         pendingId = composer.pending
     }
@@ -162,22 +176,27 @@ internal class AndroidPcHistory(private val cache: AndroidPcHistoryCache) {
         val scope = grant?.scope ?: return
         val row = cache.session(scope, sid) ?: return
         if (selected?.sid != sid) {
-            back()
+            if (!closeSelection()) return
             selected = row
             turnLimit = expandedWindows[sid] ?: WINDOW
         }
         readTurns(scope, sid)
     }
 
-    fun back() {
+    fun back() { closeSelection() }
+
+    private fun closeSelection(): Boolean {
+        if (!flushDraft()) return false
         selected = null
         turnLimit = WINDOW
         turns = emptyList()
         hasOlder = false
         draft = ""
+        draftSaveFailed = false
         pendingId = null
         canRetry = false
         actionMessage = ""
+        return true
     }
 
     fun older() = local {
@@ -189,18 +208,21 @@ internal class AndroidPcHistory(private val cache: AndroidPcHistoryCache) {
         expandedWindows[sid] = turnLimit
     }
 
-    fun editDraft(value: String) = local {
+    fun flushDraft() = draftWrites.flush()
+
+    fun editDraft(value: String) {
         val scope = grant?.scope ?: return
         val sid = selected?.sid ?: return
-        if (pendingId != null) return
-        cache.draft(scope, sid, value)
+        if (pendingId != null || draft == value) return
         draft = value
         actionMessage = ""
+        draftWrites.schedule { cache.draft(scope, sid, value) }
     }
 
     private fun clear(message: String) {
         epoch++
         grant = null
+        draftWrites.discard()
         back()
         expandedWindows.clear()
         profileName = ""
@@ -404,36 +426,41 @@ internal class AndroidPcHistory(private val cache: AndroidPcHistoryCache) {
         val session = selected ?: return
         val sid = session.sid
         val clickedId = pendingId
+        val question = draft
         if (busy || session.reason.isNotEmpty() || draft.isBlank()) return
         if (retry && (!canRetry || clickedId == null) || !retry && clickedId != null) return
         busy = true
         actionMessage = ""
         try {
+            if (!flushDraft()) return
+            if (!retry && pcQuestionTooLarge(question)) {
+                actionMessage = "提问超过 64 KiB（UTF-8），已保留草稿。请缩短后发送。"
+                return
+            }
+            if (question.trimStart().let { it == "/task" || it.startsWith("/task") && it.getOrNull(5)?.isWhitespace() == true }) {
+                actionMessage = "请在 Windows 的本机会话中选择 Launcher 实例后执行 /task。"
+                return
+            }
+            // Reserve the visible draft before waiting behind a refresh or accepting another edit.
+            val id = clickedId ?: UUID.randomUUID().toString().also {
+                cache.begin(g.scope, sid, it)
+                pendingId = it
+            }
             requests.withLock {
-                if (!viewing(g, sid) || pendingId != clickedId || selected?.reason?.isNotEmpty() == true) return
-                val question = draft
-                if (question.isBlank()) return
-                // An old pending operation needs an authoritative lookup and, if explicitly
-                // retried, the service's answer for the SAME id before its draft can be released.
-                if (!retry && pcQuestionTooLarge(question)) {
-                    actionMessage = "提问超过 64 KiB（UTF-8），已保留草稿。请缩短后发送。"
-                    return
-                }
-                if (question.trimStart().let { it == "/task" || it.startsWith("/task") && it.getOrNull(5)?.isWhitespace() == true }) {
-                    actionMessage = "请在 Windows 的本机会话中选择 Launcher 实例后执行 /task。"
-                    return
-                }
-                val id = if (retry) {
-                    val existing = checkNotNull(clickedId)
-                    if (lookup(g, sid, existing) || !viewing(g, sid)) return
-                    existing
-                } else {
-                    UUID.randomUUID().toString().also {
-                        cache.begin(g.scope, sid, it)
-                        pendingId = it
+                if (grant !== g) return
+                val current = cache.session(g.scope, sid) ?: return
+                if (current.reason.isNotEmpty()) {
+                    if (!retry) {
+                        cache.rejected(g.scope, sid, id)
+                        if (viewing(g, sid)) readComposer(g.scope, sid)
                     }
+                    return
                 }
-                canRetry = false
+                if (cache.composer(g.scope, sid).pending != id) return
+                if (retry) {
+                    if (lookup(g, sid, id) || !viewing(g, sid)) return
+                }
+                if (viewing(g, sid)) canRetry = false
                 val row = try {
                     api.send(g.binding, sid, id, question)
                 } catch (e: SharedHttpFailure) {

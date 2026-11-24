@@ -21,10 +21,17 @@ tasks.named<KotlinCompile>("compileKotlin") {
 }
 dependencies {
     implementation(compose.desktop.currentOs)
+    implementation("com.google.zxing:core:3.5.3")
     implementation("net.java.dev.jna:jna:5.19.1")
     implementation("org.json:json:20240303")
     testImplementation("junit:junit:4.13.2")
     testImplementation(compose.desktop.uiTestJUnit4)
+}
+tasks.processResources {
+    from("../shared_service") {
+        include("*.py")
+        into("shared_service")
+    }
 }
 if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
     val nativeDir = layout.buildDirectory.dir("native/reply-toast")
@@ -42,7 +49,7 @@ if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
         from(toastDll) { into("win32-x86-64") }
     }
 }
-val windowsPackageVersion = "0.1.18"
+val windowsPackageVersion = "0.1.19"
 compose.desktop {
     application {
         mainClass = "dev.polarzen.chatbox.DesktopMainKt"

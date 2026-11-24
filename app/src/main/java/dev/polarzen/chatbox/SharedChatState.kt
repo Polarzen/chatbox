@@ -1,5 +1,6 @@
 package dev.polarzen.chatbox
 
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -9,6 +10,56 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import java.util.UUID
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+
+/** Main-thread callers replace the snapshot without waiting for an in-flight disk write.
+ * A lifecycle flush or authoritative replacement waits for that writer before proceeding. */
+internal class SharedDraftWrites(private val onSaved: (Boolean) -> Unit) {
+    private companion object {
+        val timer = ScheduledThreadPoolExecutor(1) { task ->
+            Thread(task, "shared-draft-writer").apply { isDaemon = true }
+        }.apply { removeOnCancelPolicy = true }
+    }
+    private val pending = AtomicReference<(() -> Unit)?>(null)
+    private val writer = Any()
+    private var scheduled: ScheduledFuture<*>? = null
+    val dirty get() = pending.get() != null
+
+    fun schedule(write: () -> Unit) {
+        scheduled?.cancel(false)
+        pending.set(write)
+        scheduled = timer.schedule({ persist(write) }, 250, TimeUnit.MILLISECONDS)
+    }
+
+    private fun persist(write: () -> Unit): Boolean = synchronized(writer) {
+        if (pending.get() !== write) return true
+        try {
+            write()
+            if (pending.compareAndSet(write, null)) onSaved(true)
+            true
+        } catch (_: Exception) {
+            if (pending.get() === write) onSaved(false)
+            false
+        }
+    }
+
+    fun flush(): Boolean {
+        scheduled?.cancel(false)
+        scheduled = null
+        val write = pending.get() ?: return true
+        return persist(write)
+    }
+
+    fun discard() {
+        scheduled?.cancel(false)
+        scheduled = null
+        pending.set(null)
+        synchronized(writer) { /* wait for a write that began before invalidation */ }
+    }
+}
 
 internal data class SharedBinding(val address: String, val room: String, val instance: String, val token: String, val owner: Boolean) {
     init {
@@ -74,9 +125,17 @@ internal class SharedChatState(
     val turns = mutableStateListOf<SharedTurn>()
     var local by mutableStateOf(SharedLocal())
         private set
+    // The panel observes room metadata independently of the editor's keystrokes.
+    val binding by derivedStateOf { local.binding }
+    val pending by derivedStateOf { local.pending }
+    val invite by derivedStateOf { local.invite }
+    val revoked by derivedStateOf { local.revoked }
     var unreadable by mutableStateOf(false)
         private set
     var saveFailed by mutableStateOf(false)
+        private set
+    private val draftWrites = SharedDraftWrites { saveFailed = !it }
+    var draftEvent by mutableStateOf(0L)
         private set
     var authorized by mutableStateOf(false)
         private set
@@ -100,6 +159,8 @@ internal class SharedChatState(
     }
 
     private fun save(next: SharedLocal): Boolean {
+        draftWrites.discard()
+        if (next.draft != local.draft) draftEvent++
         local = next
         try {
             storage.save(next.encode())
@@ -112,8 +173,13 @@ internal class SharedChatState(
 
     fun retrySave() { save(local) }
 
+    fun flushDraft() = draftWrites.flush()
+
     fun editDraft(value: String) {
-        if (local.binding != null && local.pending == null) save(local.copy(draft = value))
+        if (local.binding == null || local.pending != null || value == local.draft) return
+        val snapshot = local.copy(draft = value)
+        local = snapshot
+        draftWrites.schedule { storage.save(snapshot.encode()) }
     }
 
     suspend fun connect(input: String, code: String, seed: SharedSeed?) = action {
@@ -223,20 +289,35 @@ internal class SharedChatState(
         }
     }
 
-    suspend fun send() = action {
-        val binding = local.binding ?: return@action
-        if (!authorized || local.pending != null || local.draft.isBlank() || turns.any { it.status == "running" }) return@action
+    suspend fun send() {
+        val binding = local.binding ?: return
+        if (busy || !authorized || local.pending != null || local.draft.isBlank() || turns.any { it.status == "running" }) return
         val draft = local.draft
-        if (blockSharedTask(draft)) return@action
-        val question = if (draft.trimStart().startsWith("/")) draft else decorateQuestion(draft)
+        if (blockSharedTask(draft)) {
+            flushDraft()
+            return
+        }
+        val question = try {
+            if (draft.trimStart().startsWith("/")) draft else decorateQuestion(draft)
+        } catch (e: Exception) {
+            notice = friendlyError(e)
+            return
+        }
         val pending = SharedPending(UUID.randomUUID().toString(), question, draft)
         if (!save(local.copy(draft = "", pending = pending))) {
             // Nothing was posted. Keep the editable draft instead of an unresolvable pending id.
             save(local.copy(draft = draft, pending = null))
             notice = "本机未能保存发送编号，提问已保留。"
-            return@action
+            return
         }
-        submit(binding, pending, retry = false)
+        action {
+            if (local.binding != binding || local.pending?.id != pending.id) return@action
+            if (!authorized || turns.any { it.status == "running" }) {
+                save(local.copy(draft = draft, pending = null))
+                return@action
+            }
+            submit(binding, pending, retry = false)
+        }
     }
 
     suspend fun retryPending(id: String) = action {
@@ -317,7 +398,9 @@ internal class SharedChatState(
     suspend fun leave(onClose: () -> Unit) = action {
         // Keep the current binding if removal failed. The host can safely recheck it.
         try {
+            flushDraft()
             storage.save(null)
+            draftWrites.discard()
         } catch (_: Exception) {
             notice = "未能移除本机绑定，请重试。"
             return@action

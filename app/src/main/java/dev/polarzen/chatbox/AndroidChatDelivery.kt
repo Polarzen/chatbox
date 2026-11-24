@@ -60,7 +60,9 @@ internal class AndroidChatDelivery(
     fun busy(base: String, session: String): Boolean = active[AndroidHistory.normalizeBase(base) to session] == true
 
     fun send(base: String, session: String, token: String, user: String, draft: MobileDraft,
-             heart: LiveHeartRate?, consumeDraft: Boolean = true, onNote: (String) -> Unit) {
+             heart: LiveHeartRate?, consumeDraft: Boolean = true, turnId: String = UUID.randomUUID().toString(),
+             prepared: Boolean = false, networkQuestion: String? = null,
+             onFinished: (() -> Unit)? = null, onNote: (String) -> Unit) {
         val address = AndroidHistory.normalizeBase(base)
         val key = address to session
         if (active[key] == true) return
@@ -72,14 +74,14 @@ internal class AndroidChatDelivery(
             onNote(issue)
             return
         }
-        val initial = MobileTurn(UUID.randomUUID().toString(), question, sent = assets)
+        val initial = MobileTurn(turnId, question, sent = assets)
         try {
-            history.begin(address, session, initial, consumeDraft)
+            history.begin(address, session, initial, consumeDraft, prepared)
         } catch (_: Exception) {
             onNote("无法保存本地会话，消息未发送。")
             return
         }
-        transfer(key, "chatbox-local-send", onNote) {
+        transfer(key, "chatbox-local-send", onNote, onFinished) {
             val reply = MobileReplyDelivery(initial) { history.update(address, session, it) }
             val failure = try {
                 val image = { id: String?, _: Int -> reply.media("image", id) }
@@ -89,7 +91,7 @@ internal class AndroidChatDelivery(
                         onReplyAudio = audio, onEvent = reply::event, onText = reply::text)
                 } else {
                     sendAttachmentsToAstrBot(address, secret, user, session, assets.map { File(it.path).toPath() },
-                        question, heart, onReplyImage = image, onReplyAudio = audio, onEvent = reply::event,
+                        networkQuestion ?: question, heart, onReplyImage = image, onReplyAudio = audio, onEvent = reply::event,
                         onText = reply::text)
                 }
                 null
@@ -121,7 +123,8 @@ internal class AndroidChatDelivery(
         }
     }
 
-    private fun transfer(key: Pair<String, String>, name: String, onNote: (String) -> Unit, work: () -> String) {
+    private fun transfer(key: Pair<String, String>, name: String, onNote: (String) -> Unit,
+                         onFinished: (() -> Unit)? = null, work: () -> String) {
         active[key] = true
         val ready = AndroidChatTransferService.request(app)
         onNote("")
@@ -132,6 +135,7 @@ internal class AndroidChatDelivery(
                 active.remove(key)
                 if (active.isEmpty()) AndroidChatTransferService.finish()
                 onNote(note)
+                onFinished?.invoke()
             }
         }
     }

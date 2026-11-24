@@ -45,7 +45,10 @@ import java.awt.Desktop
 
 /** Compact connection, named-key, and settings controls intended for the application header. */
 @Composable
-internal fun DesktopConnectionControls(connection: DesktopConnection, onShareProfile: (() -> Unit)? = null) {
+internal fun DesktopConnectionControls(
+    connection: DesktopConnection, deviceStatus: String? = null, onDeviceSetup: (() -> Unit)? = null,
+    onShareProfile: (() -> Unit)? = null,
+) {
     var keyMenuExpanded by remember { mutableStateOf(false) }
     var switchingKeyId by remember { mutableStateOf<String?>(null) }
     var switchingProfileId by remember { mutableStateOf(connection.profileId) }
@@ -56,12 +59,16 @@ internal fun DesktopConnectionControls(connection: DesktopConnection, onSharePro
     var pendingRemoval by remember { mutableStateOf<NamedKey?>(null) }
 
     val activeKey = connection.keyList.keys.firstOrNull { it.id == connection.keyList.activeId }
+    val deviceSource = connection.profiles.any { it.id == connection.profileId && it.kind == "device" }
     val statusColor = when {
+        deviceStatus != null -> desktopPalette.accent
+        deviceSource -> desktopPalette.muted
         connection.verifying -> MaterialTheme.colors.primary
         connection.connected -> desktopPalette.success
         else -> MaterialTheme.colors.error
     }
-    val statusText = when {
+    val statusText = deviceStatus ?: when {
+        deviceSource -> "手机来源"
         connection.verifying -> "验证中"
         connection.connected -> "已连接"
         else -> "未连接"
@@ -109,25 +116,28 @@ internal fun DesktopConnectionControls(connection: DesktopConnection, onSharePro
             Surface(
                 modifier = Modifier
                     .testTag("connection-control-status")
-                    .semantics { contentDescription = "连接状态：$statusText；打开连接设置" }
+                    .semantics { contentDescription = if (deviceStatus != null) "设备同步状态：$deviceStatus；打开连接设置"
+                        else "连接状态：$statusText；打开连接设置" }
                     .clickable { settingsExpanded = true },
                 color = statusColor.copy(alpha = 0.10f),
                 shape = RoundedCornerShape(20.dp),
             ) {
                 Text(
-                    if (narrowHeader) when {
+                    if (deviceStatus != null) deviceStatus else if (narrowHeader) when {
+                        deviceSource -> "手机来源"
                         connection.verifying -> "验证"
                         connection.connected -> "在线"
                         else -> "未连"
                     } else statusText,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    modifier = Modifier.widthIn(max = if (narrowHeader) 120.dp else 210.dp).padding(horizontal = 8.dp, vertical = 6.dp),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
                     color = statusColor,
                     style = MaterialTheme.typography.caption,
                     fontWeight = FontWeight.Medium,
                 )
             }
             Spacer(Modifier.width(2.dp))
-            TextButton(
+            if (!deviceSource) TextButton(
                 onClick = { keyMenuExpanded = true },
                 modifier = Modifier.testTag("connection-control-key-button"),
             ) {
@@ -233,10 +243,12 @@ internal fun DesktopConnectionControls(connection: DesktopConnection, onSharePro
     if (settingsExpanded) {
         ConnectionSettingsDialog(
             connection = connection,
+            deviceStatus = deviceStatus,
             onDismiss = { settingsExpanded = false },
             onShowPermissions = {
                 permissionTarget = connection.keyList.keys.firstOrNull { it.id == connection.keyList.activeId }
             },
+            onDeviceSetup = onDeviceSetup?.let { open -> { settingsExpanded = false; open() } },
             onShareProfile = onShareProfile?.let { open -> { settingsExpanded = false; open() } },
         )
     }
@@ -414,9 +426,11 @@ private fun RenameKeyDialog(connection: DesktopConnection, item: NamedKey, onDis
 @Composable
 private fun ConnectionSettingsDialog(
     connection: DesktopConnection,
+    deviceStatus: String?,
     onDismiss: () -> Unit,
     onShowPermissions: () -> Unit,
     onShareProfile: (() -> Unit)?,
+    onDeviceSetup: (() -> Unit)?,
 ) {
     var addressDraft by remember(connection.profileId, connection.address) { mutableStateOf(connection.address) }
     var localError by remember { mutableStateOf(false) }
@@ -431,17 +445,22 @@ private fun ConnectionSettingsDialog(
         title = { Text("连接设置") },
         text = {
             Column(Modifier.heightIn(max = 500.dp).verticalScroll(rememberScrollState())) {
+                if (onDeviceSetup != null) {
+                    TextButton(onClick = onDeviceSetup, modifier = Modifier.testTag("device-setup-open")) { Text("连接我的手机 · 设备共享设置") }
+                }
                 Text(
                     when {
+                        deviceStatus != null -> "设备同步 · $deviceStatus"
+                        selectedProfile?.kind == "device" -> "手机档案通过设备共享服务续聊。"
                         connection.verifying -> "正在验证连接…"
                         connection.connected -> "连接已验证"
                         else -> "未连接"
                     },
-                    color = if (connection.connected) desktopPalette.success else MaterialTheme.colors.onSurface,
+                    color = if (deviceStatus == null && connection.connected) desktopPalette.success else MaterialTheme.colors.onSurface,
                     style = MaterialTheme.typography.subtitle1,
                 )
                 if (connection.error != null) {
-                    Text("上次操作未完成，请检查地址和密钥后重试。", color = MaterialTheme.colors.error,
+                    Text(if (connection.error == "无法读取已保存的密钥。") connection.error else "上次操作未完成，请检查地址和密钥后重试。", color = MaterialTheme.colors.error,
                         style = MaterialTheme.typography.caption)
                 }
                 if (connection.profiles.isEmpty() && connection.address.isBlank() && connection.instances.isEmpty()) {
@@ -511,6 +530,8 @@ private fun ConnectionSettingsDialog(
                     style = MaterialTheme.typography.caption)
                 if (selectedProfile?.kind == "shared") {
                     Text("此档案用于共享会话，可在聊天窗口打开共享服务。", style = MaterialTheme.typography.caption)
+                } else if (selectedProfile?.kind == "device") {
+                    Text("在设备共享设置中可检查该手机来源关联的 AstrBot。", style = MaterialTheme.typography.caption)
                 } else if (selectedProfile?.offlineOnly == true) {
                     Text("当前配置只包含离线历史。选择运行中的服务或应用新的地址以连接。",
                         style = MaterialTheme.typography.caption)
@@ -586,6 +607,7 @@ private fun OwnerPermissionsDialog(connection: DesktopConnection, item: NamedKey
 
 internal fun profileDisplayName(profile: Profile): String = when {
     profile.kind == "shared" -> "共享会话"
+    profile.kind == "device" -> "手机档案 · " + profile.id.substringAfterLast(':').take(8)
     profile.offlineOnly -> "离线历史"
     profile.kind == "launcher" -> "AstrBot Launcher · ${profile.id.removePrefix("launcher:").take(8)}"
     else -> profile.address.ifBlank { "服务配置" }

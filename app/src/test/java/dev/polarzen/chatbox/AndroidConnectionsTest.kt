@@ -91,4 +91,26 @@ class AndroidConnectionsTest {
         assertNull(connections.token())
         assertEquals(second, AndroidConnections(storage).base)
     }
+
+    @Test fun queuedUploadUsesOnlyItsSavedSourceAndKeyWithoutChangingSelection() = runBlocking {
+        val storage = MemoryStorage()
+        val setup = AndroidConnections(storage)
+        val first = setup.addService("手机来源", "https://one.example")
+        val second = setup.addService("另一档案", "https://two.example")
+        val captured = setup.addKey(first, "原密钥", "one")
+        val other = setup.addKey(second, "原密钥", "two")
+        setup.verify(second,other)
+        val restored = AndroidConnections(storage)
+        assertEquals("one",restored.savedToken(first,captured))
+        assertNull(restored.savedToken(second,captured))
+        assertNull(restored.savedToken(first,other))
+        assertNull(restored.savedToken("$first/",captured))
+        restored.removeKey(first,captured)
+        restored.addKey(first,"原密钥","replacement")
+        assertNull(restored.savedToken(first,captured))
+        assertEquals(second,restored.base)
+        assertEquals(other,restored.keyId)
+        assertEquals("two",restored.token())
+        assertEquals(1,storage.probes)
+    }
 }

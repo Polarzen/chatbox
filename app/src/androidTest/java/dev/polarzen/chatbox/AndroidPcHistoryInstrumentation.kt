@@ -104,6 +104,9 @@ internal object AndroidPcHistoryChecks {
             c.applyTurns(scope, "two", listOf(terminal))
             check(c.turns(scope, "two", 2) == listOf(concurrent, terminal))
             check(c.composer(scope, "two") == PcComposer("", null))
+            c.draft(scope, "two", terminal.question)
+            c.applyTurns(scope, "two", listOf(terminal))
+            check(c.composer(scope, "two") == PcComposer(terminal.question, null))
             c.draft(scope, "two", "另一条草稿")
             c.begin(scope, "two", imported.id)
             check(runCatching { c.applyTurns(scope, "two", listOf(imported)) }.isFailure)
@@ -130,6 +133,15 @@ internal object AndroidPcHistoryChecks {
             phone.open("one")
             check(phone.turns == sparse)
             check(phone.turns.zipWithNext().single { (a, b) -> b.seq > a.seq + 1 }.let { (a, b) -> a.seq == 5L && b.seq == 71L })
+
+            phone.editDraft("新")
+            phone.editDraft("新草稿")
+            phone.open("one") // Re-read the body just as a refresh does.
+            check(phone.draft == "新草稿")
+            phone.open("two")
+            check(phone.draft == "" && c.composer(scope, "one") == PcComposer("新草稿", null))
+            phone.open("one")
+            check(phone.draft == "新草稿")
 
             val tooLong = "🧪".repeat(16384) + "问"
             phone.editDraft(tooLong)
