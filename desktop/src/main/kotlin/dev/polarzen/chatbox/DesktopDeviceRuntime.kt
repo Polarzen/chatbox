@@ -17,11 +17,22 @@ internal object DesktopDeviceRuntime {
     private var installedScript: Path? = null
     private var interpreter: List<String>? = null
 
+    private fun runtimeRoot(): Path? =
+        System.getenv("LOCALAPPDATA")?.let { Path.of(it, "Polarzen", "Chatbox", "device-runtime") }
+
+    fun configuredGatewayPort(root: Path? = runtimeRoot()): Int {
+        val config = root?.resolve("config.json")
+        if (config != null && Files.isRegularFile(config)) {
+            val port = runCatching { JSONObject(Files.readString(config)).optInt("gatewayPort") }.getOrNull()
+            if (port != null && port in 1..65535) return port
+        }
+        return 18766
+    }
+
     fun call(request: JSONObject): JSONObject {
         fun failure(code: String) = JSONObject().put("ok", false).put("error", code)
         if (!System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) return failure("windows_required")
-        val local = System.getenv("LOCALAPPDATA") ?: return failure("runtime_home_missing")
-        val root = Path.of(local, "Polarzen", "Chatbox", "device-runtime")
+        val root = runtimeRoot() ?: return failure("runtime_home_missing")
         if (request.optString("action") != "configure" && !Files.exists(root.resolve("config.json"))) {
             return failure("not_configured")
         }

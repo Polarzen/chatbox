@@ -56,7 +56,7 @@ internal fun DesktopDeviceWizard(store: DesktopStore, connection: DesktopConnect
     var token by remember { mutableStateOf("") }
     var program by remember { mutableStateOf("") }
     var database by remember { mutableStateOf("") }
-    var port by remember { mutableStateOf("18766") }
+    var port by remember { mutableStateOf(DesktopDeviceRuntime.configuredGatewayPort().toString()) }
     var advanced by remember { mutableStateOf(false) }
     var accepted by remember { mutableStateOf(sync.enabled) }
     var login by remember { mutableStateOf(if (sync.enabled) sync.autoStart else true) }
