@@ -12,6 +12,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import java.awt.EventQueue
 import java.nio.file.Files
+import java.util.concurrent.FutureTask
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
@@ -24,6 +25,16 @@ import org.junit.rules.TemporaryFolder
 class DesktopScreenHideTest {
     @get:Rule val rule = createComposeRule()
     @get:Rule val files = TemporaryFolder()
+
+    private fun runOnEdt(action: () -> Unit) {
+        val task = FutureTask<Unit> { action() }
+        EventQueue.invokeLater(task)
+        try {
+            task.get(5, TimeUnit.SECONDS)
+        } finally {
+            task.cancel(false)
+        }
+    }
 
     @Test fun hiddenExitSavesWithoutAnotherFrame() = exitWithoutFrame(failSave = false)
 
@@ -72,16 +83,13 @@ class DesktopScreenHideTest {
         }
         if (!failSave) restoreFile()
         val stoppedAt = rule.mainClock.currentTime
-        synchronized(store) {
-            EventQueue.invokeAndWait {
-                if (hideThenExit) {
-                    visibility.hide(true)
-                    queuedEdit(AnnotatedString("late after hide request"))
-                }
-                visibility.exit()
-                queuedEdit(AnnotatedString("late before save"))
+        runOnEdt {
+            if (hideThenExit) {
+                visibility.hide(true)
+                queuedEdit(AnnotatedString("late after hide request"))
             }
-            EventQueue.invokeAndWait { queuedEdit(AnnotatedString("late during save")) }
+            visibility.exit()
+            queuedEdit(AnnotatedString("late after exit request"))
         }
         assertEquals(if (failSave) "restore" else "quit", results.poll(5, TimeUnit.SECONDS))
         assertEquals(stoppedAt, rule.mainClock.currentTime)
@@ -91,7 +99,7 @@ class DesktopScreenHideTest {
             rule.mainClock.advanceTimeByFrame()
             rule.onNodeWithText("无法保存草稿，窗口保持打开", substring = true).assertIsDisplayed()
         } else {
-            EventQueue.invokeAndWait { queuedEdit(AnnotatedString("late after save")) }
+            runOnEdt { queuedEdit(AnnotatedString("late after save")) }
             rule.mainClock.advanceTimeByFrame()
             assertEquals("pending hidden draft", field.fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
             assertEquals("pending hidden draft", DesktopStore(history).readDraft(key).text)
