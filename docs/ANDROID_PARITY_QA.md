@@ -10,6 +10,8 @@ adb -s <测试设备序列号> install -r .\Chatbox-0.1.17-debug.apk
 
 可在手机文件管理器中点 APK 安装。覆盖升级需同应用 ID、兼容版本号和相同签名；出现 `INSTALL_FAILED_UPDATE_INCOMPATIBLE` 时保留原安装与数据，改用匹配原签名的构建或另一台测试设备。Windows 先退出 Chatbox，在原目录安装同批 MSI。无需替换 Launcher 配置。
 
+交付 APK 的 SHA-256 完整值为 `836036836c0f526d18990d2b2e0f60bfe12bdbf3afdf7b7fb3f8a4eb6ce9ebac`。为瑶准备的 Redmi 文件位于「文件管理 → 下载 → Chatbox-0.1.17-QA-83603683.apk」。
+
 ## 准备测试会话
 
 1. 服务管理员创建独立测试 Key。文字聊天选 `chat`，图片和 WAV 同时选 `file`。准备第二把可撤销的测试 Key 以及独立测试服务 B。密钥在设备上直接输入。

@@ -70,6 +70,6 @@ Android 8.0 及以上可安装。手机从「连接设置」添加可信 HTTPS �
 .\gradlew.bat :app:testDebugUnitTest :app:assembleDebug
 ```
 
-Android 调试安装包位于 `app/build/outputs/apk/debug/app-debug.apk`。安装、覆盖升级、测试账户和现场验收见[0.1.17 初验说明](docs/ANDROID_PARITY_QA.md)。
+Android 调试安装包位于 `app/build/outputs/apk/debug/app-debug.apk`。安装、覆盖升级和测试账户见[0.1.17 初验说明](docs/ANDROID_PARITY_QA.md)。[功能与界面对照](docs/ANDROID_PC_PARITY.md) · [验收记录](docs/ANDROID_PARITY_ACCEPTANCE.md)
 
 [官方 HTTP API](https://docs.astrbot.app/dev/openapi.html)
