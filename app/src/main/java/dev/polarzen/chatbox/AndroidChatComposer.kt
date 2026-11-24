@@ -67,31 +67,27 @@ internal fun Modifier.chatImeHeight(ime: AndroidChatIme) = layout { measurable, 
 internal fun Modifier.moveWithChatIme(ime: AndroidChatIme) =
     graphicsLayer { translationY = ime.translation() }
 
-/** A reverse list anchors its viewport at the bottom. When browsing older turns, preserve
- * the top pixel instead, once at the endpoint resize. The following layout pass consumes
- * requestScrollToItem together with the new viewport height. */
+/** Keep older messages at their top-relative position when the available height changes.
+ * The parent resizes for IME endpoints; notices and attachment previews can resize later. */
 @Composable
 internal fun Modifier.chatImeReverseHistory(ime: AndroidChatIme, list: LazyListState, restoredHeight: Int = -1): Modifier {
     val previous = remember(list) {
         object {
-            var inset = -1
             var height = restoredHeight
         }
     }
     return layout { measurable, constraints ->
-        val inset = ime.layoutBottom.value
         val height = constraints.maxHeight
-        if (previous.height >= 0 && previous.inset != inset && previous.height != height) {
+        if (previous.height >= 0 && previous.height != height) {
             Snapshot.withoutReadObservation {
-                // Before the first measure, canScrollBackward is still false. Only a saved
-                // older reading supplies a height here; a latest-position restore stays pinned.
-                if (previous.inset < 0 || list.canScrollBackward) {
-                    list.requestScrollToItem(list.firstVisibleItemIndex,
-                        list.firstVisibleItemScrollOffset + previous.height - height)
+                // Index and offset already describe the restored position before the first measure.
+                val index = list.firstVisibleItemIndex
+                val offset = list.firstVisibleItemScrollOffset
+                if (index != 0 || offset != 0) {
+                    list.requestScrollToItem(index, offset + previous.height - height)
                 }
             }
         }
-        previous.inset = inset
         previous.height = height
         val child = measurable.measure(constraints)
         layout(child.width, child.height) { child.place(0, 0) }
