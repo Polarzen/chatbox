@@ -4,9 +4,15 @@ Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 
 
 ## Windows 下载
 
-Windows 0.1.14 安装包为 `Chatbox-0.1.14.msi`。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.14/Chatbox-0.1.14.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.14/SHA256SUMS.txt) · [v0.1.14 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.14)
+Windows 0.1.15 安装包为 `Chatbox-0.1.15.msi`。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.15/Chatbox-0.1.15.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.15/SHA256SUMS.txt) · [v0.1.15 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.15)
 
-将 MSI 和 `SHA256SUMS.txt` 下载到同一目录。在该目录打开 PowerShell，运行 `Get-FileHash .\Chatbox-0.1.14.msi -Algorithm SHA256`，确认输出的哈希值与 `SHA256SUMS.txt` 中该 MSI 对应的值一致。从 0.1.5 至 0.1.13 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。0.1.1 用户先阅读[旧卸载器升级说明](desktop/README.md#从-011-升级)。
+将 MSI 和 `SHA256SUMS.txt` 下载到同一目录。在该目录打开 PowerShell，运行 `Get-FileHash .\Chatbox-0.1.15.msi -Algorithm SHA256`，确认输出的哈希值与 `SHA256SUMS.txt` 中该 MSI 对应的值一致。从 0.1.5 至 0.1.14 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。0.1.1 用户先阅读[旧卸载器升级说明](desktop/README.md#从-011-升级)。
+
+## Windows 0.1.15
+
+首次使用时，全局快捷键默认关闭。若要用 Ctrl+Alt+J 唤起 Chatbox，打开「桌面设置」，开启「全局快捷键」并保存。升级会沿用已保存的开关和自定义组合键。关闭快捷键后，仍可从托盘或开始菜单唤回窗口。
+
+后台回复提醒独立设置，默认开启。Chatbox 按回复完成时的前后台状态判断是否提醒。若在图片或 WAV 仍在下载时关闭「后台回复完成时提醒」并保存，尚未交给 Windows 的提醒会撤销。重新开启后只提醒新取得提醒资格的回复。图片和语音仍会正常缓存。[桌面设置说明](desktop/README.md#windows-0115)
 
 ## Windows 0.1.14
 
