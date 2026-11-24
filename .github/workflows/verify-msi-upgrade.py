@@ -10,6 +10,7 @@ import subprocess
 # Both writes and reads use DesktopStore from the MSI installed at this stage.
 STORE_PROBE = r"""
 import dev.polarzen.chatbox.*;
+import org.json.JSONObject;
 import java.nio.file.*;
 import java.util.*;
 class StoreProbe {
@@ -30,10 +31,15 @@ class StoreProbe {
         DesktopStore restored = new DesktopStore(file);
         Profile profile = Objects.requireNonNull(restored.profile(id));
         SessionKey key = new SessionKey(id, profile.getCurrentSession());
+        List<Entry> entries = restored.sessionContent(id, key.getSessionId()).getEntries();
+        ComposerDraft savedDraft = restored.readDraft(key);
         if (!restored.getActiveProfileId().equals(id) || restored.getProfiles().size() != 1 ||
-            restored.sessions(id).size() != 1 || !restored.sessionContent(id, key.getSessionId()).getEntries().equals(List.of(entry)) ||
-            !restored.readDraft(key).equals(draft)) throw new AssertionError("Stored history or draft differs");
-        System.out.print(key.getSessionId());
+            restored.sessions(id).size() != 1 || !restored.sessions(id).get(0).getId().equals(key.getSessionId()) ||
+            !entries.equals(List.of(entry)) || !savedDraft.equals(draft))
+            throw new AssertionError("Stored profile, session, history or draft differs");
+        System.out.print(new JSONObject().put("profile", id).put("session", key.getSessionId())
+            .put("question", entries.get(0).getQuestion()).put("answer", entries.get(0).getAnswer())
+            .put("draft", savedDraft.getText()));
     }
 }
 """
@@ -77,7 +83,7 @@ def main():
         raise RuntimeError("Runner already has Chatbox registration or history")
     report = {}
     try:
-        for checkout, version in (("v17", "0.1.17"), ("v18", "0.1.18")):
+        for checkout, version in (("v18", "0.1.18"), ("v19", "0.1.19")):
             source = workspace / checkout
             msi = source / f"desktop/build/compose/binaries/main/msi/Chatbox-{version}.msi"
             row = report[version] = {"commit": subprocess.check_output(["git", "-C", source, "rev-parse", "HEAD"], text=True).strip(), "msi": fingerprint(msi)}
@@ -98,8 +104,16 @@ def main():
                 raise RuntimeError(f"Unexpected registered products: {products}")
             exe = install / "Chatbox.exe"
             row["installed_exe"] = fingerprint(exe)
-            previous = report["0.1.17"]
-            if checkout == "v18":
+            row["installed_version"] = subprocess.check_output(
+                ["pwsh", "-NoProfile", "-Command",
+                 "$v = (Get-Item -LiteralPath ./Chatbox.exe).VersionInfo; "
+                 "'{0}.{1}.{2}' -f $v.FileMajorPart, $v.FileMinorPart, $v.FileBuildPart"],
+                cwd=install, text=True, timeout=30,
+            ).strip()
+            if row["installed_version"] != version:
+                raise RuntimeError(f"Installed launcher version differs from {version}")
+            previous = report["0.1.18"]
+            if checkout == "v19":
                 if products.keys() & previous["registered_products"].keys():
                     raise RuntimeError("Old product registration survived upgrade")
                 row["history_after_msiexec"] = fingerprint(history)
@@ -109,12 +123,13 @@ def main():
             row["smoke_exit"] = subprocess.run([exe, "--smoke-test", marker], timeout=60).returncode
             if row["smoke_exit"] or marker.read_text(encoding="utf-8") != "chatbox-smoke-ok":
                 raise RuntimeError(f"Installed {version} smoke test failed")
-            mode = "seed" if checkout == "v17" else "verify"
-            session = subprocess.check_output(["java", "-cp", str(install / "app/*"), probe, mode], text=True, timeout=60).strip()
-            row["session"] = session
+            mode = "seed" if checkout == "v18" else "verify"
+            row["store"] = json.loads(subprocess.check_output(
+                ["java", "-cp", str(install / "app/*"), probe, mode], text=True, timeout=60,
+            ))
             row["history"] = fingerprint(history)
-            if checkout == "v18" and session != previous["session"]:
-                raise RuntimeError("Session identifier changed during upgrade")
+            if checkout == "v19" and row["store"] != previous["store"]:
+                raise RuntimeError("Restored profile, session, history or draft changed during upgrade")
     finally:
         summary = json.dumps(report, indent=2)
         (evidence / "transaction.json").write_text(summary, encoding="utf-8")
