@@ -254,6 +254,7 @@ internal fun DesktopScreen(
     DesktopModalGuard(screenModal)
     val navigating = openReply != null && !screenModal
     val composerLocked = windowCommit || navigating
+    fun composerLockedNow() = composerLocked || windowEvents?.let { it.exiting || it.hideRequested || !it.visible } == true
     val isBusy = sending != null || preparing != null || composerLocked
     LaunchedEffect(openReply, screenModal, windowCommit) {
         val target = openReply ?: return@LaunchedEffect
@@ -299,7 +300,7 @@ internal fun DesktopScreen(
     }?.let { index -> failedProgressByEntry[TimedEntryKey(currentKey, index)] }
 
     fun chooseImages(replacing: Path? = null) {
-        if (composerLocked) return
+        if (composerLockedNow()) return
         val origin = currentKey
         val originEditor = composer.editor(origin)?.takeUnless { it.commitInProgress } ?: return
         originEditor.editSerial++
@@ -310,7 +311,7 @@ internal fun DesktopScreen(
                 isMultiSelectionEnabled = replacing == null
                 fileFilter = FileNameExtensionFilter("PNG / JPEG 图片", "png", "jpg", "jpeg")
             }
-            if (chooser.showOpenDialog(parentWindow) == JFileChooser.APPROVE_OPTION) {
+            if (chooser.showOpenDialog(parentWindow) == JFileChooser.APPROVE_OPTION && !composerLockedNow()) {
                 val selected = chooser.selectedFiles.takeIf { it.isNotEmpty() }
                     ?.toList()
                     ?: listOfNotNull(chooser.selectedFile)
@@ -318,7 +319,7 @@ internal fun DesktopScreen(
                 else composer.replaceMissingAttachment(origin, replacing, selected)
             }
         } catch (_: InvalidPathException) {
-            composer.addFiles(origin, emptyList(), invalidPathCount = 1)
+            if (!composerLockedNow()) composer.addFiles(origin, emptyList(), invalidPathCount = 1)
         }
     }
 
@@ -369,7 +370,8 @@ internal fun DesktopScreen(
 
     fun retryReplyAttachment(key: ReplyAttachmentKey) {
         val sessionKey = SessionKey(key.profileId, key.sessionId)
-        if (sessionKey != currentKey || sessionKey in deletedSessionKeys || isBusy || isOffline || !connection.connected || connection.verifying) return
+        if (sessionKey != currentKey || sessionKey in deletedSessionKeys || isBusy || composerLockedNow() ||
+            isOffline || !connection.connected || connection.verifying) return
         val target = runCatching { connection.snapshot() }.getOrNull()
         if (target == null || target.profileId != key.profileId) {
             notices[sessionKey] = "请先连接并验证当前服务，再获取回复${key.type.label}。"
@@ -561,7 +563,7 @@ internal fun DesktopScreen(
 
     fun dispatch(retryEntry: Entry? = null, targetKey: SessionKey = currentKey) {
         val clickedAtNanos = System.nanoTime()
-        if (targetKey != currentKey || editor == null || composerLocked || sending != null || preparing != null ||
+        if (targetKey != currentKey || editor == null || composerLockedNow() || sending != null || preparing != null ||
             composer.recordingKey == targetKey || (retryEntry == null && editor.field.composition != null)
         ) return
         if (retryEntry?.blocksWhaleTaskRetry(targetKey.profileId) == true) {
@@ -676,6 +678,7 @@ internal fun DesktopScreen(
     }
 
     fun selectSearchHit(hit: HistoryHit, query: String): Boolean {
+        if (composerLockedNow()) return false
         val key = SessionKey(hit.profileId, hit.sessionId)
         val selected = runCatching {
             synchronized(store) {
@@ -732,7 +735,7 @@ internal fun DesktopScreen(
             sessions = sessions,
             chat = chat,
             onSelectSession = { sessionId ->
-                if (!composerLocked && profileId.isNotBlank()) {
+                if (!composerLockedNow() && profileId.isNotBlank()) {
                     runCatching {
                         store.selectSession(profileId, sessionId)
                         searchDestination = null
@@ -743,7 +746,7 @@ internal fun DesktopScreen(
                 }
             },
             onDeleteSession = { sessionId ->
-                if (!composerLocked && profileId.isNotBlank() && sessions.any { it.id == sessionId }) {
+                if (!composerLockedNow() && profileId.isNotBlank() && sessions.any { it.id == sessionId }) {
                     val key = SessionKey(profileId, sessionId)
                     runCatching { store.deleteSession(profileId, sessionId) }
                         .onSuccess {
@@ -775,7 +778,7 @@ internal fun DesktopScreen(
                     .exceptionOrNull()?.let { safeHistoryFailureMessage(it, "写入") }
             },
             onNewSession = {
-                if (canCreate) {
+                if (canCreate && !composerLockedNow()) {
                     runCatching {
                         val created = store.createSession(profileId)
                         searchDestination = null
@@ -801,26 +804,26 @@ internal fun DesktopScreen(
                 DesktopConnectionControls(connection)
             },
             draft = draft,
-            onDraft = { value -> if (!composerLocked) composer.input(currentKey, value) },
+            onDraft = { value -> if (!composerLockedNow()) composer.input(currentKey, value) },
             selectedImage = currentImages.firstOrNull(),
             selectedImages = currentImages,
             onChooseImage = { chooseImages() },
             onReplaceMissingAttachment = { path -> chooseImages(path) },
             composerCommitInProgress = composerLocked || editor?.commitInProgress == true,
-            onAddImages = { files -> if (!composerLocked) composer.addFiles(currentKey, files) },
-            onRemoveImage = { if (!composerLocked) composer.remove(currentKey, null) },
-            onRemoveImagePath = { if (!composerLocked) composer.remove(currentKey, it) },
-            onPasteAttachment = { composerLocked || (selectedSessionId.isNotBlank() && composer.paste(currentKey)) },
+            onAddImages = { files -> if (!composerLockedNow()) composer.addFiles(currentKey, files) },
+            onRemoveImage = { if (!composerLockedNow()) composer.remove(currentKey, null) },
+            onRemoveImagePath = { if (!composerLockedNow()) composer.remove(currentKey, it) },
+            onPasteAttachment = { composerLockedNow() || (selectedSessionId.isNotBlank() && composer.paste(currentKey)) },
             canRecord = selectedSessionId.isNotBlank() && editor?.commitInProgress == false && composer.recordingKey == null && !composerLocked,
             recordingMillis = composer.elapsed.takeIf { composer.recordingKey == currentKey },
-            onStartRecording = { if (!composerLocked) composer.startMic(currentKey) },
-            onStopRecording = { if (!composerLocked) composer.stopMic(currentKey) },
-            onCancelRecording = { if (!composerLocked) composer.stopMic(currentKey, discard = true) },
+            onStartRecording = { if (!composerLockedNow()) composer.startMic(currentKey) },
+            onStopRecording = { if (!composerLockedNow()) composer.stopMic(currentKey) },
+            onCancelRecording = { if (!composerLockedNow()) composer.stopMic(currentKey, discard = true) },
             onSend = { dispatch() },
             canSend = canSend,
             notice = if (loadedDraft.isFailure) "本地草稿无法读取。" else notices[currentKey],
             onRetry = { entry ->
-                if (canRetry && chat.entries.any { it === entry || it == entry }) {
+                if (canRetry && !composerLockedNow() && chat.entries.any { it === entry || it == entry }) {
                     retryConfirmation = RetryConfirmation(currentKey, entry)
                 }
             },
