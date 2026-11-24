@@ -16,7 +16,7 @@ kotlin {
 }
 tasks.named<KotlinCompile>("compileKotlin") {
     source(fileTree("../app/src/main/java") {
-        include("**/Sse.kt", "**/AstrBot.kt", "**/Shared*.kt")
+        include("**/Sse.kt", "**/AstrBot.kt", "**/Shared*.kt", "**/LiveHeartRate.kt")
     })
 }
 dependencies {
