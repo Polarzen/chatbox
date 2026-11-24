@@ -50,11 +50,20 @@ internal class DesktopShellVisibility {
     var exiting by mutableStateOf(false)
         private set
     private var stillWantsHide = false
+    private var saveDrafts: (() -> Unit)? = null
+
+    fun bindDraftSave(save: (() -> Unit)?) {
+        saveDrafts = save
+        if (hideRequested || exiting) save?.invoke()
+    }
 
     fun hide(trayAvailable: Boolean) {
         if (!exiting && trayAvailable) {
             stillWantsHide = true
-            hideRequested = true
+            if (!hideRequested) {
+                hideRequested = true
+                saveDrafts?.invoke()
+            }
         }
     }
 
@@ -63,9 +72,12 @@ internal class DesktopShellVisibility {
     }
 
     fun exit() {
+        if (exiting) return
+        val savingForHide = hideRequested
         exiting = true
         stillWantsHide = false
         hideRequested = false
+        if (!savingForHide) saveDrafts?.invoke()
     }
 
     fun show() {
@@ -344,6 +356,7 @@ private fun runPrimaryWindow(
                             onCloseResult = { saved -> visibility.finishExit(saved, ::exitApplication) { foreground(false) } },
                             hideRequested = visibility.hideRequested,
                             onHideResult = { visibility.finishHide(it, tray.trayAvailable) },
+                            windowEvents = visibility,
                             composerFocusSerial = composerFocusSerial,
                             openReply = openReply,
                             canNavigateReply = ::mayNavigate,

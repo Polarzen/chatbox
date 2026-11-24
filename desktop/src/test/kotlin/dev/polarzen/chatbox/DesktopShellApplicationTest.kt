@@ -66,6 +66,21 @@ class DesktopShellApplicationTest {
         assertFalse(state.hideRequested)
     }
 
+    @Test fun exitDuringHideUsesOneOutstandingSave() {
+        val state = DesktopShellVisibility()
+        var started = 0
+        state.bindDraftSave { started++ }
+        state.hide(true)
+        state.exit()
+        state.exit()
+        assertTrue(state.exiting)
+        assertFalse(state.hideRequested)
+        assertEquals(1, started)
+        var exited = false
+        state.finishExit(true, { exited = true }, { fail("Unexpected restore") })
+        assertTrue(exited)
+    }
+
     @Test fun foregroundOrDisabledAtCompletionSkipsToastAndNativeSuppressionHasNoFallback() {
         var enabled = true
         var foreground = true

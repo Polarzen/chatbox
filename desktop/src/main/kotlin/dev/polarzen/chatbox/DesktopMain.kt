@@ -38,6 +38,7 @@ import java.net.SocketTimeoutException
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CancellationException
+import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.JFileChooser
@@ -46,6 +47,7 @@ import javax.swing.filechooser.FileNameExtensionFilter
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -113,6 +115,8 @@ internal data class SourceImageAddition(val paths: List<Path>, val notice: Strin
 private fun KeyEvent.opensHistorySearch(): Boolean =
     type == KeyEventType.KeyDown && key == Key.K && isCtrlPressed
 
+private val windowEventDispatcher = Executor(SwingUtilities::invokeLater).asCoroutineDispatcher()
+
 /** Production screen shared with the desktop UI harness. */
 @Composable
 internal fun DesktopScreen(
@@ -132,6 +136,7 @@ internal fun DesktopScreen(
     canNavigateReply: () -> Boolean = { true },
     mayNotifyReply: () -> Boolean = { false },
     onReplyNotification: (ReplyDestination) -> Unit = {},
+    windowEvents: DesktopShellVisibility? = null,
     appearanceActions: @Composable () -> Unit = {},
 ) {
     val replyAudioCache = remember(replyImageCache) { ReplyAudioCache(replyImageCache.directory.resolveSibling("reply-audio")) }
@@ -159,8 +164,7 @@ internal fun DesktopScreen(
     val notifyReply by rememberUpdatedState(onReplyNotification)
     val replyHandled by rememberUpdatedState(onOpenReplyHandled)
     val canNavigateNow by rememberUpdatedState(canNavigateReply)
-    LaunchedEffect(windowCommit) {
-        if (!windowCommit) return@LaunchedEffect
+    suspend fun saveForWindowChange() {
         preparing?.join()
         closeError = try {
             composer.flushForExit()
@@ -170,6 +174,15 @@ internal fun DesktopScreen(
             "无法保存草稿，窗口保持打开。请检查本地数据目录后重试。（${error.javaClass.simpleName}）"
         }
         if (closingNow()) closeResult(closeError == null) else hideResult(closeError == null)
+    }
+    if (windowEvents != null) {
+        DisposableEffect(windowEvents, composer) {
+            // A hidden window cannot drive recomposition. Tray events still arrive on the AWT event queue.
+            windowEvents.bindDraftSave { scope.launch(windowEventDispatcher) { saveForWindowChange() } }
+            onDispose { windowEvents.bindDraftSave(null) }
+        }
+    } else {
+        LaunchedEffect(windowCommit) { if (windowCommit) saveForWindowChange() }
     }
     var sending by remember { mutableStateOf<SendOperation?>(null) }
     val activeOperationId = remember { AtomicInteger(0) }
