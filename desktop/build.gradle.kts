@@ -16,7 +16,7 @@ kotlin {
 }
 tasks.named<KotlinCompile>("compileKotlin") {
     source(fileTree("../app/src/main/java") {
-        include("**/Sse.kt", "**/AstrBot.kt")
+        include("**/Sse.kt", "**/AstrBot.kt", "**/Shared*.kt")
     })
 }
 dependencies {
@@ -42,7 +42,7 @@ if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
         from(toastDll) { into("win32-x86-64") }
     }
 }
-val windowsPackageVersion = "0.1.15"
+val windowsPackageVersion = "0.1.16"
 compose.desktop {
     application {
         mainClass = "dev.polarzen.chatbox.DesktopMainKt"

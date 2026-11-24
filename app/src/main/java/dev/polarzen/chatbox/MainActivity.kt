@@ -11,9 +11,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -25,7 +29,7 @@ class MainActivity : ComponentActivity() {
     private val prefs by lazy { getSharedPreferences("personal_chat", MODE_PRIVATE) }
     private val user by lazy {
         prefs.getString("user", null) ?: ("chatbox_" + UUID.randomUUID().toString().replace("-", "")).also {
-            prefs.edit().putString("user", it).commit()
+            check(prefs.edit().putString("user", it).commit())
         }
     }
     private data class Line(val question: String, val answer: String, val state: String)
@@ -59,15 +63,85 @@ class MainActivity : ComponentActivity() {
         executor.shutdownNow()
         super.onDestroy()
     }
+
+    @Composable private fun ForegroundPanel(seed: SharedSeed, storage: AndroidSharedStorage, onClose: () -> Unit) {
+        val view = remember(storage) { ComposeView(this) }
+        val close by rememberUpdatedState(onClose)
+        val bound = storage.hasRecord
+        DisposableEffect(view, bound) {
+            fun display() {
+                if (!bound || lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                    // The unbound form may be waiting for a one-time create/join response.
+                    view.setContent { SharedChatPanel(seed, storage, false, close) }
+                } else {
+                    // Dispose polling immediately even when Android has stopped producing UI frames.
+                    view.setContent { }
+                    view.disposeComposition()
+                }
+            }
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_RESUME) display()
+            }
+            display()
+            lifecycle.addObserver(observer)
+            onDispose { lifecycle.removeObserver(observer) }
+        }
+        AndroidView(factory = { view }, modifier = Modifier.fillMaxSize())
+    }
     @Composable private fun Screen() {
         var base by remember { mutableStateOf(prefs.getString("base", "") ?: "") }
+        val server = base.trim().trimEnd('/')
         var key by remember { mutableStateOf("") }
-        var draft by remember { mutableStateOf("") }
+        val draftKey = "draft:$server"
+        var draft by remember(draftKey) { mutableStateOf(prefs.getString(draftKey, "") ?: "") }
         var busy by remember { mutableStateOf(false) }
         var note by remember { mutableStateOf("") }
         var partial by remember { mutableStateOf("") }
-        var transcript by remember { mutableStateOf(read(base)) }
+        var transcript by remember(server) { mutableStateOf(read(server)) }
+        val storage = remember(server, transcript.session) { AndroidSharedStorage(this, server, transcript.session) }
+        var panelOpen by remember { mutableStateOf(storage.hasState()) }
+        var profileMenu by remember { mutableStateOf(false) }
         var askRetry by remember { mutableStateOf<String?>(null) }
+        fun openShared() {
+            if (busy) return
+            if (server.isNotBlank() && runCatching { endpoint(server) }.isFailure) {
+                note = "请填写有效的 HTTPS 地址，或清空地址以加入共享会话。"
+                return
+            }
+            val ready = runCatching {
+                user // Persist the installation identity before presenting it to the panel.
+                synchronized(transcriptLock) {
+                    val entry = prefs.getString("chat:$server", null)
+                    val edit = prefs.edit().putString("base", server)
+                    if (entry == null) edit.putString("chat:$server", encode(transcript.session, transcript.lines))
+                    else check(JSONObject(entry).getString("session") == transcript.session)
+                    check(edit.commit())
+                }
+            }.isSuccess
+            if (ready) panelOpen = true else note = "无法保存本地会话，未打开共享会话。"
+        }
+        if (panelOpen) {
+            val seed = remember(storage) {
+                runCatching {
+                    SharedSeed(server, user, transcript.session, transcript.lines.map {
+                        SharedSeedTurn(it.question, it.answer, if (it.state == "已完成") "complete" else "unknown")
+                    })
+                }.getOrNull()
+            }
+            Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
+                if (seed != null) {
+                    if (storage.hasRecord) {
+                        TextButton(onClick = { panelOpen = false }) { Text("返回本地历史与档案") }
+                    }
+                    ForegroundPanel(seed, storage) { panelOpen = false }
+                } else {
+                    Text("无法读取本机用户信息。")
+                    TextButton(onClick = { panelOpen = false }) { Text("返回本地历史") }
+                }
+            }
+            return
+        }
+        val bound = storage.hasState()
         val scroll = rememberLazyListState()
         LaunchedEffect(transcript.lines.size, partial.length) {
             val index = transcript.lines.lastIndex
@@ -75,8 +149,7 @@ class MainActivity : ComponentActivity() {
         }
         fun send(message: String) {
             val clean = message.trim()
-            if (busy || clean.isEmpty()) return
-            val server = base.trim().trimEnd('/')
+            if (busy || clean.isEmpty() || storage.hasState()) return
             val token = key.trim()
             if (token.isEmpty() || token.any { it.isWhitespace() }) {
                 note = "请输入有效的聊天 API 密钥。"; return
@@ -90,6 +163,7 @@ class MainActivity : ComponentActivity() {
                 note = "无法保存本地会话，消息未发送。"; return
             }
             transcript = Transcript(session, rows)
+            prefs.edit().remove(draftKey).apply()
             draft = ""; note = ""; partial = ""; busy = true
             executor.execute {
                 val answer = StringBuilder()
@@ -124,11 +198,35 @@ class MainActivity : ComponentActivity() {
             Column(Modifier.fillMaxSize().systemBarsPadding().imePadding().padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Chatbox · 小鲸鱼", style = MaterialTheme.typography.titleLarge)
+                Row {
+                    TextButton(onClick = { openShared() }, enabled = !busy) {
+                        Text(if (bound) "打开共享会话" else "跨设备共享会话")
+                    }
+                    Box {
+                        TextButton(onClick = { profileMenu = true }, enabled = !busy) { Text("切换档案") }
+                        DropdownMenu(expanded = profileMenu, onDismissRequest = { profileMenu = false }) {
+                            val profiles = (prefs.all.keys.filter { it.startsWith("chat:") }
+                                .map { it.removePrefix("chat:") } + "").distinct().sorted()
+                            profiles.forEach { profile ->
+                                DropdownMenuItem(text = { Text(profile.ifBlank { "独立共享会话" }) }, onClick = {
+                                    profileMenu = false
+                                    val selected = read(profile)
+                                    if (prefs.edit().putString("base", profile).commit()) {
+                                        base = profile
+                                        key = ""
+                                        note = ""
+                                        panelOpen = AndroidSharedStorage(this@MainActivity, profile, selected.session).hasState()
+                                    } else note = "无法切换本地档案。"
+                                })
+                            }
+                        }
+                    }
+                }
                 OutlinedTextField(base, {
-                    base = it; transcript = read(it.trim().trimEnd('/')); note = ""
+                    base = it; key = ""; note = ""
                 }, Modifier.fillMaxWidth(), enabled = !busy, singleLine = true,
                     label = { Text("AstrBot HTTPS 地址") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
-                OutlinedTextField(key, { key = it }, Modifier.fillMaxWidth(), enabled = !busy,
+                OutlinedTextField(key, { key = it }, Modifier.fillMaxWidth(), enabled = !busy && !bound,
                     singleLine = true, label = { Text("对话 API 密钥 · 不保存") },
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
@@ -139,15 +237,19 @@ class MainActivity : ComponentActivity() {
                         val reply = if (active) partial else row.answer
                         if (reply.isNotBlank()) Text("助手：$reply")
                         if (row.state != "已完成") Text(row.state, style = MaterialTheme.typography.labelMedium)
-                        if (!busy && row === transcript.lines.lastOrNull() && row.state != "已完成") {
+                        if (!busy && !bound && row === transcript.lines.lastOrNull() && row.state != "已完成") {
                             TextButton(onClick = { askRetry = row.question }) { Text("重新发送上一条") }
                         }
                     }
                 }
                 if (note.isNotBlank()) Text(note, color = MaterialTheme.colorScheme.error)
-                OutlinedTextField(draft, { draft = it }, Modifier.fillMaxWidth(), enabled = !busy,
+                if (bound) Text("此会话已关联共享服务，请打开共享会话继续。")
+                OutlinedTextField(draft, {
+                    draft = it
+                    prefs.edit().putString(draftKey, it).apply()
+                }, Modifier.fillMaxWidth(), enabled = !busy && !bound,
                     maxLines = 3, label = { Text("输入消息") })
-                Button(onClick = { send(draft) }, enabled = !busy && draft.isNotBlank()) {
+                Button(onClick = { send(draft) }, enabled = !busy && !bound && draft.isNotBlank()) {
                     Text(if (busy) "等待回复…" else "发送")
                 }
             }

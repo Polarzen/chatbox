@@ -30,7 +30,7 @@ internal class DesktopCredentials(private val directory: Path) {
     private fun saveAt(target: Path, entropy: ByteArray, credential: String) {
         val plain = credential.toByteArray(StandardCharsets.UTF_8)
         val protected = try {
-            transform(entropy, plain, protect = true)
+            WindowsDpapi.transform(entropy, plain, protect = true)
         } finally {
             plain.fill(0)
         }
@@ -70,7 +70,7 @@ internal class DesktopCredentials(private val directory: Path) {
             return null
         }
         val plain = try {
-            transform(entropy, encrypted, protect = false)
+            WindowsDpapi.transform(entropy, encrypted, protect = false)
         } finally {
             encrypted.fill(0)
         }
@@ -112,7 +112,15 @@ internal class DesktopCredentials(private val directory: Path) {
         }
     }
 
-    private fun transform(profileHash: ByteArray, bytes: ByteArray, protect: Boolean): ByteArray {
+    private fun requireWindows() {
+        check(System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
+            "Windows credential storage is available only on Windows."
+        }
+    }
+}
+
+internal object WindowsDpapi {
+    fun transform(entropy: ByteArray, bytes: ByteArray, protect: Boolean): ByteArray {
         val script = powershellScript
         val encodedScript = Base64.getEncoder().encodeToString(script.toByteArray(StandardCharsets.UTF_16LE))
         val process = try {
@@ -128,7 +136,7 @@ internal class DesktopCredentials(private val directory: Path) {
 
         val output = CompletableFuture.supplyAsync { process.inputStream.use { it.readBytes() } }
         val inputBytes = Base64.getEncoder().encode(bytes)
-        val entropyBytes = Base64.getEncoder().encode(profileHash)
+        val entropyBytes = Base64.getEncoder().encode(entropy)
         try {
             process.outputStream.use { stream ->
                 stream.write(if (protect) "protect\n".toByteArray(StandardCharsets.US_ASCII) else "unprotect\n".toByteArray(StandardCharsets.US_ASCII))
@@ -152,12 +160,6 @@ internal class DesktopCredentials(private val directory: Path) {
             entropyBytes.fill(0)
             if (process.isAlive) process.destroyForcibly()
             output.cancel(true)
-        }
-    }
-
-    private fun requireWindows() {
-        check(System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
-            "Windows credential storage is available only on Windows."
         }
     }
 

@@ -9,12 +9,14 @@ import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -213,6 +215,34 @@ internal fun DesktopScreen(
         sessions.firstOrNull { it.selected }?.id
             ?: sessions.firstOrNull()?.id.orEmpty()
     val currentKey = SessionKey(profileId, selectedSessionId)
+    val standalone = selectedProfile?.kind == "shared"
+    val sourceBase = remember(selectedProfile?.address, connection.address, standalone, selectedProfile?.offlineOnly) {
+        if (standalone) "" else selectedProfile?.takeUnless { it.offlineOnly }?.let { profile ->
+            runCatching {
+                val base = DesktopStore.normalizeAddress(sharedAddress(connection.address, allowLoopback = true))
+                base.takeIf { it == DesktopStore.normalizeAddress(profile.address) }
+            }.getOrNull()
+        }
+    }
+    val sharedStorage = remember(store, currentKey, sourceBase) {
+        if (sourceBase != null && selectedSessionId.isNotEmpty()) DesktopSharedStorage(store, currentKey, sourceBase) else null
+    }
+    var requestedShared by remember { mutableStateOf<SessionKey?>(null) }
+    var sharedOpen by remember(sharedStorage, windowEvents?.visible, composerFocusSerial) {
+        mutableStateOf(sharedStorage != null && (sharedStorage.bound || requestedShared == currentKey))
+    }
+    val boundToShared = sharedStorage?.bound == true
+    DisposableEffect(parentWindow, sharedStorage, composerFocusSerial, windowEvents?.visible) {
+        val listener = object : java.awt.event.WindowAdapter() {
+            override fun windowGainedFocus(event: java.awt.event.WindowEvent) {
+                if (event.oppositeWindow == null && sharedStorage?.bound == true) sharedOpen = true
+            }
+        }
+        parentWindow?.addWindowFocusListener(listener)
+        onDispose { parentWindow?.removeWindowFocusListener(listener) }
+    }
+    val launcherMayImport = !profileId.startsWith("launcher:") ||
+        LauncherInstanceResolver.currentUrl(profileId.removePrefix("launcher:"), connection.instances) == sourceBase
     val whaleGeneration = if (profileId.startsWith("launcher:") && connection.connected &&
         !connection.verifying && !closeRequested
     ) connection.snapshot()?.bindingGeneration else null
@@ -562,7 +592,8 @@ internal fun DesktopScreen(
 
     fun dispatch(retryEntry: Entry? = null, targetKey: SessionKey = currentKey) {
         val clickedAtNanos = System.nanoTime()
-        if (targetKey != currentKey || editor == null || composerLockedNow() || sending != null || preparing != null ||
+        if (targetKey != currentKey || editor == null || sharedOpen || sharedStorage?.bound == true ||
+            composerLockedNow() || sending != null || preparing != null ||
             composer.recordingKey == targetKey || (retryEntry == null && editor.field.composition != null)
         ) return
         if (retryEntry?.blocksWhaleTaskRetry(targetKey.profileId) == true) {
@@ -712,20 +743,34 @@ internal fun DesktopScreen(
         return true
     }
 
-    val canCreate = profileId.isNotBlank() && selectedProfile != null && !selectedProfile.offlineOnly && !composerLocked
-    val canSend = selectedSessionId.isNotBlank() && !isBusy && !isOffline && connection.connected && !connection.verifying &&
+    val canCreate = profileId.isNotBlank() && selectedProfile != null && (!selectedProfile.offlineOnly || standalone) && !composerLocked
+    val canSend = !boundToShared && selectedSessionId.isNotBlank() && !isBusy && !isOffline && connection.connected && !connection.verifying &&
         editor != null && draft.composition == null && composer.recordingKey != currentKey &&
         (draft.text.isNotBlank() || currentImages.isNotEmpty() || composer.pendingImport(currentKey) != null)
-    val canRetry = !isBusy && !isOffline && connection.connected && !connection.verifying && composer.recordingKey != currentKey
+    val canRetry = !boundToShared && !isBusy && !isOffline && connection.connected && !connection.verifying && composer.recordingKey != currentKey
     val retryingAttachments = fetchingAttachments.keys.toSet()
 
     Surface(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
-        if (event.opensHistorySearch()) {
+        if (!sharedOpen && event.opensHistorySearch()) {
             searchOpen = true
             true
         } else false
     }) {
-        DesktopChatLayout(
+        if (sharedOpen && sharedStorage != null && sourceBase != null) {
+            key(sharedStorage) {
+                val seed = remember(chat, sourceBase) { desktopSharedSeed(sourceBase, store.username, chat) }
+                val browseLocal = {
+                    requestedShared = null
+                    sharedOpen = false
+                }
+                Column(Modifier.fillMaxSize()) {
+                    if (boundToShared) TextButton(onClick = browseLocal, modifier = Modifier.testTag("shared-chat-browse-local")) {
+                        Text("返回本地历史")
+                    }
+                    SharedChatPanel(seed, sharedStorage, allowLoopback = true, onClose = browseLocal)
+                }
+            }
+        } else DesktopChatLayout(
             composerFocusSerial = composerFocusSerial,
             replyNavigation = replyDestination?.takeIf { it.first == currentKey }?.second,
             searchSelectionSerial = searchSerial,
@@ -737,6 +782,8 @@ internal fun DesktopScreen(
                 if (!composerLockedNow() && profileId.isNotBlank()) {
                     runCatching {
                         store.selectSession(profileId, sessionId)
+                        requestedShared = null
+                        if (sessionId == currentKey.sessionId && sharedStorage?.bound == true) sharedOpen = true
                         searchDestination = null
                         val key = SessionKey(profileId, sessionId)
                         chats[key] = latestChat(key)
@@ -789,6 +836,24 @@ internal fun DesktopScreen(
             },
             canCreate = canCreate,
             topActions = {
+                TextButton(
+                    enabled = !isBusy && composer.recordingKey == null && (profileId.isEmpty() ||
+                        (sourceBase != null && (boundToShared || launcherMayImport))),
+                    modifier = Modifier.testTag("shared-chat-open"),
+                    onClick = {
+                        if (sending != null || preparing != null || composer.recordingKey != null || composerLockedNow()) return@TextButton
+                        if (sharedStorage != null) {
+                            requestedShared = currentKey
+                            sharedOpen = true
+                        } else runCatching {
+                            val profile = selectedProfile ?: store.selectStandaloneSharedProfile()
+                            val session = profile.currentSession.ifEmpty { store.createSession(profile.id).session }
+                            requestedShared = SessionKey(profile.id, session)
+                            connection.adoptSelectedProfileForReply(checkNotNull(store.profile(profile.id)))
+                            sessionsRevision.intValue++
+                        }.onFailure { notices[currentKey] = "无法打开共享会话，请检查本地档案。" }
+                    },
+                ) { Text("共享") }
                 IconButton(
                     onClick = { searchOpen = true },
                     modifier = Modifier.size(36.dp).testTag("history-search-open"),
@@ -820,7 +885,8 @@ internal fun DesktopScreen(
             onCancelRecording = { if (!composerLockedNow()) composer.stopMic(currentKey, discard = true) },
             onSend = { dispatch() },
             canSend = canSend,
-            notice = if (loadedDraft.isFailure) "本地草稿无法读取。" else notices[currentKey],
+            notice = if (loadedDraft.isFailure) "本地草稿无法读取。" else notices[currentKey]
+                ?: if (boundToShared) "此会话已共享。点击“共享”查看最新消息或发送。" else null,
             onRetry = { entry ->
                 if (canRetry && !composerLockedNow() && chat.entries.any { it === entry || it == entry }) {
                     retryConfirmation = RetryConfirmation(currentKey, entry)

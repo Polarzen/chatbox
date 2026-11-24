@@ -1,6 +1,6 @@
 # chatbox Windows 桌面版
 
-Windows 桌面版使用 AstrBot OpenAPI 收发文字和图片，也可播放服务端返回的 WAV 语音附件。每个服务配置可以保留多个会话，桌面端和 Android 各自保存本机历史。
+Windows 桌面版使用 AstrBot OpenAPI 收发文字和图片，也可播放服务端返回的 WAV 语音附件。每个服务配置可以保留多个会话。0.1.16 跨端测试版可将选中的会话与 Android 配对，共享文字轮次。[启用步骤与历史范围](../docs/SHARED_CHAT_GUIDE.md)
 
 ## 安装与构建
 

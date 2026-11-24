@@ -181,6 +181,19 @@ internal class DesktopStore(private val file: Path) {
         return ensureProfile("manual:${UUID.randomUUID()}", normalized)
     }
 
+    /** A first-run user can join a room before configuring any native AstrBot endpoint. */
+    @Synchronized
+    fun selectStandaloneSharedProfile(): Profile {
+        val id = "shared"
+        persist { copy ->
+            if (findProfile(copy, id) == null) {
+                createProfileInState(copy, "", id).put("kind", "shared").put("offlineOnly", true)
+            }
+            copy.put("activeProfileId", id)
+        }
+        return checkNotNull(profile(id))
+    }
+
     @Synchronized
     fun ensureProfile(profileId: String, address: String): Profile {
         require(profileId.isNotBlank()) { "Profile identity is required" }
@@ -317,6 +330,21 @@ internal class DesktopStore(private val file: Path) {
     }
 
     @Synchronized
+    fun sharedRecord(key: SessionKey, scope: String): String? {
+        val session = findProfile(state, key.profileId)?.let { findSession(it, key.sessionId) } ?: return null
+        return if (session.has(scope)) session.getString(scope) else null
+    }
+
+    @Synchronized
+    fun saveSharedRecord(key: SessionKey, scope: String, previous: String?, protected: String?) {
+        persist(requireAtomic = true) { copy ->
+            val session = checkNotNull(findSession(requireProfile(copy, key.profileId), key.sessionId))
+            check(sharedRecord(key, scope) == previous) { "共享绑定已变化，请重新打开会话。" }
+            if (protected == null) session.remove(scope) else session.put(scope, protected)
+        }
+    }
+
+    @Synchronized
     fun saveDraft(key: SessionKey, revision: Long, draft: ComposerDraft) {
         if (revision <= (appliedDraftRevisions[key] ?: Long.MIN_VALUE)) return
         val profile = findProfile(state, key.profileId) ?: return
@@ -403,7 +431,7 @@ internal class DesktopStore(private val file: Path) {
         var chat: Chat? = null
         persist { copy ->
             val profile = requireProfile(copy, profileId)
-            require(!profile.optBoolean("offlineOnly")) { "Legacy offline profiles cannot start sessions" }
+            require(!profile.optBoolean("offlineOnly") || profile.optString("kind") == "shared") { "Legacy offline profiles cannot start sessions" }
             val session = newSession(UUID.randomUUID().toString())
             insertSessionAtHead(profile, session)
             profile.put("currentSession", session.getString("id"))
@@ -474,7 +502,7 @@ internal class DesktopStore(private val file: Path) {
             val rows = profileArray(copy)
             for (index in 0 until rows.length()) {
                 val source = rows.getJSONObject(index)
-                if (!source.optBoolean("offlineOnly")) continue
+                if (!source.optBoolean("offlineOnly") || source.optString("kind") == "shared") continue
                 val sourceSessions = source.getJSONArray("sessions")
                 for (sessionIndex in 0 until sourceSessions.length()) {
                     val session = sourceSessions.getJSONObject(sessionIndex)
@@ -512,7 +540,8 @@ internal class DesktopStore(private val file: Path) {
             }
             for (index in rows.length() - 1 downTo 0) {
                 val profile = rows.getJSONObject(index)
-                if (profile.optBoolean("offlineOnly") && profile.getJSONArray("sessions").length() == 0) rows.remove(index)
+                if (profile.optBoolean("offlineOnly") && profile.optString("kind") != "shared" &&
+                    profile.getJSONArray("sessions").length() == 0) rows.remove(index)
             }
             adopted = moved
         }

@@ -507,7 +507,9 @@ private fun ConnectionSettingsDialog(
                 }
                 if (localError) Text("地址无效，请输入完整的 HTTPS 地址或受支持的本机地址。", color = MaterialTheme.colors.error,
                     style = MaterialTheme.typography.caption)
-                if (selectedProfile?.offlineOnly == true) {
+                if (selectedProfile?.kind == "shared") {
+                    Text("此档案用于共享会话，可在聊天窗口打开共享服务。", style = MaterialTheme.typography.caption)
+                } else if (selectedProfile?.offlineOnly == true) {
                     Text("当前配置只包含离线历史。选择运行中的服务或应用新的地址以连接。",
                         style = MaterialTheme.typography.caption)
                 }
@@ -577,6 +579,7 @@ private fun OwnerPermissionsDialog(connection: DesktopConnection, item: NamedKey
 }
 
 private fun profileDisplayName(profile: Profile): String = when {
+    profile.kind == "shared" -> "共享会话"
     profile.offlineOnly -> "离线历史"
     profile.kind == "launcher" -> "AstrBot Launcher · ${profile.id.removePrefix("launcher:").take(8)}"
     else -> profile.address.ifBlank { "服务配置" }

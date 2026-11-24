@@ -1,6 +1,6 @@
 # chatbox
 
-Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 OneBot。Windows 和 Android 各自保存本机历史。[Windows 安装、连接与升级说明](desktop/README.md)
+Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 OneBot。默认聊天记录保存在本机。0.1.16 跨端测试版可以把选定的会话接到个人共享服务，让 Windows 和 Android 接续同一段 AstrBot 对话。[跨端测试版安装、配对和验收步骤](docs/SHARED_CHAT_GUIDE.md) · [Windows 安装与升级说明](desktop/README.md)
 
 ## Windows 下载
 
