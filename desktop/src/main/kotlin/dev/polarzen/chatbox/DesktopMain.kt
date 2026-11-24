@@ -50,12 +50,14 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.concurrent.thread
 
 fun main(args: Array<String>) {
@@ -206,7 +208,14 @@ internal fun DesktopScreen(
     var replySerial by remember { mutableStateOf(0L) }
     var replyDestination by remember { mutableStateOf<Pair<SessionKey, ReplyTurnNavigation>?>(null) }
     val selectedProfile = connection.profiles.firstOrNull { it.id == profileId }
-    val sessions = remember(profileId, connection.profiles, sessionsRevision.intValue) {
+    val histories = connection.profiles.filterNot { it.offlineOnly || it.kind == "shared" }.associate { profile ->
+        profile.id to key(profile.id) { remember(store) { DesktopProfileHistory(store, profile.id) } }
+    }
+    val profileHistory = histories[profileId]
+    val profileBound = profileHistory?.bound == true
+    val profileRevision = profileHistory?.revision ?: 0L
+    var profilePanel by remember(profileId) { mutableStateOf(false) }
+    val sessions = remember(profileId, connection.profiles, sessionsRevision.intValue, profileRevision) {
         profileId.takeIf(String::isNotBlank)?.let { runCatching { store.sessions(it) }.getOrDefault(emptyList()) }
             ?: emptyList()
     }
@@ -228,14 +237,17 @@ internal fun DesktopScreen(
         if (sourceBase != null && selectedSessionId.isNotEmpty()) DesktopSharedStorage(store, currentKey, sourceBase) else null
     }
     var requestedShared by remember { mutableStateOf<SessionKey?>(null) }
-    var sharedOpen by remember(sharedStorage, windowEvents?.visible, composerFocusSerial) {
-        mutableStateOf(sharedStorage != null && (sharedStorage.bound || requestedShared == currentKey))
+    var sharedOpen by remember(sharedStorage, windowEvents?.visible, composerFocusSerial, profileBound) {
+        mutableStateOf(!profileBound && sharedStorage != null && (sharedStorage.bound || requestedShared == currentKey))
     }
-    val boundToShared = sharedStorage?.bound == true
-    DisposableEffect(parentWindow, sharedStorage, composerFocusSerial, windowEvents?.visible) {
+    val boundToShared = !profileBound && sharedStorage?.bound == true
+    var refreshOnFocus by remember { mutableIntStateOf(0) }
+    DisposableEffect(parentWindow, sharedStorage, profileBound, composerFocusSerial, windowEvents?.visible) {
         val listener = object : java.awt.event.WindowAdapter() {
             override fun windowGainedFocus(event: java.awt.event.WindowEvent) {
-                if (event.oppositeWindow == null && sharedStorage?.bound == true) sharedOpen = true
+                if (event.oppositeWindow == null) {
+                    if (profileBound) refreshOnFocus++ else if (sharedStorage?.bound == true) sharedOpen = true
+                }
             }
         }
         parentWindow?.addWindowFocusListener(listener)
@@ -243,6 +255,29 @@ internal fun DesktopScreen(
     }
     val launcherMayImport = !profileId.startsWith("launcher:") ||
         LauncherInstanceResolver.currentUrl(profileId.removePrefix("launcher:"), connection.instances) == sourceBase
+    val verifiedSource = sourceBase?.takeIf {
+        !standalone && connection.connected && !connection.verifying && launcherMayImport
+    }
+    for ((id, history) in histories) key(id) {
+        if (history.bound) {
+            val active = id == profileId
+            val source by rememberUpdatedState(verifiedSource.takeIf { active })
+            val refresh = remember(history) { Channel<Unit>(Channel.CONFLATED) }
+            if (active) {
+                LaunchedEffect(refresh, currentKey, sessionsRevision.intValue, source, refreshOnFocus, windowEvents?.visible) {
+                    refresh.trySend(Unit)
+                }
+            }
+            // Keep the publisher alive while the user works in another profile. Navigation
+            // can request an earlier refresh but cannot cancel an upload already in flight.
+            LaunchedEffect(history) {
+                while (isActive) {
+                    withTimeoutOrNull(5_000) { refresh.receive() }
+                    history.refresh(source)
+                }
+            }
+        }
+    }
     val whaleGeneration = if (profileId.startsWith("launcher:") && connection.connected &&
         !connection.verifying && !closeRequested
     ) connection.snapshot()?.bindingGeneration else null
@@ -263,7 +298,7 @@ internal fun DesktopScreen(
             store.activeProfileId == currentKey.profileId &&
             store.profile(currentKey.profileId)?.currentSession == currentKey.sessionId
 
-    val storedChat = chats[currentKey] ?: remember(currentKey, sessionsRevision.intValue) {
+    val storedChat = (if (profileBound) null else chats[currentKey]) ?: remember(currentKey, sessionsRevision.intValue, profileRevision, profileBound) {
         if (profileId.isNotBlank() && selectedSessionId.isNotBlank()) {
             runCatching { store.sessionContent(profileId, selectedSessionId) }.getOrDefault(Chat(selectedSessionId))
         } else Chat("")
@@ -277,7 +312,7 @@ internal fun DesktopScreen(
     val draft = editor?.field ?: TextFieldValue()
     val currentImages = editor?.draft?.attachments.orEmpty()
     val isOffline = selectedProfile?.offlineOnly == true
-    fun hasScreenModal() = searchOpen || whaleLoginTarget != null || retryConfirmation != null || closeError != null || closingNow()
+    fun hasScreenModal() = profilePanel || searchOpen || whaleLoginTarget != null || retryConfirmation != null || closeError != null || closingNow()
     val screenModal = hasScreenModal()
     DesktopModalGuard(screenModal)
     val navigating = openReply != null && !screenModal
@@ -592,10 +627,34 @@ internal fun DesktopScreen(
 
     fun dispatch(retryEntry: Entry? = null, targetKey: SessionKey = currentKey) {
         val clickedAtNanos = System.nanoTime()
-        if (targetKey != currentKey || editor == null || sharedOpen || sharedStorage?.bound == true ||
+        if (targetKey != currentKey || editor == null || sharedOpen || boundToShared ||
             composerLockedNow() || sending != null || preparing != null ||
             composer.recordingKey == targetKey || (retryEntry == null && editor.field.composition != null)
         ) return
+        if (profileHistory != null && profileHistory.bound) {
+            val question = editor.draft.text.trim()
+            if (retryEntry != null || question.isEmpty() || editor.draft.attachments.isNotEmpty() ||
+                composer.pendingImport(targetKey) != null || profileHistory.reason(targetKey.sessionId).isNotBlank() ||
+                profileHistory.hasPending(targetKey.sessionId)) return
+            val revision = editor.revision
+            editor.commitInProgress = true
+            val job = scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    notices.remove(targetKey)
+                    if (profileHistory.send(targetKey.sessionId, question, revision)) composer.consumed(targetKey, revision)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    if (targetKey !in deletedSessionKeys) notices[targetKey] = "共享发送未获确认，请先核对原消息状态。"
+                } finally {
+                    editor.commitInProgress = false
+                    preparing = null
+                }
+            }
+            preparing = job
+            job.start()
+            return
+        }
         if (retryEntry?.blocksWhaleTaskRetry(targetKey.profileId) == true) {
             notices[targetKey] = WHALE_TASK_CHECK_STATUS
             return
@@ -744,10 +803,16 @@ internal fun DesktopScreen(
     }
 
     val canCreate = profileId.isNotBlank() && selectedProfile != null && (!selectedProfile.offlineOnly || standalone) && !composerLocked
-    val canSend = !boundToShared && selectedSessionId.isNotBlank() && !isBusy && !isOffline && connection.connected && !connection.verifying &&
+    val profileReason = profileHistory?.takeIf { profileBound }?.reason(selectedSessionId).orEmpty()
+    val profilePending = profileBound && profileHistory?.hasPending(selectedSessionId) == true
+    val sendRouteReady = if (profileBound) profileReason.isBlank() && !profilePending &&
+        currentImages.isEmpty() && composer.pendingImport(currentKey) == null else connection.connected && !connection.verifying
+    val canSend = !boundToShared && selectedSessionId.isNotBlank() && !isBusy && !isOffline && sendRouteReady &&
         editor != null && draft.composition == null && composer.recordingKey != currentKey &&
         (draft.text.isNotBlank() || currentImages.isNotEmpty() || composer.pendingImport(currentKey) != null)
-    val canRetry = !boundToShared && !isBusy && !isOffline && connection.connected && !connection.verifying && composer.recordingKey != currentKey
+    val canRetry = !profileBound && !boundToShared && !isBusy && !isOffline && connection.connected && !connection.verifying && composer.recordingKey != currentKey
+    val canOpenProfilePanel = profileHistory != null && !isBusy && composer.recordingKey == null &&
+        (profileBound || verifiedSource != null && unsavedReplies.keys.none { it.profileId == profileId })
     val retryingAttachments = fetchingAttachments.keys.toSet()
 
     Surface(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
@@ -764,9 +829,14 @@ internal fun DesktopScreen(
                     sharedOpen = false
                 }
                 Column(Modifier.fillMaxSize()) {
-                    if (boundToShared) TextButton(onClick = browseLocal, modifier = Modifier.testTag("shared-chat-browse-local")) {
+                    if (sharedStorage.bound) TextButton(onClick = browseLocal, modifier = Modifier.testTag("shared-chat-browse-local")) {
                         Text("返回本地历史")
                     }
+                    if (profileHistory != null) TextButton(
+                        onClick = { profilePanel = true },
+                        enabled = canOpenProfilePanel,
+                        modifier = Modifier.testTag("profile-share-open"),
+                    ) { Text("与手机共享此档案的会话") }
                     SharedChatPanel(seed, sharedStorage, allowLoopback = true, onClose = browseLocal)
                 }
             }
@@ -783,7 +853,7 @@ internal fun DesktopScreen(
                     runCatching {
                         store.selectSession(profileId, sessionId)
                         requestedShared = null
-                        if (sessionId == currentKey.sessionId && sharedStorage?.bound == true) sharedOpen = true
+                        if (sessionId == currentKey.sessionId && boundToShared) sharedOpen = true
                         searchDestination = null
                         val key = SessionKey(profileId, sessionId)
                         chats[key] = latestChat(key)
@@ -837,12 +907,14 @@ internal fun DesktopScreen(
             canCreate = canCreate,
             topActions = {
                 TextButton(
-                    enabled = !isBusy && composer.recordingKey == null && (profileId.isEmpty() ||
+                    enabled = !isBusy && composer.recordingKey == null && (profileBound || profileId.isEmpty() ||
                         (sourceBase != null && (boundToShared || launcherMayImport))),
                     modifier = Modifier.testTag("shared-chat-open"),
                     onClick = {
                         if (sending != null || preparing != null || composer.recordingKey != null || composerLockedNow()) return@TextButton
-                        if (sharedStorage != null) {
+                        if (profileBound) {
+                            profilePanel = true
+                        } else if (sharedStorage != null) {
                             requestedShared = currentKey
                             sharedOpen = true
                         } else runCatching {
@@ -865,7 +937,7 @@ internal fun DesktopScreen(
                     }, enabled = !isBusy) { Text("退出鲸鱼任务") }
                 }
                 appearanceActions()
-                DesktopConnectionControls(connection)
+                DesktopConnectionControls(connection, onShareProfile = if (canOpenProfilePanel) ({ profilePanel = true }) else null)
             },
             draft = draft,
             onDraft = { value -> if (!composerLockedNow()) composer.input(currentKey, value) },
@@ -877,16 +949,37 @@ internal fun DesktopScreen(
             onAddImages = { files -> if (!composerLockedNow()) composer.addFiles(currentKey, files) },
             onRemoveImage = { if (!composerLockedNow()) composer.remove(currentKey, null) },
             onRemoveImagePath = { if (!composerLockedNow()) composer.remove(currentKey, it) },
-            onPasteAttachment = { composerLockedNow() || (selectedSessionId.isNotBlank() && composer.paste(currentKey)) },
-            canRecord = selectedSessionId.isNotBlank() && editor?.commitInProgress == false && composer.recordingKey == null && !composerLocked,
+            onPasteAttachment = { composerLockedNow() || (!profileBound && selectedSessionId.isNotBlank() && composer.paste(currentKey)) },
+            canRecord = !profileBound && selectedSessionId.isNotBlank() && editor?.commitInProgress == false && composer.recordingKey == null && !composerLocked,
             recordingMillis = composer.elapsed.takeIf { composer.recordingKey == currentKey },
             onStartRecording = { if (!composerLockedNow()) composer.startMic(currentKey) },
             onStopRecording = { if (!composerLockedNow()) composer.stopMic(currentKey) },
             onCancelRecording = { if (!composerLockedNow()) composer.stopMic(currentKey, discard = true) },
             onSend = { dispatch() },
             canSend = canSend,
+            profileTextOnly = profileBound,
+            onRecoverPending = if (profilePending && !isBusy) ({
+                val job = scope.launch(start = CoroutineStart.LAZY) {
+                    try {
+                        notices.remove(currentKey)
+                        profileHistory.retry(selectedSessionId)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        notices[currentKey] = "暂时无法核对共享消息，请检查连接后重试。"
+                    } finally { preparing = null }
+                }
+                if (preparing == null) { preparing = job; job.start() } else job.cancel()
+            }) else null,
             notice = if (loadedDraft.isFailure) "本地草稿无法读取。" else notices[currentKey]
-                ?: if (boundToShared) "此会话已共享。点击“共享”查看最新消息或发送。" else null,
+                ?: when {
+                    profileBound && currentImages.isNotEmpty() -> "共享续聊只支持文字。此草稿仍保留附件，移除附件后可发送。"
+                    profileReason.isNotBlank() -> profileReason
+                    profilePending -> "上次发送尚待核对。重试会沿用原消息编号。"
+                    profileBound -> profileHistory?.notice
+                    boundToShared -> "此会话已共享。点击“共享”查看最新消息或发送。"
+                    else -> null
+                },
             onRetry = { entry ->
                 if (canRetry && !composerLockedNow() && chat.entries.any { it === entry || it == entry }) {
                     retryConfirmation = RetryConfirmation(currentKey, entry)
@@ -904,7 +997,7 @@ internal fun DesktopScreen(
                     cacheGeneration = cacheGeneration,
                     failures = attachmentFailures,
                     retrying = retryingAttachments,
-                    retryEnabled = canRetry,
+                    retryEnabled = canRetry || profileBound && connection.connected && !isBusy && !connection.verifying,
                     onRetry = ::retryReplyAttachment,
                 )
             },
@@ -916,6 +1009,14 @@ internal fun DesktopScreen(
             progress = currentProgress,
         )
 
+        if (profilePanel && profileHistory != null && selectedProfile != null) {
+            DesktopProfilePanel(profileHistory, profileDisplayName(selectedProfile), sessions.size, verifiedSource,
+                onOpenRoom = if (sharedStorage?.bound == true) ({
+                    profilePanel = false
+                    sharedOpen = true
+                }) else null,
+                onDismiss = { profilePanel = false })
+        }
         whaleLoginTarget?.let { target ->
             WhaleTaskLoginDialog(
                 target.address,

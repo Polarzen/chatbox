@@ -160,6 +160,8 @@ internal fun DesktopChatLayout(
     composerCommitInProgress: Boolean = false,
     composerFocusSerial: Long = 0L,
     replyNavigation: ReplyTurnNavigation? = null,
+    profileTextOnly: Boolean = false,
+    onRecoverPending: (() -> Unit)? = null,
 ) {
     BoxWithConstraints(
         modifier = Modifier.fillMaxSize().background(desktopPalette.canvas).testTag("chat-root"),
@@ -175,6 +177,7 @@ internal fun DesktopChatLayout(
             if (embeddedSidebar) {
                 SessionSidebar(
                     sessions = sessions,
+                    profileTextOnly = profileTextOnly,
                     canCreate = canCreate,
                     onNewSession = onNewSession,
                     onSelectSession = onSelectSession,
@@ -186,6 +189,8 @@ internal fun DesktopChatLayout(
             }
             ConversationPane(
                 profileId = profileId,
+                profileTextOnly = profileTextOnly,
+                onRecoverPending = onRecoverPending,
                 navigation = searchNavigation,
                 replyNavigation = replyNavigation,
                 composerFocusSerial = composerFocusSerial,
@@ -234,6 +239,7 @@ internal fun DesktopChatLayout(
             )
             SessionSidebar(
                 sessions = sessions,
+                profileTextOnly = profileTextOnly,
                 canCreate = canCreate,
                 onNewSession = onNewSession,
                 onSelectSession = onSelectSession,
@@ -253,6 +259,7 @@ internal fun DesktopChatLayout(
 @Composable
 private fun SessionSidebar(
     sessions: List<SessionInfo>,
+    profileTextOnly: Boolean,
     canCreate: Boolean,
     onNewSession: () -> Unit,
     onSelectSession: (String) -> Unit,
@@ -400,7 +407,9 @@ private fun SessionSidebar(
         AlertDialog(
             onDismissRequest = { pendingDeletion = null },
             title = { Text("删除会话？") },
-            text = { Text("将删除本机保存的这段聊天记录“$title”。确定删除吗？此操作无法撤销。") },
+            text = { Text(if (profileTextOnly)
+                "将删除本机保存的“$title”。下次同步会将它从手机目录移除，共享服务按原房间规则保留记录。此操作无法撤销。"
+                else "将删除本机保存的这段聊天记录“$title”。确定删除吗？此操作无法撤销。") },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -667,6 +676,8 @@ private fun ConversationToolbar(
 @Composable
 private fun ConversationPane(
     profileId: String,
+    profileTextOnly: Boolean,
+    onRecoverPending: (() -> Unit)?,
     navigation: SearchHitNavigation?,
     replyNavigation: ReplyTurnNavigation?,
     composerFocusSerial: Long,
@@ -708,7 +719,7 @@ private fun ConversationPane(
     val selectedTitle = sessions.firstOrNull { it.selected }?.title?.ifBlank { "新会话" } ?: "新会话"
     val isExternalDragOver = remember { mutableStateOf(false) }
     val addImagesState = rememberUpdatedState(onAddImages)
-    val commitInProgress = rememberUpdatedState(composerCommitInProgress)
+    val dropDisabled = rememberUpdatedState(composerCommitInProgress || profileTextOnly)
     val dragTarget = remember {
         object : DragAndDropTarget {
             override fun onEntered(event: DragAndDropEvent) {
@@ -729,7 +740,7 @@ private fun ConversationPane(
 
             override fun onDrop(event: DragAndDropEvent): Boolean {
                 isExternalDragOver.value = false
-                if (commitInProgress.value) return false
+                if (dropDisabled.value) return false
                 val files = droppedFilePaths(event)
                 if (files.isEmpty()) return false
                 addImagesState.value(files)
@@ -742,7 +753,7 @@ private fun ConversationPane(
             .background(desktopPalette.canvas)
             .dragAndDropTarget(
                 shouldStartDragAndDrop = { event ->
-                    !composerCommitInProgress && when (val nativeEvent = event.nativeEvent) {
+                    !dropDisabled.value && when (val nativeEvent = event.nativeEvent) {
                         is DropTargetDragEvent -> nativeEvent.transferable.isDataFlavorSupported(DataFlavor.javaFileListFlavor)
                         is DropTargetDropEvent -> nativeEvent.transferable.isDataFlavorSupported(DataFlavor.javaFileListFlavor)
                         else -> false
@@ -944,7 +955,10 @@ private fun ConversationPane(
         notice?.takeIf { it.isNotBlank() }?.let {
             Text(it, color = MaterialTheme.colors.error, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 22.dp, vertical = 2.dp))
         }
+        if (onRecoverPending != null) TextButton(onClick = onRecoverPending,
+            modifier = Modifier.testTag("profile-share-recover")) { Text("核对并重试原消息") }
         Composer(
+            attachmentsEnabled = !profileTextOnly,
             composerFocusSerial = composerFocusSerial,
             draft = draft,
             onDraft = onDraft,
@@ -1072,6 +1086,7 @@ internal fun Composer(
     onReplaceMissingAttachment: ((Path) -> Unit)? = null,
     composerCommitInProgress: Boolean = false,
     composerFocusSerial: Long = 0L,
+    attachmentsEnabled: Boolean = true,
 ) {
     val fieldFocus = remember { FocusRequester() }
     LaunchedEffect(composerFocusSerial) {
@@ -1119,7 +1134,7 @@ internal fun Composer(
             Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
                 OutlinedButton(
                     onClick = onChooseImage,
-                    enabled = !composerCommitInProgress,
+                    enabled = attachmentsEnabled && !composerCommitInProgress,
                     modifier = Modifier.size(39.dp).testTag("choose-image-button"),
                     contentPadding = PaddingValues(0.dp),
                     shape = CircleShape,

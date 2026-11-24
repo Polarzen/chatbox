@@ -81,6 +81,7 @@ internal fun AndroidChatScreen(
     onAddAssets: (List<MobileAsset>) -> Unit, onSend: () -> Unit, onRetry: (MobileTurn) -> Unit,
     onRetryMedia: (MobileTurn, MobileAsset) -> Unit,
     onSettings: () -> Unit, onAppearance: () -> Unit, onShared: () -> Unit, onHeart: () -> Unit,
+    onComputerHistory: () -> Unit,
 ) {
     val base = connections.base
     val scopeId = "${base.length}:$base:${session.id}"
@@ -125,6 +126,7 @@ internal fun AndroidChatScreen(
                 onRename = onRename,
                 onDelete = { id -> onDelete(id); readings.removeState("${base.length}:$base:$id") },
                 onShared = { if (overlay) closeDrawer(); onShared() },
+                onComputerHistory = onComputerHistory,
                 onDismiss = if (overlay) ::closeDrawer else null)
         }
         ModalNavigationDrawer(
@@ -250,12 +252,14 @@ private fun ChatHeader(
 private fun AndroidSessionSidebar(
     modifier: Modifier, sessions: List<MobileSession>, active: String, activeBound: Boolean,
     onSelect: (String) -> Unit, onCreate: () -> Unit, onRename: (String, String) -> Unit,
-    onDelete: (String) -> Unit, onShared: () -> Unit, onDismiss: (() -> Unit)?,
+    onDelete: (String) -> Unit, onShared: () -> Unit, onComputerHistory: () -> Unit, onDismiss: (() -> Unit)?,
 ) {
     var editId by rememberSaveable { mutableStateOf<String?>(null) }
     var deleteId by rememberSaveable { mutableStateOf<String?>(null) }
     Surface(modifier) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 14.dp)) {
+            Text("最近对话", style = MaterialTheme.typography.titleMedium)
+            AndroidHistorySourceTabs(computer = false, onPhone = {}, onComputer = onComputerHistory)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Button(onClick = onCreate, modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(12.dp)) { Text("＋  新建会话") }

@@ -31,8 +31,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.delay
 
-private enum class ChatPage { CHAT, CONNECTIONS, APPEARANCE, SHARED }
+private enum class ChatPage { CHAT, CONNECTIONS, APPEARANCE, SHARED, COMPUTER_HISTORY }
 
 class MainActivity : ComponentActivity() {
     private lateinit var app: AndroidAppState
@@ -192,6 +194,15 @@ class MainActivity : ComponentActivity() {
         val storage = remember(base, session.id) { app.storage(session) }
         val busy = app.delivery.busy(base, session.id)
         val screens = rememberSaveableStateHolder()
+        val computerHistory = app.computerHistory
+        LaunchedEffect(computerHistory.bound, computerHistory.selected?.sid) {
+            if (computerHistory.bound) lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                while (computerHistory.bound) {
+                    computerHistory.refresh()
+                    delay(5_000L)
+                }
+            }
+        }
         val closePage = { page = ChatPage.CHAT }
         BackHandler(page != ChatPage.CHAT, onBack = closePage)
         fun send(draft: MobileDraft? = null) {
@@ -234,8 +245,9 @@ class MainActivity : ComponentActivity() {
                         onShared = {
                             if (busy) app.showNote(base, session.id, "请等待当前回复结束，再打开共享会话。")
                             else page = ChatPage.SHARED
-                        }, onHeart = { heartOpen = true })
+                        }, onHeart = { heartOpen = true }, onComputerHistory = { page = ChatPage.COMPUTER_HISTORY })
                 }
+                ChatPage.COMPUTER_HISTORY -> AndroidComputerHistoryPanel(computerHistory, app.pairingScope, closePage)
                 ChatPage.CONNECTIONS -> AndroidConnectionSettings(connections, closePage)
                 ChatPage.APPEARANCE -> Box(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
                     AndroidAppearanceScreen(app.dark, app::useDark, app.delivery.notificationsEnabled, { wanted ->

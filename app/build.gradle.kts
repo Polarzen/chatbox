@@ -8,6 +8,7 @@ android {
     compileSdk = 35
     defaultConfig {
         applicationId = "dev.polarzen.chatbox"
+        testInstrumentationRunner = "dev.polarzen.chatbox.AndroidHistoryInstrumentation"
         minSdk = 26
         targetSdk = 35
         versionCode = 18

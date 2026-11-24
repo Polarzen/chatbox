@@ -18,21 +18,9 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-internal class AndroidSharedStorage(context: Context, base: String, session: String) : SharedLocalStorage {
-    private companion object {
-        val lock = Any()
-        const val provider = "AndroidKeyStore"
-        const val ivSize = 12
-    }
-
-    private val scope = MessageDigest.getInstance("SHA-256").digest("$base\u0000$session".toByteArray())
-    private val name = "shared-" + Base64.encodeToString(scope, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
-    private val file = context.noBackupFilesDir.toPath().resolve(name)
-
-    var hasRecord by mutableStateOf(hasState())
-        private set
-
-    fun hasState(): Boolean = synchronized(lock) { !Files.notExists(file) }
+internal class AndroidSharedCipher(private val name: String, private val scope: ByteArray) {
+    private val provider = "AndroidKeyStore"
+    private val ivSize = 12
 
     private fun key(create: Boolean): SecretKey {
         val store = KeyStore.getInstance(provider).apply { load(null) }
@@ -45,17 +33,44 @@ internal class AndroidSharedStorage(context: Context, base: String, session: Str
         return generator.generateKey()
     }
 
-    override fun load(): String? = synchronized(lock) {
-        val bytes = try {
-            Files.readAllBytes(file)
-        } catch (_: NoSuchFileException) {
-            return@synchronized null
-        }
+    fun decrypt(bytes: ByteArray): String {
         require(bytes.size >= ivSize + 16)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, key(false), GCMParameterSpec(128, bytes, 0, ivSize))
         cipher.updateAAD(scope)
-        String(cipher.doFinal(bytes, ivSize, bytes.size - ivSize), Charsets.UTF_8)
+        return String(cipher.doFinal(bytes, ivSize, bytes.size - ivSize), Charsets.UTF_8)
+    }
+
+    fun encrypt(value: String, create: Boolean): ByteArray {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, key(create))
+        cipher.updateAAD(scope)
+        check(cipher.iv.size == ivSize)
+        return cipher.iv + cipher.doFinal(value.toByteArray())
+    }
+}
+
+internal class AndroidSharedStorage(context: Context, base: String, session: String) : SharedLocalStorage {
+    private companion object {
+        val lock = Any()
+    }
+
+    private val scope = MessageDigest.getInstance("SHA-256").digest("$base\u0000$session".toByteArray())
+    private val name = "shared-" + Base64.encodeToString(scope, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+    private val cipher = AndroidSharedCipher(name, scope)
+    private val file = context.noBackupFilesDir.toPath().resolve(name)
+
+    var hasRecord by mutableStateOf(hasState())
+        private set
+
+    fun hasState(): Boolean = synchronized(lock) { !Files.notExists(file) }
+
+    override fun load(): String? = synchronized(lock) {
+        try {
+            cipher.decrypt(Files.readAllBytes(file))
+        } catch (_: NoSuchFileException) {
+            null
+        }
     }
 
     override fun save(value: String?) {
@@ -69,16 +84,10 @@ internal class AndroidSharedStorage(context: Context, base: String, session: Str
             // Authenticate the previous record before replacing it.
             val existing = load()
             if (existing == value) return
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, key(create = existing == null))
-            cipher.updateAAD(scope)
-            val iv = cipher.iv
-            check(iv.size == ivSize)
-            val encrypted = cipher.doFinal(value.toByteArray())
+            val encrypted = cipher.encrypt(value, create = existing == null)
             val temp = Files.createTempFile(file.parent, name, ".tmp")
             try {
                 FileOutputStream(temp.toFile()).use {
-                    it.write(iv)
                     it.write(encrypted)
                     it.fd.sync()
                 }

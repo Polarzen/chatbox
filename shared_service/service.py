@@ -19,8 +19,10 @@ import uuid
 
 if __package__:
     from . import astrbot
+    from .profile_service import migrate_profiles, profile_activity, reconcile
 else:
     import astrbot
+    from profile_service import migrate_profiles, profile_activity, reconcile
 
 
 MAX_BODY = 8 * 1024 * 1024
@@ -124,6 +126,7 @@ def initialize(path, upstream, aliases=(), launcher_bound=False):
     with closing(sqlite3.connect(path)) as db:
         db.execute("PRAGMA journal_mode=WAL")
         db.executescript("BEGIN IMMEDIATE;\n" + SCHEMA)
+        migrate_profiles(db)
         db.execute("INSERT INTO config VALUES(?,?,?)", (instance, upstream, launcher_id))
         db.executemany("INSERT INTO sources VALUES(?)", [(base,) for base in sources])
         db.commit()
@@ -260,9 +263,25 @@ def number(params, name, default, minimum, maximum):
     return result
 
 
-READ_ROUTES = {"/v1/turn", "/v1/turns"}
+def turn_page(rows, limit):
+    turns = []
+    page_bytes = 0
+    for row in rows:
+        turn = dict(row)
+        size = len(encoded(turn))
+        if turns and (len(turns) >= limit or page_bytes + size > MAX_BODY):
+            return {"turns": turns, "more": True}
+        turns.append(turn)
+        page_bytes += size
+    return {"turns": turns, "more": False}
+
+
+PROFILE_READ = {"/v1/profile/" + action for action in ("sessions", "turns", "turn", "devices")}
+PROFILE_WRITE = {"/v1/profile/" + action for action in
+                 ("create", "invite", "join", "revoke", "status", "session", "import", "remove", "send")}
+READ_ROUTES = {"/v1/turn", "/v1/turns"} | PROFILE_READ
 OWNER_ROUTES = {"/v1/invite", "/v1/cancel-invite", "/v1/revoke-guests"}
-WRITE_ROUTES = {"/v1/create", "/v1/join", "/v1/send"} | OWNER_ROUTES
+WRITE_ROUTES = {"/v1/create", "/v1/join", "/v1/send"} | OWNER_ROUTES | PROFILE_WRITE
 
 
 class Service:
@@ -270,11 +289,15 @@ class Service:
         self.path = path
         self.key = key
         self.workers = workers
+        self.profiles = ProfileApi(self)
         with database(path, write=True) as db:
+            migrate_profiles(db)
             config = dict(db.execute("SELECT * FROM config").fetchone())
             self.upstream = config["upstream"]
             self.launcher_id = config.get("launcher_id")
             self.aliases = {row[0] for row in db.execute("SELECT base FROM sources")}
+            db.execute("UPDATE profile_sessions SET fresh=0 WHERE fresh=1 AND room IN "
+                       "(SELECT room FROM turns WHERE status='running')")
             db.execute("UPDATE turns SET status='unknown',needs_review=1 WHERE status='running'")
 
     def current_base(self):
@@ -319,6 +342,8 @@ class Service:
             return grant(db, room, True)
 
     def read(self, route, token, params):
+        if route in PROFILE_READ:
+            return self.profiles.read(route.rsplit("/", 1)[1], token, params)
         with database(self.path) as db:
             room = authorize(db, token)
             if route == "/v1/turn":
@@ -334,18 +359,11 @@ class Service:
             limit = number(params, "limit", 50, 1, 100)
             rows = db.execute(f"SELECT {TURN_FIELDS} FROM turns WHERE room=? AND seq>? ORDER BY seq LIMIT ?",
                               (room, after, limit + 1))
-            turns = []
-            page_bytes = 0
-            for row in rows:
-                turn = dict(row)
-                size = len(encoded(turn))
-                if turns and (len(turns) >= limit or page_bytes + size > MAX_BODY):
-                    return {"turns": turns, "more": True}
-                turns.append(turn)
-                page_bytes += size
-            return {"turns": turns, "more": False}
+            return turn_page(rows, limit)
 
     def write(self, route, token, body):
+        if route in PROFILE_WRITE:
+            return self.profiles.write(route.rsplit("/", 1)[1], token, body)
         if route == "/v1/create":
             return 200, self.create(body)
         with database(self.path, write=True) as db:
@@ -371,25 +389,40 @@ class Service:
             fields(body, ("id", "question"))
             turn_id = request_id(body["id"])
             question = string(body, "question", max_bytes=MAX_QUESTION)
-            existing = find_turn(db, room, turn_id)
+            existing = self.retry(db, room, turn_id, question)
             if existing:
-                if existing["question"] != question:
-                    raise ApiError(409, "此请求编号已用于其他内容。")
-                return (202 if existing["status"] == "running" else 200), existing
-            busy = db.execute("SELECT status FROM turns WHERE room=? AND (status='running' OR needs_review=1) LIMIT 1",
-                              (room,)).fetchone()
-            if busy:
-                if busy["status"] == "running":
-                    raise ApiError(409, "会话已有回复正在生成，请稍后再发。")
-                raise ApiError(409, "上游执行结果未知，请服务主人确认 AstrBot 已空闲并运行 resolve。")
-            seq = db.execute("SELECT COALESCE(MAX(seq),0)+1 FROM turns WHERE room=?", (room,)).fetchone()[0]
-            db.execute("INSERT INTO turns(room,seq,id,question,answer,status) VALUES(?,?,?,?,?,'running')",
-                       (room, seq, turn_id, question, ""))
+                return existing
+            result = self.enqueue(db, room, turn_id, question)
             identity = db.execute("SELECT username,session FROM rooms WHERE id=?", (room,)).fetchone()
-            result = find_turn(db, room, turn_id)
+        return self.dispatch_turn(room, result, identity["username"], identity["session"])
+
+    @staticmethod
+    def retry(db, room, turn_id, question):
+        existing = find_turn(db, room, turn_id)
+        if existing:
+            if existing["question"] != question:
+                raise ApiError(409, "此请求编号已用于其他内容。")
+            return (202 if existing["status"] == "running" else 200), existing
+
+    @staticmethod
+    def enqueue(db, room, turn_id, question):
+        busy = db.execute("SELECT status FROM turns WHERE room=? AND (status='running' OR needs_review=1) LIMIT 1",
+                          (room,)).fetchone()
+        if busy:
+            if busy["status"] == "running":
+                raise ApiError(409, "会话已有回复正在生成，请稍后再发。")
+            raise ApiError(409, "上游执行结果未知，请服务主人确认 AstrBot 已空闲并运行 resolve。")
+        seq = db.execute("SELECT COALESCE(MAX(seq),0)+1 FROM turns WHERE room=?", (room,)).fetchone()[0]
+        db.execute("INSERT INTO turns(room,seq,id,question,answer,status) VALUES(?,?,?,?,?,'running')",
+                   (room, seq, turn_id, question, ""))
+        profile_activity(db, room)
+        return find_turn(db, room, turn_id)
+
+    def dispatch_turn(self, room, result, username, session):
         # Commit before contacting AstrBot. A lost HTTP response never owns this job's lifetime.
+        turn_id = result["id"]
         try:
-            self.workers.submit(self.generate, room, turn_id, identity["username"], identity["session"], question)
+            self.workers.submit(self.generate, room, turn_id, username, session, result["question"])
         except RuntimeError:
             self.finish(room, turn_id, "unknown", needs_review=False)
             raise ApiError(503, "服务正在停止，请查询该轮结果。")
@@ -397,8 +430,11 @@ class Service:
 
     def finish(self, room, turn_id, status, needs_review):
         with database(self.path, write=True) as db:
-            db.execute("UPDATE turns SET status=?,needs_review=? WHERE room=? AND id=? AND status='running'",
-                       (status, needs_review, room, turn_id))
+            if db.execute("UPDATE turns SET status=?,needs_review=? WHERE room=? AND id=? AND status='running'",
+                          (status, needs_review, room, turn_id)).rowcount:
+                if status == "complete" or needs_review:
+                    db.execute("UPDATE profile_sessions SET fresh=0 WHERE room=? AND fresh=1", (room,))
+                profile_activity(db, room)
 
     def generate(self, room, turn_id, username, session, question):
         last_answer = ""
@@ -428,6 +464,400 @@ class Service:
             pass
         finally:
             self.finish(room, turn_id, status, needs_review)
+
+
+def profile_code(db, profile):
+    code = secrets.token_urlsafe(12)
+    now = int(time.time())
+    db.execute("DELETE FROM profile_codes WHERE profile IS ? OR expires<=?", (profile, now))
+    db.execute("INSERT INTO profile_codes VALUES(?,?,?)", (digest(code), profile, now + CODE_LIFETIME))
+    return {"code": code, "expiresIn": CODE_LIFETIME}
+
+
+def profile_exchange(db, code, creating, consume=True):
+    row = db.execute("SELECT profile FROM profile_codes WHERE digest=? AND expires>?",
+                     (digest(code), int(time.time()))).fetchone()
+    if not row or (row[0] is None) != creating:
+        raise ApiError(403, "档案授权码无效、已过期或已使用。")
+    if consume:
+        db.execute("DELETE FROM profile_codes WHERE digest=?", (digest(code),))
+    return row[0]
+
+
+def profile_create_code(db, code, consume):
+    recovery = db.execute("SELECT profile FROM profile_recovery WHERE digest=? AND expires>?",
+                          (digest(code), int(time.time()))).fetchone()
+    if recovery:
+        if consume:
+            db.execute("DELETE FROM profile_recovery WHERE profile=?", (recovery[0],))
+        return recovery[0]
+    profile_exchange(db, code, creating=True, consume=consume)
+    return None
+
+
+def profile_grant(db, profile, owner):
+    token = secrets.token_urlsafe(32)
+    device = str(uuid.uuid4())
+    name = "Windows 主人" if owner else "手机 " + device[:8]
+    db.execute("INSERT INTO profile_devices VALUES(?,?,?,?,?)", (device, digest(token), profile, name, int(owner)))
+    return {"token": token, "owner": owner, "profile": profile,
+            "instance": db.execute("SELECT instance FROM config").fetchone()[0],
+            "name": db.execute("SELECT name FROM profiles WHERE id=?", (profile,)).fetchone()[0]}
+
+
+def profile_auth(db, token, owner=False):
+    device = db.execute("SELECT profile,owner FROM profile_devices WHERE digest=?", (digest(token),)).fetchone()
+    if not device:
+        raise ApiError(401, "档案设备凭据无效或已撤销。")
+    if owner and not device["owner"]:
+        raise ApiError(403, "此操作需要档案主人权限。")
+    return device["profile"]
+
+
+def get_member(db, profile, sid):
+    row = db.execute("SELECT * FROM profile_sessions WHERE profile=? AND sid=? AND removed=0", (profile, sid)).fetchone()
+    if not row:
+        raise ApiError(404, "此会话不在已授权的档案目录中。")
+    return row
+
+
+def directory_entry(row):
+    return {key: row[key] for key in ("sid", "title", "activity", "total", "imported", "reason")}
+
+
+def nonnegative(body, key):
+    value = body.get(key)
+    if type(value) is not int or not 0 <= value <= 2**63 - 1:
+        raise ApiError(400, "数量、位置或时间无效。")
+    return value
+
+
+def launcher_endpoint(base):
+    url = urlsplit(base)
+    return url.scheme == "http" and url.hostname == "127.0.0.1" and not url.path
+
+
+class ProfileApi:
+    def __init__(self, service):
+        self.service = service
+        self.path = service.path
+
+    def create(self, body):
+        fields(body, ("code", "sourceBase", "username", "sourceId", "name"))
+        code = string(body, "code", max_bytes=128)
+        with database(self.path) as db:
+            profile_create_code(db, code, consume=False)
+        base = normalized_base(string(body, "sourceBase", max_bytes=4096))
+        username = string(body, "username", max_bytes=4096)
+        if username != username.strip():
+            raise ApiError(400, "用户标识含首尾空白。")
+        source_id = string(body, "sourceId", max_bytes=4096)
+        name = string(body, "name", max_bytes=4096)
+        launcher_id = self.service.launcher_id
+        launcher_profile = launcher_id is not None and source_id == "launcher:" + launcher_id
+        if launcher_id and source_id.startswith("launcher:") and not launcher_profile:
+            raise ApiError(409, "电脑档案的 Launcher 实例与共享服务绑定的实例不同。")
+        verify_launcher = launcher_profile and launcher_endpoint(base)
+        # An old loopback address can now belong to a different instance, even if
+        # it is listed as an alias. Check the bound UUID's live Dashboard endpoint.
+        if verify_launcher or base not in self.service.aliases:
+            try:
+                actual_base = self.service.current_base()
+            except astrbot.NotDispatched as exc:
+                raise ApiError(409, str(exc)) from exc
+            if base != actual_base:
+                raise ApiError(409, "原档案地址与此共享服务绑定的 AstrBot 不匹配。")
+        with database(self.path, write=True) as db:
+            recover = profile_create_code(db, code, consume=True)
+            existing = db.execute("SELECT id FROM profiles WHERE base=? AND username=? AND source_id=?",
+                                  (base, username, source_id)).fetchone()
+            if recover is not None:
+                original = db.execute("SELECT base,launcher_id FROM profiles WHERE id=? AND username=? AND source_id=?",
+                                      (recover, username, source_id)).fetchone()
+                if not original:
+                    raise ApiError(403, "恢复码与原电脑档案、地址或用户身份不匹配。")
+                if original["base"] != base:
+                    # Before per-profile UUIDs were recorded, a non-alias source could only
+                    # have been admitted by current_base() on this same immutable service
+                    # binding. A historically accepted alias alone supplies no such proof.
+                    historical_proof = (original["launcher_id"] is None and launcher_endpoint(original["base"])
+                                        and original["base"] not in self.service.aliases)
+                    if not verify_launcher or (original["launcher_id"] != launcher_id and not historical_proof):
+                        raise ApiError(403, "无法核实原档案与新地址属于同一 Launcher 实例，无法更换原地址。")
+                    if existing:
+                        raise ApiError(409, "此地址已有同来源的其他档案，无法合并。请核对 profiles 列出的编号。")
+                if verify_launcher:
+                    db.execute("UPDATE profiles SET base=?,launcher_id=? WHERE id=?", (base, launcher_id, recover))
+                db.execute("DELETE FROM profile_devices WHERE profile=? AND owner=1", (recover,))
+                db.execute("DELETE FROM profile_codes WHERE profile=?", (recover,))
+                return profile_grant(db, recover, True)
+            if launcher_profile:
+                existing = db.execute("SELECT 1 FROM profiles WHERE username=? AND source_id=? LIMIT 1",
+                                      (username, source_id)).fetchone()
+            if existing:
+                raise ApiError(409, "此电脑档案已授权。如主人凭据丢失，请在服务主机运行 profile-recover。")
+            profile = str(uuid.uuid4())
+            db.execute("INSERT INTO profiles(id,source_id,base,username,name,launcher_id) VALUES(?,?,?,?,?,?)",
+                       (profile, source_id, base, username, name, launcher_id if verify_launcher else None))
+            return profile_grant(db, profile, True)
+
+    def read(self, action, token, params):
+        with database(self.path) as db:
+            profile = profile_auth(db, token, owner=action == "devices")
+            if action == "devices":
+                fields(params, ())
+                guests = db.execute("SELECT id,name FROM profile_devices WHERE profile=? AND owner=0 ORDER BY rowid",
+                                    (profile,))
+                return {"devices": [dict(row) for row in guests]}
+            if action == "sessions":
+                if set(params) - {"offset", "limit", "revision"}:
+                    raise ApiError(400, "目录分页参数无效。")
+                offset = number(params, "offset", 0, 0, 2**63 - 1)
+                limit = number(params, "limit", 50, 1, 100)
+                listing = db.execute("SELECT name,revision,complete,expected,issue FROM profiles WHERE id=?",
+                                     (profile,)).fetchone()
+                if ("revision" in params and number(params, "revision", 0, 0, 2**63-1) != listing["revision"]
+                        or offset and "revision" not in params):
+                    raise ApiError(409, "目录已变动，请重新读取第一页。")
+                rows = db.execute("SELECT * FROM profile_sessions WHERE profile=? AND removed=0 ORDER BY activity DESC,sid "
+                                  "LIMIT ? OFFSET ?", (profile, limit + 1, offset)).fetchall()
+                complete = bool(listing["complete"])
+                if complete:
+                    count, incomplete = db.execute("SELECT count(*),sum(total<>imported) FROM profile_sessions "
+                                                   "WHERE profile=? AND removed=0", (profile,)).fetchone()
+                    complete = count == listing["expected"] and not incomplete
+                return {**dict(listing), "complete": complete, "sessions": [directory_entry(r) for r in rows[:limit]],
+                        "more": len(rows) > limit}
+            keys = {"sid", "id"} if action == "turn" else {"sid", "after", "limit"}
+            if "sid" not in params or set(params) - keys or (action == "turn" and "id" not in params):
+                raise ApiError(400, "会话或轮次参数无效。")
+            sid = params["sid"][0]
+            member = get_member(db, profile, sid)
+            if member["ready"]:
+                query = f"SELECT {TURN_FIELDS} FROM turns WHERE room=?"
+                args = (member["room"],)
+            else:
+                query = f"SELECT {TURN_FIELDS} FROM profile_imports WHERE profile=? AND sid=?"
+                args = (profile, sid)
+            if action == "turn":
+                turn_id = request_id(params["id"][0])
+                row = db.execute(f"SELECT * FROM ({query}) WHERE id=?", (*args, turn_id)).fetchone()
+                if not row and member["ready"]:
+                    # Cached IDs from before room attachment remain valid for the same
+                    # exact immutable prefix position. A new page still uses the room UUID.
+                    row = db.execute("""SELECT t.seq,p.id,t.question,t.answer,t.status FROM profile_imports p
+                                        JOIN turns t ON t.room=? AND t.seq=p.seq
+                                        WHERE p.profile=? AND p.sid=? AND p.id=?""",
+                                     (member["room"], profile, sid, turn_id)).fetchone()
+                if not row:
+                    raise ApiError(404, "找不到此轮对话。")
+                return dict(row)
+            after = number(params, "after", 0, 0, 2**63 - 1)
+            limit = number(params, "limit", 50, 1, 100)
+            rows = db.execute(f"SELECT * FROM ({query}) WHERE seq>? ORDER BY seq LIMIT ?", (*args, after, limit + 1))
+            return turn_page(rows, limit)
+
+    def write(self, action, token, body):
+        if action == "create":
+            return 200, self.create(body)
+        if action == "session":
+            return 200, self.publish_session(token, body)
+        if action == "send":
+            return self.send(token, body)
+        with database(self.path, write=True) as db:
+            if action == "join":
+                fields(body, ("code",))
+                profile = profile_exchange(db, string(body, "code", max_bytes=128), creating=False)
+                return 200, profile_grant(db, profile, False)
+            profile = profile_auth(db, token, owner=True)
+            if action == "invite":
+                fields(body, ())
+                return 200, profile_code(db, profile)
+            if action == "revoke":
+                fields(body, ("device",))
+                device = string(body, "device", max_bytes=128)
+                if not db.execute("DELETE FROM profile_devices WHERE profile=? AND id=? AND owner=0",
+                                  (profile, device)).rowcount:
+                    raise ApiError(404, "此档案中没有该来宾设备。")
+            elif action == "status":
+                fields(body, ("complete", "expected", "issue"))
+                complete = body["complete"]
+                if type(complete) is not bool:
+                    raise ApiError(400, "同步状态无效。")
+                expected = nonnegative(body, "expected")
+                issue = string(body, "issue", empty=True, max_bytes=MAX_QUESTION)
+                db.execute("UPDATE profiles SET complete=?,expected=?,issue=?,revision=revision+1 WHERE id=? "
+                           "AND (complete<>? OR expected<>? OR issue<>?)",
+                           (complete, expected, issue, profile, complete, expected, issue))
+            elif action == "remove":
+                fields(body, ("sid",))
+                sid = string(body, "sid", max_bytes=4096)
+                # Persist even a removal that overtakes the very first publication.
+                db.execute("""INSERT INTO profile_sessions(profile,sid,title,activity,total,removed,generation)
+                              VALUES(?,?,'',0,0,1,1) ON CONFLICT(profile,sid) DO UPDATE
+                              SET removed=1,generation=generation+1""", (profile, sid))
+            elif action == "import":
+                return 200, self.import_batch(db, profile, body)
+            return 200, {}
+
+    def check_origin(self, username, sid):
+        try:
+            # Leave time to persist and return a readable, read-only entry before the
+            # PC client's 12-second response timeout if the upstream index stalls.
+            deadline = time.monotonic() + 8
+            exists = astrbot.session_exists(self.service.current_base(), self.service.key, username, sid,
+                                           self.service.current_base if self.service.launcher_id else None,
+                                           deadline=deadline)
+            return exists, ""
+        except (astrbot.NotDispatched, astrbot.SessionIndexError) as exc:
+            return False, str(exc)
+        except (OSError, http.client.HTTPException):
+            return False, "无法核实 AstrBot 原会话，请检查上游连接。"
+
+    @staticmethod
+    def origin_reason(fresh, exists, failure):
+        if failure:
+            return failure
+        if not exists and not fresh:
+            return "AstrBot 未找到属于该用户的原会话。已上传的历史可读，无法接续。"
+        return ""
+
+    def publish_session(self, token, body):
+        with database(self.path) as db:
+            profile = profile_auth(db, token, owner=True)
+            username = db.execute("SELECT username FROM profiles WHERE id=?", (profile,)).fetchone()[0]
+            sid = string(body, "sid", max_bytes=4096)
+            before = db.execute("SELECT generation,removed FROM profile_sessions WHERE profile=? AND sid=?",
+                                (profile, sid)).fetchone()
+            generation = before["generation"] if before else 0
+            restore = body.get("restore", False)
+            if type(restore) is not bool:
+                raise ApiError(400, "恢复标记无效。")
+            if before and before["removed"] and not restore:
+                raise ApiError(409, "此会话已从档案移除，请主人明确恢复。")
+        allowed = {"sid", "title", "activity", "total"}
+        fields(body, allowed | (body.keys() & {"legacyToken", "restore"}))
+        if sid != sid.strip():
+            raise ApiError(400, "会话标识含首尾空白。")
+        title = string(body, "title", empty=True, max_bytes=4096)
+        total = nonnegative(body, "total")
+        activity = nonnegative(body, "activity")
+        legacy = string(body, "legacyToken", empty=True, max_bytes=128) if "legacyToken" in body else ""
+        exists, failure = self.check_origin(username, sid)
+        with database(self.path, write=True) as db:
+            profile_auth(db, token, owner=True)
+            previous = db.execute("SELECT * FROM profile_sessions WHERE profile=? AND sid=?", (profile, sid)).fetchone()
+            if previous and (previous["generation"] != generation or (previous["removed"] and not restore)):
+                raise ApiError(409, "发布期间会话已被移除，请主人明确恢复。")
+            if previous and total < previous["total"]:
+                raise ApiError(409, f"电脑历史范围缩短。原声明 {previous['total']} 轮，已导入 {previous['imported']} 轮。")
+            bound = db.execute("SELECT id,username FROM rooms WHERE session=?", (sid,)).fetchone()
+            room = previous["room"] if previous else None
+            # Only an unclaimed, genuinely new empty conversation can acquire its upstream
+            # identity on first send. Once an original is observed, its disappearance is final
+            # until AstrBot's index confirms it again, including for an originally empty chat.
+            unclaimed = not bound and not legacy
+            already_fresh = previous is not None and bool(previous["fresh"]) and room is not None
+            fresh = not total and not exists and (unclaimed or already_fresh)
+            reason = self.origin_reason(fresh, exists, failure)
+            if not room and (bound or legacy):
+                proof = db.execute("SELECT room FROM devices WHERE digest=? AND owner=1", (digest(legacy),)).fetchone()
+                claimed = bound and db.execute("SELECT 1 FROM profile_sessions WHERE room=? AND profile<>?",
+                                               (bound["id"], profile)).fetchone()
+                if not bound or not proof or proof["room"] != bound["id"] or bound["username"] != username:
+                    reason = "无法确认原共享房间的主人授权及会话身份。仅可阅读电脑上传的历史。"
+                elif claimed:
+                    reason = "原共享房间已授权给另一档案。本档案可阅读自己上传的历史，无法接续该房间。"
+                elif not reason:
+                    room = bound["id"]
+            elif not room and not reason:
+                room = str(uuid.uuid4())
+                db.execute("INSERT INTO rooms VALUES(?,?,?)", (room, username, sid))
+            db.execute("""INSERT INTO profile_sessions(profile,sid,title,activity,total,room,fresh) VALUES(?,?,?,?,?,?,?)
+                          ON CONFLICT(profile,sid) DO UPDATE SET title=excluded.title,
+                            activity=MAX(activity,excluded.activity),ready=(ready AND total=excluded.total),
+                            total=excluded.total,room=excluded.room,fresh=excluded.fresh,removed=0""",
+                       (profile, sid, title, activity, total, room, fresh))
+            entry = get_member(db, profile, sid)
+            if not reason and room and not entry["ready"] and entry["total"] == entry["imported"]:
+                reconcile(db, {**dict(entry), "reason": ""})
+            else:
+                db.execute("UPDATE profile_sessions SET reason=? WHERE profile=? AND sid=?", (reason, profile, sid))
+            return directory_entry(get_member(db, profile, sid))
+
+    @staticmethod
+    def import_batch(db, profile, body):
+        fields(body, ("sid", "start", "turns"))
+        sid = string(body, "sid", max_bytes=4096)
+        entry = get_member(db, profile, sid)
+        start = nonnegative(body, "start")
+        turns = body["turns"]
+        if not isinstance(turns, list):
+            raise ApiError(400, "历史分批数据无效。")
+        if len(turns) > MAX_HISTORY:
+            raise ApiError(413, "单批最多 10000 轮，请缩小批次。")
+        if start > entry["imported"] or start + len(turns) > entry["total"]:
+            raise ApiError(409, f"历史批次超出范围。已导入 {entry['imported']} 轮，共声明 {entry['total']} 轮。")
+        for seq, turn in enumerate(turns, start + 1):
+            fields(turn, ("id", "question", "answer", "status"))
+            row = (request_id(turn["id"]), string(turn, "question", empty=True), string(turn, "answer", empty=True),
+                   turn["status"])
+            if row[3] not in ("complete", "unknown"):
+                raise ApiError(400, f"第 {seq} 轮的历史状态无效。")
+            if seq <= entry["imported"]:
+                previous = db.execute("SELECT id,question,answer,status FROM profile_imports "
+                                      "WHERE profile=? AND sid=? AND seq=?", (profile, sid, seq)).fetchone()
+                if not previous or tuple(previous) != row:
+                    raise ApiError(409, f"第 {seq} 轮与先前上传的电脑记录不同。")
+            else:
+                try:
+                    db.execute("INSERT INTO profile_imports VALUES(?,?,?,?,?,?,?)", (profile, sid, seq, *row))
+                except sqlite3.IntegrityError as exc:
+                    raise ApiError(409, f"第 {seq} 轮的请求编号已在另一位置使用。") from exc
+        imported = max(entry["imported"], start + len(turns))
+        if imported != entry["imported"]:
+            db.execute("UPDATE profile_sessions SET imported=? WHERE profile=? AND sid=?", (imported, profile, sid))
+            reconcile(db, get_member(db, profile, sid))
+        return {"imported": imported}
+
+    def send(self, token, body):
+        with database(self.path) as db:
+            profile = profile_auth(db, token)
+            fields(body, ("sid", "id", "question"))
+            sid = string(body, "sid", max_bytes=4096)
+            turn_id = request_id(body["id"])
+            question = string(body, "question", max_bytes=MAX_QUESTION)
+            entry = get_member(db, profile, sid)
+            if not entry["ready"]:
+                raise ApiError(409, entry["reason"] or f"历史尚未同步完整（{entry['imported']}/{entry['total']}）。")
+            room = entry["room"]
+            generation = entry["generation"]
+            retry = self.service.retry(db, room, turn_id, question)
+            if retry:
+                return retry
+            username = db.execute("SELECT username FROM profiles WHERE id=?", (profile,)).fetchone()[0]
+        exists, failure = self.check_origin(username, sid)
+        with database(self.path, write=True) as db:
+            profile_auth(db, token)
+            entry = get_member(db, profile, sid)
+            if (entry["generation"] != generation or entry["room"] != room or not entry["ready"]
+                    or entry["total"] != entry["imported"]):
+                raise ApiError(409, entry["reason"] or "目录或历史导入状态已变动，请刷新。")
+            retry = self.service.retry(db, room, turn_id, question)
+            if retry:
+                return retry
+            if db.execute("SELECT 1 FROM profile_imports WHERE profile=? AND sid=? AND id=?",
+                          (profile, sid, turn_id)).fetchone():
+                raise ApiError(409, "此请求编号已用于电脑导入的原房间历史。")
+            reason = self.origin_reason(entry["fresh"], exists, failure)
+            db.execute("UPDATE profile_sessions SET reason=? WHERE profile=? AND sid=?", (reason, profile, sid))
+            if not reason:
+                result = self.service.enqueue(db, room, turn_id, question)
+                if exists:
+                    db.execute("UPDATE profile_sessions SET fresh=0 WHERE profile=? AND sid=?", (profile, sid))
+        if reason:
+            raise ApiError(409, reason)
+        return self.service.dispatch_turn(room, result, username, sid)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -488,10 +918,11 @@ class Handler(BaseHTTPRequestHandler):
             route, _, raw_query = self.path.partition("?")
             if route not in READ_ROUTES | WRITE_ROUTES:
                 raise ApiError(404, "接口不存在。")
-            token = "" if route in ("/v1/create", "/v1/join") else self.bearer()
+            public = ("/v1/create", "/v1/join", "/v1/profile/create", "/v1/profile/join")
+            token = "" if route in public else self.bearer()
             if self.command == "GET" and route in READ_ROUTES:
                 try:
-                    params = parse_qs(raw_query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
+                    params = parse_qs(raw_query, keep_blank_values=True, strict_parsing=True, max_num_fields=3)
                 except ValueError as exc:
                     raise ApiError(400, "查询参数无效。") from exc
                 if any(len(values) != 1 for values in params.values()):
@@ -544,6 +975,10 @@ def cli(argv=None):
     init.add_argument("--launcher", action="store_true", help="按 Launcher 实例 UUID 跟随已核实的当前回环端口")
     init.add_argument("--alias", action="append", default=[], help="同一 AstrBot 的已知客户端地址，可重复")
     cmds.add_parser("bootstrap", help="换发十分钟内有效的一次性会话创建码")
+    cmds.add_parser("profile-bootstrap", help="换发十分钟内有效的一次性档案创建码")
+    cmds.add_parser("profiles", help="列出可在本机恢复的档案编号、名称及来源")
+    profile_recover = cmds.add_parser("profile-recover", help="为指定档案签发十分钟内有效的一次性主人恢复码")
+    profile_recover.add_argument("--profile", required=True, help="profiles 列出的档案编号")
     cmds.add_parser("rooms", help="列出房间编号及其绑定的上游用户和会话标识")
     recover = cmds.add_parser("recover-owner", help="为指定房间换发十分钟有效的一次性主人恢复码，在加入界面兑换")
     recover.add_argument("--room", required=True, help="rooms 列出的房间编号")
@@ -573,6 +1008,22 @@ def cli(argv=None):
         with database(path, write=args.command not in ("rooms", "devices", "unresolved")) as db:
             if args.command == "bootstrap":
                 print(new_code(db, None, "create")["code"])
+            elif args.command == "profile-bootstrap":
+                migrate_profiles(db)
+                print(profile_code(db, None)["code"])
+            elif args.command == "profiles":
+                migrate_profiles(db)
+                for row in db.execute("SELECT id,name,base,username,source_id FROM profiles ORDER BY rowid"):
+                    print(json.dumps(dict(row), ensure_ascii=True))
+            elif args.command == "profile-recover":
+                migrate_profiles(db)
+                if not db.execute("SELECT 1 FROM profiles WHERE id=?", (args.profile,)).fetchone():
+                    raise ApiError(404, "找不到指定的档案。")
+                code = secrets.token_urlsafe(12)
+                expires = int(time.time()) + CODE_LIFETIME
+                db.execute("INSERT OR REPLACE INTO profile_recovery(profile,digest,expires) VALUES(?,?,?)",
+                           (args.profile, digest(code), expires))
+                print(code)
             elif args.command == "rooms":
                 for row in db.execute("SELECT id,username,session FROM rooms ORDER BY rowid"):
                     print(json.dumps(dict(row), ensure_ascii=True))

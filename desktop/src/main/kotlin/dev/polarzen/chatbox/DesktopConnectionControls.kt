@@ -45,7 +45,7 @@ import java.awt.Desktop
 
 /** Compact connection, named-key, and settings controls intended for the application header. */
 @Composable
-internal fun DesktopConnectionControls(connection: DesktopConnection) {
+internal fun DesktopConnectionControls(connection: DesktopConnection, onShareProfile: (() -> Unit)? = null) {
     var keyMenuExpanded by remember { mutableStateOf(false) }
     var switchingKeyId by remember { mutableStateOf<String?>(null) }
     var switchingProfileId by remember { mutableStateOf(connection.profileId) }
@@ -237,6 +237,7 @@ internal fun DesktopConnectionControls(connection: DesktopConnection) {
             onShowPermissions = {
                 permissionTarget = connection.keyList.keys.firstOrNull { it.id == connection.keyList.activeId }
             },
+            onShareProfile = onShareProfile?.let { open -> { settingsExpanded = false; open() } },
         )
     }
     permissionTarget?.let { item ->
@@ -415,6 +416,7 @@ private fun ConnectionSettingsDialog(
     connection: DesktopConnection,
     onDismiss: () -> Unit,
     onShowPermissions: () -> Unit,
+    onShareProfile: (() -> Unit)?,
 ) {
     var addressDraft by remember(connection.profileId, connection.address) { mutableStateOf(connection.address) }
     var localError by remember { mutableStateOf(false) }
@@ -513,6 +515,10 @@ private fun ConnectionSettingsDialog(
                     Text("当前配置只包含离线历史。选择运行中的服务或应用新的地址以连接。",
                         style = MaterialTheme.typography.caption)
                 }
+                if (selectedProfile != null && !selectedProfile.offlineOnly && selectedProfile.kind != "shared") {
+                    TextButton(enabled = onShareProfile != null, onClick = { onShareProfile?.invoke() },
+                        modifier = Modifier.testTag("connection-profile-share")) { Text("与手机共享此档案的会话") }
+                }
                 Spacer(Modifier.height(8.dp))
                 TextButton(
                     onClick = onShowPermissions,
@@ -578,7 +584,7 @@ private fun OwnerPermissionsDialog(connection: DesktopConnection, item: NamedKey
     )
 }
 
-private fun profileDisplayName(profile: Profile): String = when {
+internal fun profileDisplayName(profile: Profile): String = when {
     profile.kind == "shared" -> "共享会话"
     profile.offlineOnly -> "离线历史"
     profile.kind == "launcher" -> "AstrBot Launcher · ${profile.id.removePrefix("launcher:").take(8)}"

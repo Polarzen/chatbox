@@ -32,11 +32,19 @@ class AndroidHistoryInstrumentation : Instrumentation() {
                 handler: DatabaseErrorHandler?): SQLiteDatabase =
                 host.openOrCreateDatabase(testPrefix + name, mode, factory, handler)
         }
-        val outcome = runCatching { verifyHistory(fixture) }
-        host.deleteDatabase(testPrefix + "mobile-history.db")
-        host.deleteSharedPreferences(testPrefix + "personal_chat")
-        finish(if (outcome.isSuccess) Activity.RESULT_OK else Activity.RESULT_CANCELED, Bundle().apply {
-            putString("stream", outcome.exceptionOrNull()?.stackTraceToString() ?: "Android history checks passed")
+        val phone = runCatching {
+            try {
+                verifyHistory(fixture)
+            } finally {
+                host.deleteDatabase(testPrefix + "mobile-history.db")
+                host.deleteSharedPreferences(testPrefix + "personal_chat")
+            }
+        }
+        val pc = runCatching { AndroidPcHistoryChecks.verify(host) }
+        finish(if (phone.isSuccess && pc.isSuccess) Activity.RESULT_OK else Activity.RESULT_CANCELED, Bundle().apply {
+            putString("stream", listOf("Android history" to phone, "PC history cache" to pc).joinToString("\n") { (name, result) ->
+                result.exceptionOrNull()?.let { "$name checks failed\n${it.stackTraceToString()}" } ?: "$name checks passed"
+            })
         })
     }
 

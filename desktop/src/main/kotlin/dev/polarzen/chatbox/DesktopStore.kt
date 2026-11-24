@@ -30,6 +30,8 @@ internal data class ReplyDestination(val key: SessionKey, val entryIndex: Int)
 
 internal data class ComposerDraft(val text: String = "", val attachments: List<Path> = emptyList())
 
+internal class DesktopHistoryCorruption(message: String, cause: Exception? = null) : IllegalArgumentException(message, cause)
+
 internal data class Profile(
     val id: String,
     val address: String,
@@ -44,11 +46,13 @@ internal data class SessionInfo(
     val selected: Boolean,
     val title: String,
     val manualName: String? = null,
+    val activity: Long = 0,
 )
 
 /** Durable local chat storage. Profile IDs, endpoint addresses, and server session IDs are distinct. */
 internal class DesktopStore(private val file: Path) {
     private var state: JSONObject
+    val profileRequests = kotlinx.coroutines.sync.Mutex()
     private val draftClock = AtomicLong()
     private val appliedDraftRevisions = mutableMapOf<SessionKey, Long>()
     val managedMediaDirectory: Path = file.toAbsolutePath().normalize().parent.resolve("composer-media")
@@ -118,6 +122,7 @@ internal class DesktopStore(private val file: Path) {
                 row.getString("id") == current,
                 manualName ?: defaultSessionTitle(row),
                 manualName,
+                sessionTimestamp(row, "lastActivityAt") ?: sessionTimestamp(row, "lastUsedAt") ?: sessionTimestamp(row, "createdAt") ?: 0L,
             )
         }
     }
@@ -288,6 +293,10 @@ internal class DesktopStore(private val file: Path) {
             val sessions = profile.getJSONArray("sessions")
             val deletedIndex = indexOfSession(profile, sessionId)
             val wasCurrent = profile.optString("currentSession") == sessionId
+            if (profile.has("profileAuthorization")) {
+                val removed = profile.optJSONObject("profileRemoved") ?: JSONObject().also { profile.put("profileRemoved", it) }
+                removed.put(sessionId, true)
+            }
             sessions.remove(deletedIndex)
 
             if (wasCurrent) {
@@ -343,6 +352,163 @@ internal class DesktopStore(private val file: Path) {
             if (protected == null) session.remove(scope) else session.put(scope, protected)
         }
     }
+
+    @Synchronized
+    fun profileAuthorization(profileId: String): String? =
+        requireProfile(state, profileId).optString("profileAuthorization").takeIf(String::isNotEmpty)
+
+    @Synchronized
+    fun recordedRemoteProfile(profileId: String): String? {
+        val profile = requireProfile(state, profileId)
+        val sessions = profile.getJSONArray("sessions")
+        val scopes = ((0 until sessions.length()).mapNotNull {
+            sessions.getJSONObject(it).optJSONObject("profileHistory")?.getString("profile")
+        } + listOfNotNull(profile.optString("remoteProfileId").takeIf(String::isNotEmpty))).distinct()
+        check(scopes.size <= 1) { "本机保存的历史来自不同档案，无法更换主人凭据。" }
+        return scopes.singleOrNull()
+    }
+
+    @Synchronized
+    fun saveProfileAuthorization(profileId: String, previous: String?, protected: String?, remoteProfileId: String? = null) {
+        check(profileAuthorization(profileId) == previous) { "档案授权已变更，请重新打开此档案。" }
+        persist(requireAtomic = true) { copy ->
+            val profile = requireProfile(copy, profileId)
+            if (protected == null) profile.remove("profileAuthorization") else profile.put("profileAuthorization", protected)
+            if (remoteProfileId != null) profile.put("remoteProfileId", remoteProfileId)
+        }
+    }
+
+    /** Capture the native prefix once, before accepting any cloud turns. Both the cursor
+     * and cloud rows live in the same atomic history document as this immutable boundary. */
+    @Synchronized
+    fun prepareProfileHistory(profileId: String, remoteProfile: String) {
+        val sessions = requireProfile(state, profileId).getJSONArray("sessions")
+        if ((0 until sessions.length()).all { sessions.getJSONObject(it).has("profileHistory") }) return
+        persist(requireAtomic = true) { copy ->
+            val rows = requireProfile(copy, profileId).getJSONArray("sessions")
+            for (index in 0 until rows.length()) {
+                val row = rows.getJSONObject(index)
+                if (row.has("profileHistory")) continue
+                val entries = row.getJSONArray("entries")
+                check((0 until entries.length()).none { entries.getJSONObject(it).getString("status") == "发送中" }) {
+                    "会话 ${row.getString("id")} 正在发送，请在回复结束后同步。"
+                }
+                row.put("profileHistory", JSONObject().put("profile", remoteProfile).put("prefix", entries.length()))
+            }
+        }
+    }
+
+    private fun historySession(source: JSONObject, key: SessionKey) =
+        findSession(requireProfile(source, key.profileId), key.sessionId) ?: error("本机已删除此会话。")
+
+    private fun profileMetadata(session: JSONObject, remoteProfile: String): JSONObject =
+        session.getJSONObject("profileHistory").also {
+            check(it.getString("profile") == remoteProfile) { "此会话属于另一份档案授权。" }
+        }
+
+    @Synchronized
+    fun profileHistoryPosition(key: SessionKey, remoteProfile: String): DesktopHistoryPosition {
+        val session = historySession(state, key)
+        val meta = profileMetadata(session, remoteProfile)
+        val prefix = meta.getInt("prefix")
+        val count = session.getJSONArray("entries").length()
+        check(prefix in 0..count) { "会话 ${key.sessionId} 的本地历史前缀缺失（应有 ${prefix} 轮，实际 ${count} 轮）。" }
+        return DesktopHistoryPosition(prefix, count.toLong(), meta.optJSONObject("pending")?.let {
+            SharedPending(it.getString("id"), it.getString("question"))
+        })
+    }
+
+    @Synchronized
+    fun profileSeedPage(key: SessionKey, remoteProfile: String, start: Int, limit: Int): List<ProfileImportTurn> {
+        val session = historySession(state, key)
+        val prefix = profileMetadata(session, remoteProfile).getInt("prefix")
+        val entries = session.getJSONArray("entries")
+        require(start in 0..prefix && limit in 1..100 && prefix <= entries.length())
+        // A source position is immutable, including when two consecutive turns are identical.
+        val envelope = JSONObject().put("sid", key.sessionId).put("start", start).put("turns", JSONArray())
+        var bytes = envelope.toString().toByteArray(Charsets.UTF_8).size.toLong()
+        return buildList {
+            for (index in start until minOf(prefix.toLong(), start.toLong() + limit).toInt()) {
+                val id = UUID.nameUUIDFromBytes(JSONArray(listOf("profile-history-v1", username, key.profileId, key.sessionId, index))
+                    .toString().toByteArray(Charsets.UTF_8)).toString()
+                val turn = desktopSharedSeedTurn(chatEntryFrom(entries.getJSONObject(index)))
+                val size = if (turn.question.length.toLong() + turn.answer.length > MAX_IMPORT_BYTES) MAX_IMPORT_BYTES + 1
+                    else JSONObject().put("id", id).put("question", turn.question).put("answer", turn.answer)
+                        .put("status", turn.status).toString().toByteArray(Charsets.UTF_8).size
+                if (bytes + size + (if (isEmpty()) 0 else 1) > MAX_IMPORT_BYTES) {
+                    check(isNotEmpty()) { "第 ${index + 1} 轮超过单次 8 MiB 上限，第 ${index + 1}–${prefix} 轮仍保存在电脑。" }
+                    break
+                }
+                bytes += size + (if (isEmpty()) 0 else 1)
+                add(ProfileImportTurn(id, turn.question, turn.answer, turn.status))
+            }
+        }
+    }
+
+    @Synchronized
+    fun beginProfileSend(key: SessionKey, remoteProfile: String, revision: Long, pending: SharedPending) {
+        check(revision >= (appliedDraftRevisions[key] ?: Long.MIN_VALUE)) { "草稿已更新，请重新发送。" }
+        persist(requireAtomic = true) { copy ->
+            val session = historySession(copy, key)
+            val meta = profileMetadata(session, remoteProfile)
+            check(!meta.has("pending")) { "上一轮发送仍在核对。" }
+            if (revision == appliedDraftRevisions[key]) {
+                check(readDraft(key).attachments.isEmpty()) { "共享文字发送前，请移除草稿中的附件。" }
+            }
+            meta.put("pending", JSONObject().put("id", pending.id).put("question", pending.question))
+            session.remove("draft")
+        }
+        appliedDraftRevisions[key] = revision
+    }
+
+    /** Append final authoritative rows in order. Never reconstruct a native entry from its
+     * textual shared projection, which intentionally lacks its original attachment references. */
+    @Synchronized
+    fun mergeProfilePage(key: SessionKey, remoteProfile: String, page: List<SharedTurn>, activity: Long = 0): Boolean {
+        val terminal = page.takeWhile { it.status != "running" }
+        check(page.drop(terminal.size).all { it.status == "running" }) { "共享服务返回了异常的轮次次序。" }
+        if (terminal.isEmpty()) return false
+        var changed = false
+        persist(requireAtomic = true) { copy ->
+            val session = historySession(copy, key)
+            val meta = profileMetadata(session, remoteProfile)
+            val prefix = meta.getInt("prefix")
+            val entries = session.getJSONArray("entries")
+            val pending = meta.optJSONObject("pending")
+            for (row in terminal) {
+                check(row.seq > prefix && row.seq <= entries.length().toLong() + 1) { "会话 ${key.sessionId} 在第 ${row.seq} 轮前存在缺口。" }
+                if (row.seq <= entries.length()) {
+                    check(entries.getJSONObject(row.seq.toInt() - 1).getString("profileTurnId") == row.id) { "共享轮次编号与本机不同。" }
+                } else {
+                    require(row.status == "complete" || row.status == "unknown")
+                    entries.put(JSONObject().put("profileTurnId", row.id).put("profileTurnSeq", row.seq)
+                        .put("question", row.question).put("answer", row.answer)
+                        .put("status", if (row.status == "complete") "已完成" else "上次回复未确认"))
+                    if (activity > session.optLong("lastActivityAt")) session.put("lastActivityAt", activity)
+                    changed = true
+                }
+                if (pending?.getString("id") == row.id) {
+                    check(pending.getString("question") == row.question)
+                    meta.remove("pending")
+                }
+            }
+        }
+        return changed
+    }
+
+    @Synchronized
+    fun profileRemoved(profileId: String): List<String> =
+        requireProfile(state, profileId).optJSONObject("profileRemoved")?.keySet()?.toList().orEmpty()
+
+    @Synchronized
+    fun acknowledgeProfileRemoval(profileId: String, sid: String) {
+        persist(requireAtomic = true) { copy ->
+            requireProfile(copy, profileId).optJSONObject("profileRemoved")?.remove(sid)
+        }
+    }
+
+    @Synchronized
+    fun hasLegacySharedRecord(key: SessionKey): Boolean = historySession(state, key).keySet().any { it.startsWith("shared-") }
 
     @Synchronized
     fun saveDraft(key: SessionKey, revision: Long, draft: ComposerDraft) {
@@ -573,6 +739,7 @@ internal class DesktopStore(private val file: Path) {
     }
 
     private fun writeSessionContent(session: JSONObject, chat: Chat) {
+        check(!session.has("profileHistory")) { "档案已授权，请通过原会话的档案共享入口发送。" }
         val entries = JSONArray()
         chat.entries.forEach { entry ->
             val row = JSONObject()
@@ -588,10 +755,12 @@ internal class DesktopStore(private val file: Path) {
             row.put("replyImages", replyAttachmentsToJson(entry.replyAttachments, entry.answer))
             entries.put(row)
         }
+        if (!entries.similar(session.optJSONArray("entries"))) session.put("lastActivityAt", System.currentTimeMillis())
         session.put("entries", entries)
     }
 
     private fun newSession(id: String): JSONObject = JSONObject()
+        .put("createdAt", System.currentTimeMillis())
         .put("id", id)
         .put("entries", JSONArray())
 
@@ -706,10 +875,14 @@ internal class DesktopStore(private val file: Path) {
             val group = groups.firstOrNull { candidate ->
                 candidate.address == address && candidate.sessions.none { it.getString("id") == sessionId }
             } ?: LegacyGroup(address, isLoopback(address)).also(groups::add)
-            val oldEntries = source.optJSONArray("entries") ?: JSONArray()
+            val oldEntries = if (source.has("entries")) source.optJSONArray("entries")
+                ?: throw DesktopHistoryCorruption("旧版会话 ${sessionId} 的历史轮次列表损坏。") else JSONArray()
             val entries = JSONArray()
             for (index in 0 until oldEntries.length()) {
-                val row = oldEntries.optJSONObject(index) ?: error("Invalid legacy entry")
+                val row = oldEntries.optJSONObject(index)
+                if (row == null || listOf("status", "answer", "question").any { row.opt(it) !is String }) {
+                    throw DesktopHistoryCorruption("旧版会话 ${sessionId} 的第 ${index + 1} 轮正文损坏。")
+                }
                 val status = row.getString("status").let { if (it == "发送中") "上次回复未确认" else it }
                 val answer = row.getString("answer")
                 entries.put(JSONObject()
@@ -776,8 +949,24 @@ internal class DesktopStore(private val file: Path) {
                 require(session.getString("id").isNotBlank() && ids.add(session.getString("id"))) {
                     "Invalid or duplicate session ID"
                 }
-                val entries = session.getJSONArray("entries")
-                for (entryIndex in 0 until entries.length()) chatEntryFrom(entries.getJSONObject(entryIndex))
+                val sid = session.getString("id")
+                val reference = "档案 ${profile.getString("id")} 的会话 ${sid}"
+                val entries = session.optJSONArray("entries") ?: throw DesktopHistoryCorruption("${reference} 缺少历史轮次列表。")
+                val prefix = session.optJSONObject("profileHistory")?.optInt("prefix", -1)
+                if (prefix != null && prefix !in 0..entries.length()) throw DesktopHistoryCorruption("${reference} 的历史前缀范围无效，预计 ${prefix} 轮，现存 ${entries.length()} 轮。")
+                val remoteIds = mutableSetOf<String>()
+                for (entryIndex in 0 until entries.length()) {
+                    try {
+                        val entry = entries.getJSONObject(entryIndex)
+                        chatEntryFrom(entry)
+                        if (prefix != null && entryIndex >= prefix) {
+                            check(entry.getLong("profileTurnSeq") == entryIndex.toLong() + 1)
+                            check(remoteIds.add(entry.getString("profileTurnId")))
+                        }
+                    } catch (e: Exception) {
+                        throw DesktopHistoryCorruption("${reference} 第 ${entryIndex + 1} 轮的正文或序号损坏。", e)
+                    }
+                }
             }
         }
     }
@@ -878,7 +1067,7 @@ internal class DesktopStore(private val file: Path) {
             .put("kind", "manual")
             .put("offlineOnly", false)
             .put("currentSession", sessionId)
-            .put("sessions", JSONArray().put(JSONObject().put("id", sessionId).put("entries", JSONArray())))
+            .put("sessions", JSONArray().put(newSession(sessionId)))
         profileArray(source).put(profile)
         return profile
     }
@@ -892,6 +1081,7 @@ internal class DesktopStore(private val file: Path) {
 
     companion object {
         private const val SCHEMA_VERSION = 2
+        private const val MAX_IMPORT_BYTES = 8 * 1024 * 1024
         private val MANAGED_MEDIA_NAME = Regex("""screenshot-[0-9]+\.png|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.wav|recording-[0-9]+\.part""")
         private const val SESSION_ORDER_VERSION = 1
         private const val MAX_TITLE_CODE_POINTS = 40

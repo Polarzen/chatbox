@@ -30,6 +30,7 @@ internal class AndroidAppState private constructor(private val app: Context) {
     private val prefs = app.getSharedPreferences("personal_chat", Context.MODE_PRIVATE)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     val pairingScope: CoroutineScope get() = scope
+    val computerHistory by lazy { AndroidPcHistory.get(app) }
     private val sharedSessions = mutableMapOf<Pair<String, String>, AndroidSharedSession>()
     private val notes = mutableStateMapOf<Pair<String, String>, String>()
     private var startedActivities = 0

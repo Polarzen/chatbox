@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 import http.client
 import json
+import time
 from urllib.parse import urlencode, urlsplit
 
 
@@ -109,10 +110,18 @@ class SessionIndexError(Exception):
 
 
 @contextmanager
-def connected(base, read_timeout, verify_base):
+def connected(base, read_timeout, verify_base, deadline=None):
+    def remaining(limit):
+        if deadline is None:
+            return limit
+        seconds = min(limit, deadline - time.monotonic())
+        if seconds <= 0:
+            raise SessionIndexError("核实 AstrBot 原会话超时，请检查上游连接。")
+        return seconds
+
     url = urlsplit(base)
     connection_type = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
-    connection = connection_type(url.hostname, url.port, timeout=12)
+    connection = connection_type(url.hostname, url.port, timeout=remaining(12))
     try:
         try:
             connection.connect()
@@ -120,13 +129,13 @@ def connected(base, read_timeout, verify_base):
             raise NotDispatched("无法连接到 AstrBot。") from exc
         if verify_base and verify_base() != base:
             raise NotDispatched("Launcher 实例地址已变化，请重试。")
-        connection.sock.settimeout(read_timeout)
+        connection.sock.settimeout(remaining(read_timeout))
         yield connection, url.path
     finally:
         connection.close()
 
 
-def session_exists(base, key, username, session, verify_base=None):
+def session_exists(base, key, username, session, verify_base=None, *, deadline=None):
     """Check only the claimed user's webchat index. Never open session history."""
     page = 1
     total = None
@@ -134,7 +143,7 @@ def session_exists(base, key, username, session, verify_base=None):
         query = urlencode({"username": username, "platform_id": "webchat", "page": page, "page_size": 100})
         if page > 1 and verify_base:
             base = verify_base()
-        with connected(base, 30, verify_base) as (conn, prefix):
+        with connected(base, 30, verify_base, deadline) as (conn, prefix):
             conn.request("GET", prefix + "/api/v1/chat/sessions?" + query,
                          headers={"Authorization": "Bearer " + key, "Accept": "application/json"})
             with conn.getresponse() as response:

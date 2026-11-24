@@ -184,10 +184,10 @@ internal fun runDesktopShell(args: Array<String>) {
     val dataDir = System.getenv("LOCALAPPDATA")?.takeIf { it.isNotBlank() }?.let { Path.of(it, "Chatbox") }
         ?: Path.of(System.getProperty("user.home"), ".chatbox")
     withDesktopInstance(args, dataDir, ::startupMessage) { directoryKey, inbox, activationAvailable ->
-        val store = runCatching { DesktopStore(dataDir.resolve("history.json")) }.getOrNull()
-        store?.let { runCatching { it.cleanupUnreferencedManagedMedia() } }
+        val loaded = runCatching { DesktopStore(dataDir.resolve("history.json")) }
+        loaded.getOrNull()?.let { runCatching { it.cleanupUnreferencedManagedMedia() } }
         WindowsReplyToast.initializeAppId()
-        runPrimaryWindow(dataDir, directoryKey, store, inbox, activationAvailable)
+        runPrimaryWindow(dataDir, directoryKey, loaded, inbox, activationAvailable)
     }
 }
 
@@ -263,8 +263,9 @@ internal fun withDesktopInstance(
 }
 
 private fun runPrimaryWindow(
-    dataDir: Path, directoryKey: String, store: DesktopStore?, inbox: ActivationInbox, activationAvailable: Boolean,
+    dataDir: Path, directoryKey: String, loaded: Result<DesktopStore>, inbox: ActivationInbox, activationAvailable: Boolean,
 ) {
+    val store = loaded.getOrNull()
     val keys = NamedKeys(dataDir, DesktopCredentials(dataDir.resolve("credentials")))
     val images = ReplyImageCache(dataDir.resolve("reply-images"))
     val appearanceStore = DesktopAppearanceStore(dataDir)
@@ -364,7 +365,10 @@ private fun runPrimaryWindow(
             CompositionLocalProvider(LocalModalCount provides modalCount) {
                 DesktopTheme(appearance.dark) {
                     Surface(Modifier.fillMaxSize()) {
-                        if (store == null) Text("无法读取本地聊天历史。请先备份历史文件，再检查数据目录。", Modifier.padding(16.dp))
+                        if (store == null) Text(listOfNotNull(
+                            "无法读取本地聊天历史。", (loaded.exceptionOrNull() as? DesktopHistoryCorruption)?.message,
+                            "请先备份历史文件，再检查数据目录。",
+                        ).joinToString("\n"), Modifier.padding(16.dp))
                         else DesktopScreen(
                             store, keys, images, window, historySearchOpen,
                             closeRequested = visibility.exiting,

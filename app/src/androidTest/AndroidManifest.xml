@@ -1,5 +1,0 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <instrumentation
-        android:name="dev.polarzen.chatbox.AndroidHistoryInstrumentation"
-        android:targetPackage="dev.polarzen.chatbox" />
-</manifest>

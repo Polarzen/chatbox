@@ -87,27 +87,28 @@ internal class DesktopSharedStorage(
 
 internal fun desktopSharedSeed(sourceBase: String, username: String, chat: Chat): SharedSeed {
     if (sourceBase.isEmpty()) return SharedSeed("", "", "", emptyList())
-    val history = chat.entries.map { entry ->
-        val question = buildList {
-            // Older histories sometimes kept only the display name. Use its extension as
-            // the type hint without copying a private name or path into shared history.
-            val references = entry.attachmentReferences.ifEmpty {
-                listOfNotNull(entry.attachmentReference ?: entry.attachmentDisplayName)
-            }
-            for (reference in references) add(if (reference.endsWith(".wav", true)) "[语音附件]" else "[图片附件]")
-            if (entry.question.isNotEmpty()) add(entry.question)
-        }.joinToString("\n")
-        val answer = buildString {
-            var cursor = 0
-            for (attachment in entry.replyAttachments.sortedBy { it.textOffset }) {
-                val offset = attachment.textOffset.coerceIn(cursor, entry.answer.length)
-                append(entry.answer, cursor, offset)
-                append("[${attachment.type.label}附件]")
-                cursor = offset
-            }
-            append(entry.answer, cursor, entry.answer.length)
+    return SharedSeed(sourceBase, username, chat.session, chat.entries.map(::desktopSharedSeedTurn))
+}
+
+internal fun desktopSharedSeedTurn(entry: Entry): SharedSeedTurn {
+    val question = buildList {
+        // Older histories sometimes kept only the display name. Use its extension as
+        // the type hint without copying a private name or path into shared history.
+        val references = entry.attachmentReferences.ifEmpty {
+            listOfNotNull(entry.attachmentReference ?: entry.attachmentDisplayName)
         }
-        SharedSeedTurn(question, answer, if (entry.status == "已完成") "complete" else "unknown")
+        for (reference in references) add(if (reference.endsWith(".wav", true)) "[语音附件]" else "[图片附件]")
+        if (entry.question.isNotEmpty()) add(entry.question)
+    }.joinToString("\n")
+    val answer = buildString {
+        var cursor = 0
+        for (attachment in entry.replyAttachments.sortedBy { it.textOffset }) {
+            val offset = attachment.textOffset.coerceIn(cursor, entry.answer.length)
+            append(entry.answer, cursor, offset)
+            append("[${attachment.type.label}附件]")
+            cursor = offset
+        }
+        append(entry.answer, cursor, entry.answer.length)
     }
-    return SharedSeed(sourceBase, username, chat.session, history)
+    return SharedSeedTurn(question, answer, if (entry.status == "已完成") "complete" else "unknown")
 }
