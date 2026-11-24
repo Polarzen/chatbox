@@ -8,8 +8,8 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
@@ -288,6 +289,7 @@ private fun AndroidSessionSidebar(
 ) {
     var editId by rememberSaveable { mutableStateOf<String?>(null) }
     var deleteId by rememberSaveable { mutableStateOf<String?>(null) }
+    val recent = remember(sessions) { sessions.sortedByDescending { it.turns.lastOrNull()?.createdAt ?: 0L } }
     Surface(modifier) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 14.dp)) {
             Text("最近对话", style = MaterialTheme.typography.titleMedium)
@@ -299,7 +301,7 @@ private fun AndroidSessionSidebar(
             }
             Spacer(Modifier.height(12.dp))
             LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                items(sessions, key = { it.id }) { item ->
+                items(recent, key = { it.id }) { item ->
                     val activeRow = item.id == active
                     var menu by remember { mutableStateOf(false) }
                     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
@@ -371,6 +373,36 @@ private fun AndroidSessionSidebar(
     }
 }
 
+// The reverse list's offset is measured from its bottom. The keyboard can close
+// while the chat is out of composition, so save the measured height with the row.
+private class ChatReading(val list: LazyListState = LazyListState(), val restoredHeight: Int = -1)
+
+private fun chatReadingSaver(turns: List<MobileTurn>) = listSaver<ChatReading, Any>(
+    save = { reading ->
+        val list = reading.list
+        val index = list.firstVisibleItemIndex
+        val offset = list.firstVisibleItemScrollOffset
+        val layout = list.layoutInfo
+        val row = layout.visibleItemsInfo.firstOrNull { it.index == index }
+        if (list.canScrollBackward && row != null) listOf(index, offset, row.key, layout.viewportSize.height)
+        else listOf(index, offset)
+    },
+    restore = { saved ->
+        var index = saved[0] as Int
+        val offset = saved[1] as Int
+        val key = saved.getOrNull(2) as? String
+        if (key != null && index > 0) {
+            val turnId = key.substringBeforeLast('/')
+            val turn = turns.indexOfFirst { it.id == turnId }
+            if (turn >= 0) {
+                val assistant = key.endsWith("/1")
+                index = (turns.size - turn) * 2 - if (assistant) 1 else 0
+            }
+        }
+        ChatReading(LazyListState(index, offset), saved.getOrNull(3) as? Int ?: -1)
+    },
+)
+
 @Composable
 private fun ChatTimeline(
     session: MobileSession, busy: Boolean, bound: Boolean, hit: MobileHistoryHit?,
@@ -389,7 +421,8 @@ private fun ChatTimeline(
         if (jumpTurn != null) LaunchedEffect(jumpTurn) { onJumpHandled() }
         return
     }
-    val list = rememberLazyListState()
+    val reading = rememberSaveable(saver = chatReadingSaver(session.turns)) { ChatReading() }
+    val list = reading.list
     var center by remember { mutableFloatStateOf(0f) }
     var targetLine by remember(hit) { mutableStateOf<Float?>(null) }
     var markedTurn by remember { mutableStateOf<String?>(null) }
@@ -441,7 +474,7 @@ private fun ChatTimeline(
         val hitGeometry = if (bodyHit == null) Modifier else Modifier.nestedScroll(observer).onGloballyPositioned {
             center = it.positionInRoot().y + it.size.height / 2f
         }
-        LazyColumn(Modifier.fillMaxSize().clipToBounds().chatImeReverseHistory(ime, list)
+        LazyColumn(Modifier.fillMaxSize().clipToBounds().chatImeReverseHistory(ime, list, reading.restoredHeight)
             .then(hitGeometry).testTag("message-region"), state = list, reverseLayout = true,
             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {

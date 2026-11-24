@@ -71,19 +71,21 @@ internal fun Modifier.moveWithChatIme(ime: AndroidChatIme) =
  * the top pixel instead, once at the endpoint resize. The following layout pass consumes
  * requestScrollToItem together with the new viewport height. */
 @Composable
-internal fun Modifier.chatImeReverseHistory(ime: AndroidChatIme, list: LazyListState): Modifier {
-    val previous = remember(ime, list) {
+internal fun Modifier.chatImeReverseHistory(ime: AndroidChatIme, list: LazyListState, restoredHeight: Int = -1): Modifier {
+    val previous = remember(list) {
         object {
             var inset = -1
-            var height = -1
+            var height = restoredHeight
         }
     }
     return layout { measurable, constraints ->
         val inset = ime.layoutBottom.value
         val height = constraints.maxHeight
-        if (previous.inset >= 0 && previous.inset != inset && previous.height != height) {
+        if (previous.height >= 0 && previous.inset != inset && previous.height != height) {
             Snapshot.withoutReadObservation {
-                if (list.canScrollBackward) {
+                // Before the first measure, canScrollBackward is still false. Only a saved
+                // older reading supplies a height here; a latest-position restore stays pinned.
+                if (previous.inset < 0 || list.canScrollBackward) {
                     list.requestScrollToItem(list.firstVisibleItemIndex,
                         list.firstVisibleItemScrollOffset + previous.height - height)
                 }

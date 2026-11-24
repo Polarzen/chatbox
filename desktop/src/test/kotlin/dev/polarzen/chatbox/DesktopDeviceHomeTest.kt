@@ -1,6 +1,7 @@
 package dev.polarzen.chatbox
 
 import java.nio.file.Files
+import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -8,6 +9,35 @@ import org.junit.rules.TemporaryFolder
 
 class DesktopDeviceHomeTest {
     @get:Rule val folder = TemporaryFolder()
+
+    @Test fun oneProfileKeepsTiesInStoredOrderAndOnlySendingPromotesAnOlderSession() {
+        val file = folder.root.toPath().resolve("history.json")
+        val seed = DesktopStore(file)
+        val profile = seed.createProfile("https://example.org")
+        val oldest = SessionKey(profile.id, profile.currentSession)
+        val latest = seed.createSession(profile.id).session
+        val tied = seed.createSession(profile.id).session
+
+        val history = JSONObject(Files.readString(file))
+        val sessions = history.getJSONArray("profiles").getJSONObject(0).getJSONArray("sessions")
+        for (index in 0 until sessions.length()) {
+            val session = sessions.getJSONObject(index)
+            session.put("lastActivityAt", if (session.getString("id") == latest) 20L else 10L)
+        }
+        Files.writeString(file, history.toString())
+        val store = DesktopStore(file)
+        fun recentActivity() = desktopRecentRows(store, oldest, emptyList()).map { it.key.sessionId to it.info.activity }
+        val before = listOf(latest to 20L, tied to 10L, oldest.sessionId to 10L)
+        assertEquals(before, recentActivity())
+
+        store.selectSession(profile.id, oldest.sessionId)
+        val revision = store.nextDraftRevision()
+        store.saveDraft(oldest, revision, ComposerDraft("new question"))
+        assertEquals(before, recentActivity())
+        store.commitDraft(oldest, revision, Chat(oldest.sessionId, listOf(Entry("new question", "", "发送中"))))
+        assertEquals(listOf(oldest.sessionId, latest, tied), recentActivity().map { it.first })
+        assertEquals(listOf(tied, latest, oldest.sessionId), store.sessions(profile.id).map { it.id })
+    }
 
     @Test fun recentKeepsBothSourcesAndSelectionWithDuplicateTitles() {
         val store = DesktopStore(folder.root.toPath().resolve("history.json"))

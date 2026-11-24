@@ -21,12 +21,16 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasAnyDescendant
+import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performKeyInput
@@ -34,7 +38,7 @@ import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performMouseInput
-import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.performScrollToKey
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.withKeyDown
@@ -498,7 +502,6 @@ class DesktopUiAcceptanceTest {
         assertEquals("Long history contains duplicate visible titles", 44, duplicateSessions.size)
         val scrolledSession = duplicateSessions[35].id
         val otherSession = duplicateSessions[12].id
-        val scrolledIndex = store.sessions(profileA).indexOfFirst { it.id == scrolledSession }
         val orderBeforeSelection = store.sessions(profileA)
         val selectedBeforeDrag = store.profile(profileA)!!.currentSession
         assertEquals(0, visibleSessionIndices().first())
@@ -513,13 +516,15 @@ class DesktopUiAcceptanceTest {
         advanceUiAnimations()
         assertTrue("Dragging beside the painted thumb scrolls the long list", visibleSessionIndices().first() > 0)
         assertEquals("Scrolling preserves the active conversation", selectedBeforeDrag, store.profile(profileA)!!.currentSession)
-        scrollToSessionRow(scrolledIndex)
+        val row = sessionRow(scrolledSession)
+        val rowNode = row.fetchSemanticsNode()
+        val scrolledIndex = rowNode.config[SemanticsProperties.TestTag].removePrefix("session-item-").toInt()
         val visibleBeforeSelection = visibleSessionIndices()
         assertTrue("The requested duplicate row is actually in the sidebar viewport", scrolledIndex in visibleBeforeSelection)
-        assertEquals("The displayed middle row is the intended session", scrolledSession, orderBeforeSelection[scrolledIndex].id)
-        val clickedRowBounds = rule.onNodeWithTag("session-item-$scrolledIndex").fetchSemanticsNode().boundsInRoot
+        row.assertTextContains("重复标题")
+        val clickedRowBounds = rowNode.boundsInRoot
         assertTrue("The middle row has visible screen bounds", clickedRowBounds.width > 0f && clickedRowBounds.height > 0f)
-        rule.onNodeWithTag("session-item-$scrolledIndex").performClick()
+        row.performClick()
         assertEquals(scrolledSession, store.profile(profileA)!!.currentSession)
         val targetReply = store.sessionContent(profileA, scrolledSession).entries.single().answer
         waitUntil("the scrolled duplicate's unique history is displayed", 5_000) {
@@ -542,13 +547,21 @@ class DesktopUiAcceptanceTest {
         rule.onNodeWithTag("composer-field").performTextClearance()
         val delayedQuestion = "延迟 delete this in-flight local conversation"
         val sendOffset = fixtureLogCurrentOffset()
-        val visibleBeforeBackgroundReply = visibleSessionIndices()
+        val sender = SessionKey(profileA, scrolledSession)
+        val recent = desktopRecentRows(store, sender, emptyList())
+        val anchor = recent[recent.indexOfFirst { it.key == sender } - 1]
+        rule.onNode(hasScrollToIndexAction() and hasAnyDescendant(sessionRowMatcher())).performScrollToKey(anchor.info.id)
+        fun firstVisibleAnchor() = rule.onNode(hasTestTag("session-item-${visibleSessionIndices().first()}") and
+            hasAnyDescendant(hasTestTag("session-menu-${anchor.tagId}"))).assertIsDisplayed()
+        val anchorTop = firstVisibleAnchor().fetchSemanticsNode().positionInRoot.y
+        row.assertIsDisplayed()
         sendText(delayedQuestion)
         waitUntil("delayed reply starts in selected session", 10_000) {
             runCatching { rule.onNodeWithText("本地服务已收到，正在继续", substring = true).assertIsDisplayed() }.isSuccess
         }
         assertEquals(scrolledSession, store.profile(profileA)!!.currentSession)
-        assertEquals("Sidebar viewport remains stable during the background reply", visibleBeforeBackgroundReply, visibleSessionIndices())
+        assertEquals("The inactive first visible session stays in place during the delayed reply",
+            anchorTop, firstVisibleAnchor().fetchSemanticsNode().positionInRoot.y, 1f)
         assertTrue("The clicked row originated below the start of the long list", scrolledIndex > 0)
         assertEquals("Selecting a row preserves duplicate-title sidebar order", orderBeforeSelection.map { it.id }, store.sessions(profileA).map { it.id })
 
@@ -559,6 +572,9 @@ class DesktopUiAcceptanceTest {
             ?: orderAtDeletion.getOrNull(deleteIndex - 1)
             ?: error("Deleting the only session should create a replacement session")
 
+        sessionRow(scrolledSession).assertIsDisplayed()
+        rule.onNode(hasTestTag("session-item-0") and hasAnyDescendant(hasTestTag("session-menu-$scrolledSession")))
+            .assertIsDisplayed()
         clickSemanticsTag("session-menu-$scrolledSession")
         advanceUiAnimations()
         waitUntil("session delete menu is displayed", 5_000) {
@@ -970,9 +986,8 @@ class DesktopUiAcceptanceTest {
         store.selectSession(profileA, historic)
         render()
         awaitConnected()
-        fun row(id: String) = "session-item-" + store.sessions(profileA).indexOfFirst { it.id == id }
         fun assertRow(id: String, title: String) {
-            rule.onNode(hasTestTag(row(id)) and hasText(title)).assertIsDisplayed()
+            sessionRow(id).assertIsDisplayed().assertTextContains(title)
         }
         fun saveName(id: String, value: String) {
             openRename(id)
@@ -1366,37 +1381,17 @@ class DesktopUiAcceptanceTest {
     }
 
     private fun selectSession(sessionId: String) {
-        val index = store.sessions(profileA).indexOfFirst { it.id == sessionId }
-        assertTrue("Session should be present in the production sidebar", index >= 0)
-        scrollToSessionRow(index)
-        rule.onNodeWithTag("session-item-$index").performClick()
+        sessionRow(sessionId).performClick()
     }
 
-    private fun scrollToSessionRow(targetIndex: Int) {
-        var visible = visibleSessionIndices()
-        if (targetIndex in visible) return
-
-        val itemCount = store.sessions(profileA).size
-        repeat(itemCount + 2) {
-            if (targetIndex in visible) return
-            val movingDown = targetIndex > (visible.maxOrNull() ?: -1)
-            val visibleEdge = if (movingDown) visible.last() else visible.first()
-            rule.onNodeWithTag("session-item-$visibleEdge").performTouchInput {
-                val start = center
-                down(start)
-                moveTo(start + Offset(0f, if (movingDown) -360f else 360f), delayMillis = 250)
-                up()
-            }
-            rule.mainClock.advanceTimeBy(250)
-            rule.waitForIdle()
-            visible = visibleSessionIndices()
+    private fun sessionRow(sessionId: String): SemanticsNodeInteraction {
+        val key = SessionKey(profileA, sessionId)
+        val row = desktopRecentRows(store, key, emptyList()).single { it.key == key }
+        val matcher = sessionRowMatcher() and hasAnyDescendant(hasTestTag("session-menu-${row.tagId}"))
+        if (rule.onAllNodes(matcher).fetchSemanticsNodes().isEmpty()) {
+            rule.onNode(hasScrollToIndexAction() and hasAnyDescendant(sessionRowMatcher())).performScrollToKey(row.info.id)
         }
-        assertTrue("Sidebar should scroll row $targetIndex into view; visible rows were $visible", rule.onAllNodes(
-            SemanticsMatcher("session row $targetIndex visible") { node ->
-                node.config.contains(SemanticsProperties.TestTag) &&
-                    node.config[SemanticsProperties.TestTag] == "session-item-$targetIndex"
-            },
-        ).fetchSemanticsNodes().isNotEmpty())
+        return rule.onNode(matcher)
     }
 
     private fun visibleSessionIndices(): List<Int> = rule.onAllNodes(sessionRowMatcher()).fetchSemanticsNodes().mapNotNull { node ->

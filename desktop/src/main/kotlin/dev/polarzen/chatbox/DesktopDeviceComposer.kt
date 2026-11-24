@@ -21,7 +21,7 @@ internal fun desktopRecentRows(
             DesktopRecentRow(key, session.copy(id = rowId, selected = key == selected), remote?.source ?: profileDisplayName(profile))
         }
     }
-    val ordered = if (profiles.size < 2) rows else rows.sortedByDescending { it.info.activity }
+    val ordered = rows.sortedByDescending { it.info.activity }
     val representatives = store.deviceRecentRepresentatives(selected, ordered.map { it.key })
     val visible = ordered.filter { it.key in representatives }
     val duplicates = visible.groupingBy { it.info.title }.eachCount()
