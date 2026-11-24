@@ -8,15 +8,16 @@ class LiveReplyNotificationTest {
     private val text = Entry("question", "answer", "已完成")
     private val imageOnly = text.copy(answer = " ", replyAttachments =
         listOf(ReplyAttachment("image", 0, ReplyAttachmentType.IMAGE)))
+    private val permit = ReplyToastPermit { true }
 
     @Test fun persistedTextNotifiesAtTerminalOnceAcrossFurtherMediaCallbacks() {
         var count = 0
         val live = LiveReplyNotification { count++ }
-        live.complete(text, persisted = true) { true }
+        live.complete(text, persisted = true) { permit }
         assertEquals(1, count)
         live.initialAttachmentSaved()
         live.initialAttachmentSaved()
-        live.complete(text, persisted = true) { true }
+        live.complete(text, persisted = true) { permit }
         assertEquals(1, count)
     }
 
@@ -27,7 +28,7 @@ class LiveReplyNotificationTest {
             val live = LiveReplyNotification { count++ }
             if (cachedFirst) live.initialAttachmentSaved()
             assertEquals(0, count)
-            live.complete(imageOnly, persisted = true) { background }
+            live.complete(imageOnly, persisted = true) { permit.takeIf { background } }
             if (!cachedFirst) {
                 assertEquals(0, count)
                 background = false
@@ -47,7 +48,7 @@ class LiveReplyNotificationTest {
             Triple(imageOnly, true, false),
         )) {
             val live = LiveReplyNotification { delivered.add(entry) }
-            live.complete(entry, persisted) { background }
+            live.complete(entry, persisted) { permit.takeIf { background } }
             live.initialAttachmentSaved()
         }
         assertTrue(delivered.isEmpty())
@@ -58,9 +59,9 @@ class LiveReplyNotificationTest {
         val cancelled = LiveReplyNotification { delivered.add("cancelled") }
         cancelled.initialAttachmentSaved()
         val empty = LiveReplyNotification { delivered.add("empty") }
-        empty.complete(text.copy(answer = " \n"), persisted = true) { true }
+        empty.complete(text.copy(answer = " \n"), persisted = true) { permit }
         val missingImage = LiveReplyNotification { delivered.add("missing") }
-        missingImage.complete(imageOnly, persisted = true) { true }
+        missingImage.complete(imageOnly, persisted = true) { permit }
         assertTrue(delivered.isEmpty())
     }
 }

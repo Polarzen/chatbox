@@ -134,8 +134,7 @@ internal fun DesktopScreen(
     openReply: ReplyDestination? = null,
     onOpenReplyHandled: () -> Unit = {},
     canNavigateReply: () -> Boolean = { true },
-    mayNotifyReply: () -> Boolean = { false },
-    onReplyNotification: (ReplyDestination) -> Unit = {},
+    captureReplyNotification: (ReplyDestination, () -> Boolean) -> ReplyToastPermit? = { _, _ -> null },
     windowEvents: DesktopShellVisibility? = null,
     appearanceActions: @Composable () -> Unit = {},
 ) {
@@ -160,8 +159,7 @@ internal fun DesktopScreen(
     val closingNow by rememberUpdatedState(isClosing)
     val closeResult by rememberUpdatedState(onCloseResult)
     val hideResult by rememberUpdatedState(onHideResult)
-    val mayNotify by rememberUpdatedState(mayNotifyReply)
-    val notifyReply by rememberUpdatedState(onReplyNotification)
+    val captureNotification by rememberUpdatedState(captureReplyNotification)
     val replyHandled by rememberUpdatedState(onOpenReplyHandled)
     val canNavigateNow by rememberUpdatedState(canNavigateReply)
     suspend fun saveForWindowChange() {
@@ -397,10 +395,9 @@ internal fun DesktopScreen(
         timingByEntry[TimedEntryKey(targetKey, entryIndex)] = timing
         sending = operation
         activeOperationId.set(operationId)
-        val notification = LiveReplyNotification {
-            if (scope.isActive && !closingNow() && targetKey !in deletedSessionKeys && !operation.cancellation.get()) {
-                notifyReply(ReplyDestination(targetKey, entryIndex))
-            }
+        fun stillLive() = scope.isActive && !closingNow() && targetKey !in deletedSessionKeys && !operation.cancellation.get()
+        val notification = LiveReplyNotification { permit ->
+            scope.launch(Dispatchers.IO) { permit.show() }
         }
         val query = entry.question
         thread(isDaemon = true, name = "chatbox-request") {
@@ -555,7 +552,9 @@ internal fun DesktopScreen(
                         result.isSuccess -> notices.remove(targetKey)
                         else -> notices[targetKey] = observedFailureStage + "：" + safeFailureMessage(failure!!, observedFailureStage)
                     }
-                    notification.complete(completed.entries.last(), saved.isSuccess) { !closingNow() && mayNotify() }
+                    notification.complete(completed.entries.last(), saved.isSuccess) {
+                        if (stillLive()) captureNotification(ReplyDestination(targetKey, entryIndex), ::stillLive) else null
+                    }
                 }
             }
         }

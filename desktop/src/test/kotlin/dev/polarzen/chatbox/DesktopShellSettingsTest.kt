@@ -17,13 +17,27 @@ class DesktopShellSettingsTest {
     fun missingFileUsesDefaultsAndEditsSurviveRestart() {
         val dir = temp.root.toPath().resolve("settings")
         val store = DesktopShellSettingsStore(dir)
-        assertEquals(DesktopShellSettings(true, DesktopHotkey.DEFAULT, false, true), store.load())
-        val changed = DesktopShellSettings(false, requireNotNull(DesktopHotkey.parse("Ctrl+Alt+J")), true, false)
+        assertEquals(DesktopShellSettings(false, DesktopHotkey.DEFAULT, false, true), store.load())
+        val changed = DesktopShellSettings(true, requireNotNull(DesktopHotkey.parse("Ctrl+Alt+K")), true, false)
         store.save(changed)
         assertEquals(changed, DesktopShellSettingsStore(dir).load())
         store.save(DesktopShellSettings())
         assertEquals(DesktopShellSettings(), DesktopShellSettingsStore(dir).load())
         assertEquals(listOf("shell.json"), dir.toFile().list()!!.toList())
+    }
+
+    @Test
+    fun legacySettingsKeepTheirExplicitSwitchesAndCustomShortcut() {
+        val dir = temp.root.toPath()
+        val store = DesktopShellSettingsStore(dir)
+        val custom = requireNotNull(DesktopHotkey.parse("Ctrl+Shift+K"))
+        val file = dir.resolve("shell.json")
+        Files.writeString(file, """{"hotkey":"Ctrl+Shift+K","closeToTray":true}""")
+        assertEquals(DesktopShellSettings(false, custom, true, true), store.load())
+        for (enabled in listOf(false, true)) {
+            Files.writeString(file, """{"hotkeyEnabled":$enabled,"hotkey":"Ctrl+Shift+K","notifyReplies":false}""")
+            assertEquals(DesktopShellSettings(enabled, custom, false, false), store.load())
+        }
     }
 
     @Test
@@ -48,26 +62,29 @@ class DesktopShellSettingsDialogTest {
         var dismissed = false
         ui.setContent {
             DesktopTheme(false) {
-                DesktopShellSettingsDialog(DesktopShellSettings(), trayAvailable = false, onSave = {
+                DesktopShellSettingsDialog(DesktopShellSettings(), trayAvailable = false, registeredKey = null, onSave = {
                     attempts.add(it)
                     if (it.hotkeyEnabled) "快捷键已被占用" else null
                 }, onDismiss = { dismissed = true })
             }
         }
         ui.onNodeWithTag("shell-close-to-tray").assertIsNotEnabled()
+        ui.onNodeWithTag("shell-hotkey-enabled").assertIsOff()
+        ui.onNodeWithTag("shell-hotkey").assertIsNotEnabled()
+        ui.onNodeWithTag("shell-hotkey-enabled").performClick()
         ui.onNodeWithTag("shell-hotkey").performTextReplacement("invalid")
         ui.onNodeWithTag("shell-save").assertIsNotEnabled()
         ui.onNodeWithTag("shell-hotkey").performTextReplacement("Ctrl+Alt+J")
         ui.onNodeWithTag("shell-notify-replies").performClick()
         ui.onNodeWithTag("shell-save").performClick()
         ui.onNodeWithText("快捷键已被占用").assertIsDisplayed()
-        ui.onNodeWithText("当前快捷键：${DesktopHotkey.DEFAULT}").assertIsDisplayed()
+        ui.onNodeWithText("当前快捷键：已关闭").assertIsDisplayed()
         ui.onNodeWithTag("shell-hotkey").assertTextContains("Ctrl+Alt+J")
         ui.runOnIdle { assertFalse(dismissed) }
         ui.onNodeWithTag("shell-hotkey-enabled").performClick()
         ui.onNodeWithTag("shell-save").performClick()
         ui.runOnIdle {
-            val expected = DesktopShellSettings(hotkey = requireNotNull(DesktopHotkey.parse("Ctrl+Alt+J")), notifyReplies = false)
+            val expected = DesktopShellSettings(hotkeyEnabled = true, notifyReplies = false)
             assertEquals(listOf(expected, expected.copy(hotkeyEnabled = false)), attempts)
             assertTrue(dismissed)
         }

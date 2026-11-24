@@ -19,7 +19,7 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 
 internal data class DesktopShellSettings(
-    val hotkeyEnabled: Boolean = true,
+    val hotkeyEnabled: Boolean = false,
     val hotkey: DesktopHotkey = DesktopHotkey.DEFAULT,
     val closeToTray: Boolean = false,
     val notifyReplies: Boolean = true,
@@ -66,6 +66,7 @@ internal class DesktopShellSettingsStore(private val dataDir: Path) {
 internal fun DesktopShellSettingsDialog(
     current: DesktopShellSettings,
     trayAvailable: Boolean,
+    registeredKey: DesktopHotkey?,
     onSave: (DesktopShellSettings) -> String?,
     onDismiss: () -> Unit,
 ) {
@@ -106,8 +107,9 @@ internal fun DesktopShellSettingsDialog(
                 }
                 error?.let {
                     Text(it, color = MaterialTheme.colors.error, modifier = Modifier.testTag("shell-save-error"))
-                    val savedShortcut = if (current.hotkeyEnabled) current.hotkey.toString() else "已关闭"
-                    Text("当前快捷键：$savedShortcut", style = MaterialTheme.typography.caption)
+                }
+                if (error != null || registeredKey != current.hotkey.takeIf { current.hotkeyEnabled }) {
+                    Text("当前快捷键：${registeredKey ?: "已关闭"}", style = MaterialTheme.typography.caption)
                 }
             }
         },

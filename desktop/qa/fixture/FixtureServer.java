@@ -26,9 +26,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
+import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -39,6 +43,7 @@ public final class FixtureServer {
     private static final Pattern SESSION = Pattern.compile("\"session_id\"\\s*:\\s*\"([0-9a-fA-F-]{36})\"");
     private static final Pattern USERNAME = Pattern.compile("[?&]username=([^&]*)");
     private static final Pattern LONG_STREAM = Pattern.compile("fixture:long-stream:([A-Za-z0-9_-]{1,32})(?![A-Za-z0-9_-])");
+    private static final Pattern GATED_MEDIA = Pattern.compile("fixture:gate-(image|wav):([A-Za-z0-9_-]{1,32})(?![A-Za-z0-9_-])");
     private static final String PNG_ID_A = "reply-image-a";
     private static final String PNG_ID_B = "reply-image-b";
 
@@ -49,6 +54,8 @@ public final class FixtureServer {
     private final HttpsServer serverB;
     private final byte[] replyPngA;
     private final byte[] replyJpegB;
+    private record MediaGate(String profile, boolean audio, String caseId, AtomicBoolean firstGet) {}
+    private final Map<String, MediaGate> gatedMedia = new ConcurrentHashMap<>();
 
     private FixtureServer(Path configPath) throws Exception {
         this.configFile = configPath;
@@ -229,6 +236,16 @@ public final class FixtureServer {
         }
         boolean imageOnly = request.contains("fixture:image-only");
         boolean voiceOnly = request.contains("fixture:voice-only");
+        Matcher gated = GATED_MEDIA.matcher(request);
+        if (gated.find()) {
+            String id = "gate-" + UUID.randomUUID();
+            boolean audio = gated.group(1).equals("wav");
+            gatedMedia.put(id, new MediaGate(profile, audio, gated.group(2), new AtomicBoolean(true)));
+            writeReplyAttachment(output, id, audio);
+            writeEvent(output, "{\"type\":\"end\"}");
+            output.flush();
+            return 200;
+        }
         if (imageOnly || voiceOnly || request.contains("fixture:empty-success")) {
             if (imageOnly) writeReplyImage(profile, output);
             if (voiceOnly) writeReplyVoice(profile, output);
@@ -309,14 +326,19 @@ public final class FixtureServer {
 
     private static void writeReplyImage(String profile, OutputStream output) throws IOException {
         String attachment = profile.equals("A") ? PNG_ID_A : PNG_ID_B;
-        writeEvent(output, "{\"type\":\"image\",\"data\":\"[IMAGE]fixture.png\"}");
-        writeEvent(output, "{\"type\":\"attachment_saved\",\"data\":{\"id\":\"" + attachment + "\",\"type\":\"image\"}}");
+        writeReplyAttachment(output, attachment, false);
     }
 
     private static void writeReplyVoice(String profile, OutputStream output) throws IOException {
         String id = "reply-voice-" + profile.toLowerCase(java.util.Locale.ROOT);
-        writeEvent(output, "{\"type\":\"record\",\"data\":\"[RECORD]fixture.wav\"}");
-        writeEvent(output, "{\"type\":\"attachment_saved\",\"data\":{\"id\":\"" + id + "\",\"type\":\"record\"}}");
+        writeReplyAttachment(output, id, true);
+    }
+
+    private static void writeReplyAttachment(OutputStream output, String id, boolean audio) throws IOException {
+        String type = audio ? "record" : "image";
+        String data = audio ? "[RECORD]fixture.wav" : "[IMAGE]fixture.png";
+        writeEvent(output, "{\"type\":\"" + type + "\",\"data\":\"" + data + "\"}");
+        writeEvent(output, "{\"type\":\"attachment_saved\",\"data\":{\"id\":\"" + id + "\",\"type\":\"" + type + "\"}}");
     }
 
     private int serveUpload(String profile, HttpExchange exchange) throws IOException {
@@ -343,6 +365,8 @@ public final class FixtureServer {
     private int serveDownload(String profile, HttpExchange exchange) throws IOException {
         String query = exchange.getRequestURI().getRawQuery();
         String id = query == null ? "" : URLDecoder.decode(query.replaceFirst("^attachment_id=", ""), StandardCharsets.UTF_8);
+        MediaGate gate = gatedMedia.get(id);
+        if (gate != null && gate.profile().equals(profile)) return serveGatedMedia(gate, id, exchange);
         String prefix = "wav-" + profile + "-";
         if (id.startsWith(prefix)) {
             String sample = id.substring(prefix.length());
@@ -376,6 +400,39 @@ public final class FixtureServer {
             return 404;
         }
         send(exchange, 200, mediaType, image);
+        return 200;
+    }
+
+    private int serveGatedMedia(MediaGate gate, String id, HttpExchange exchange) throws IOException {
+        byte[] bytes = gate.audio() ? voiceWav(2000, 1, false) : replyPngA;
+        String mime = gate.audio() ? "audio/wav" : "image/png";
+        if (!gate.firstGet().getAndSet(false)) {
+            send(exchange, 200, mime, bytes);
+            return 200;
+        }
+        String name = "gate-" + gate.caseId();
+        Path release = controlsFile.resolveSibling(name + ".release");
+        Path fail = controlsFile.resolveSibling(name + ".fail");
+        exchange.getResponseHeaders().set("Content-Type", mime);
+        exchange.getResponseHeaders().set("Cache-Control", "no-store");
+        exchange.sendResponseHeaders(200, 0);
+        var output = exchange.getResponseBody();
+        Files.writeString(controlsFile.resolveSibling(name + ".started"), id);
+        long deadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(2);
+        long nextByte = System.nanoTime();
+        int offset = 0;
+        while (!Files.exists(release)) {
+            long now = System.nanoTime();
+            // An early EOF leaves an unreadable payload. The client's manual retry gets the full file.
+            if (Files.exists(fail) || now >= deadline || !pause(100)) return 200;
+            if (now >= nextByte) {
+                // Keep the client's 30-second read timeout from expiring during manual settings changes.
+                output.write(bytes[offset++]);
+                output.flush();
+                nextByte = now + TimeUnit.SECONDS.toNanos(5);
+            }
+        }
+        output.write(bytes, offset, bytes.length - offset);
         return 200;
     }
 

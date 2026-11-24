@@ -4,9 +4,16 @@ Windows 桌面版使用 AstrBot OpenAPI 收发文字和图片，也可播放服�
 
 ## 安装与构建
 
-Windows 0.1.14 安装包为 `Chatbox-0.1.14.msi`。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.14/Chatbox-0.1.14.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.14/SHA256SUMS.txt) · [v0.1.14 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.14)
+Windows 0.1.15 安装包为 `Chatbox-0.1.15.msi`。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.15/Chatbox-0.1.15.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.15/SHA256SUMS.txt) · [v0.1.15 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.15)
 
-将 MSI 和 `SHA256SUMS.txt` 下载到同一目录。在该目录打开 PowerShell，运行 `Get-FileHash .\Chatbox-0.1.14.msi -Algorithm SHA256`，确认输出的哈希值与 `SHA256SUMS.txt` 中该 MSI 对应的值一致。从 0.1.5 至 0.1.13 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。安装完成后从开始菜单打开 Chatbox。0.1.1 用户先阅读[旧卸载器升级说明](#从-011-升级)。
+将 MSI 和 `SHA256SUMS.txt` 下载到同一目录。在该目录打开 PowerShell，运行 `Get-FileHash .\Chatbox-0.1.15.msi -Algorithm SHA256`，确认输出的哈希值与 `SHA256SUMS.txt` 中该 MSI 对应的值一致。从 0.1.5 至 0.1.14 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。安装完成后从开始菜单打开 Chatbox。0.1.1 用户先阅读[旧卸载器升级说明](#从-011-升级)。
+
+## Windows 0.1.15
+
+- **启用快捷键**　新配置和未保存过快捷键开关的旧配置默认关闭「全局快捷键」。需要时打开「桌面设置」，开启「全局快捷键」，在「显示或隐藏窗口」保留 Ctrl+Alt+J 或输入自己的组合键，再点击「保存」。成功保存后即可从其他应用唤起 Chatbox。关闭并保存会立即释放该组合键。升级会保留已保存的开启或关闭状态及自定义组合键。快捷键关闭时可从托盘或开始菜单唤回原窗口。
+- **取消待发提醒**　「后台回复完成时提醒」独立于快捷键，默认开启。是否有资格提醒取决于回复完成时 Chatbox 是否在后台，之后单纯切换窗口不会改变这个判断。纯图片或纯 WAV 回复可能要等首次缓存完成才会提醒。在此期间关闭提醒并保存，就会撤销尚未交给 Windows 的提醒。即使在下载结束前重新开启，旧回复也不会补发，之后新取得资格的回复才会提醒。已交给 Windows 的通知由系统管理，附件仍可照常下载、查看或播放。
+
+[0.1.15 验收记录](../docs/WINDOWS_015_RELEASE_ACCEPTANCE.md)
 
 ## Windows 0.1.14
 
