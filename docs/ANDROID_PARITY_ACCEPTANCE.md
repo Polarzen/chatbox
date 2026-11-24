@@ -35,6 +35,8 @@
 
 ## 瑶的 Redmi 初验与 Polarzen 复验
 
-已识别 Redmi Turbo 3、Android 16 / API 36、HyperOS `OS3.0.305.0.WNPCNXM`。该用户空间原先没有安装 `dev.polarzen.chatbox`。USB 安装触发小米安全中心，系统返回 `INSTALL_FAILED_USER_RESTRICTED`。最终 APK 已复制到手机「文件管理 → 下载 → Chatbox-0.1.17-QA-83603683.apk」，手机端再次计算的 SHA-256 与电脑一致，同目录有 `Chatbox-0.1.17-初验说明.txt`。原有独立心率测试应用及数据均保留。
+Redmi Turbo 3 运行 Android 16 / API 36、HyperOS `OS3.0.305.0.WNPCNXM`。早先 USB 安装曾被小米安全中心拦下。2026-11-24 11:18 UTC，真机已核验安装的 Chatbox 0.1.17，APK 的 SHA-256 为 `836036836c0f526d18990d2b2e0f60bfe12bdbf3afdf7b7fb3f8a4eb6ce9ebac`，与交付件一致。原有独立心率测试应用及数据均保留。
 
-瑶的真机功能初验尚待安装。HyperOS 通知拒权、后台录音与回跳、实机音频焦点与听感、局域网证书链、真实手环广播与断线、新读数附加及生产绘图服务均须分别记录。瑶通过并复测受影响路径后，再由 Polarzen 验证稳定版。
+真机离线实测中，首次启动后新建会话，调出软键盘编辑文字时，草稿和发送键均可见。强行停止再冷启动后，草稿逐字恢复。切换深色后聊天页随之变暗，随后已恢复默认外观。操作记录为 `evidence/redmi/device-actions.jsonl`。
+
+已从电脑检查真机测试用的公网 HTTPS 入口。会话列表、文件上传和下载在未携带凭据时返回 AstrBot 的 401，管理页面和不支持的方法返回 404。手机上的命名 Key 验证、实际收发和通知回跳仍待现场记录。HyperOS 通知授权与后台录音、实机音频焦点与听感、真实手环广播与断线、新读数附加及生产绘图服务也待现场记录。瑶本人的初验回执待收，受影响路径复测通过后，再由 Polarzen 验证稳定版。
