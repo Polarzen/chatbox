@@ -2,7 +2,9 @@
 
 ## 当前验收状态
 
-Android 分发构建使用提交 `0c85b72138f146c56019b9cfdd6191bfdfb0b9d0`，APK 的 SHA-256 为 `f27c14765ed6c973d8aab3c5a26ed7bf740ca7f5fbd4c0c26239cd6538252a9d`。Windows 分发构建来自 `22bbb273db89afbc36fb6d120a774fed18ce5d68`。两提交之间只修改了 Android 的阅读位置补偿，桌面和共享服务源码一致。Redmi 的 `chatbox` 目录中只留有这份 APK，已在手机上校验摘要。
+Android 分发构建使用提交 `0c85b72138f146c56019b9cfdd6191bfdfb0b9d0`，APK 的 SHA-256 为 `f27c14765ed6c973d8aab3c5a26ed7bf740ca7f5fbd4c0c26239cd6538252a9d`。Windows 分发构建来自 `22bbb273db89afbc36fb6d120a774fed18ce5d68`。两提交之间只修改了 Android 的阅读位置补偿，桌面和共享服务源码一致。
+
+Redmi Turbo 3（API 36）已保留数据覆盖安装分发 APK，系统报告 0.1.19、版本号 19，首次安装时间保持不变。分别读取已安装的 `base.apk` 和手机 `chatbox` 目录中唯一的 `Chatbox-0.1.19.apk`，两份文件的摘要均与分发包一致。系统记录主界面 Activity 冷启动成功，耗时 550 ms。此次启动时手机锁屏，界面操作和帧时间单列现场验收。
 
 Polarzen 已在 Redmi 上确认早期候选的键盘上升体感。分发 APK 已在 API 26 模拟器上通过六组阅读位置复测，Windows 分发 MSI 的端口回填与原绑定已通过安装包界面复验。当前仍待 Polarzen 在 Windows 向导输入 ngrok 授权、用 Redmi 扫码并确认实际同步范围。公网配对、同一 Wi-Fi 及移动网络收发、真实中文组字和分发 APK 的 Redmi 帧时间均待这次现场验收。
 
