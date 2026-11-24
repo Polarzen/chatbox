@@ -79,32 +79,24 @@ internal class AndroidChatDelivery(
             onNote("无法保存本地会话，消息未发送。")
             return
         }
-        active[key] = true
-        onNote("")
-        thread(name = "chatbox-local-send", isDaemon = true) {
+        transfer(key, "chatbox-local-send", onNote) {
             val reply = MobileReplyDelivery(initial) { history.update(address, session, it) }
-            val note = try {
-                val failure = try {
-                    val image = { id: String?, _: Int -> reply.media("image", id) }
-                    val audio = { id: String?, _: Int -> reply.media("audio", id) }
-                    if (assets.isEmpty()) {
-                        sendToAstrBot(address, secret, user, session, question, heart, onReplyImage = image,
-                            onReplyAudio = audio, onEvent = reply::event, onText = reply::text)
-                    } else {
-                        sendAttachmentsToAstrBot(address, secret, user, session, assets.map { File(it.path).toPath() },
-                            question, heart, onReplyImage = image, onReplyAudio = audio, onEvent = reply::event,
-                            onText = reply::text)
-                    }
-                    null
-                } catch (e: Exception) { e }
-                reply.finish(failure, captureNotification = { captureNotification(address, session, initial.id) }, download = { kind, id ->
-                    downloadAsset(address, secret, kind, id)
-                })
-            } catch (_: Exception) { STORAGE_FAILURE }
-            main.post {
-                active.remove(key)
-                onNote(note)
-            }
+            val failure = try {
+                val image = { id: String?, _: Int -> reply.media("image", id) }
+                val audio = { id: String?, _: Int -> reply.media("audio", id) }
+                if (assets.isEmpty()) {
+                    sendToAstrBot(address, secret, user, session, question, heart, onReplyImage = image,
+                        onReplyAudio = audio, onEvent = reply::event, onText = reply::text)
+                } else {
+                    sendAttachmentsToAstrBot(address, secret, user, session, assets.map { File(it.path).toPath() },
+                        question, heart, onReplyImage = image, onReplyAudio = audio, onEvent = reply::event,
+                        onText = reply::text)
+                }
+                null
+            } catch (e: Exception) { e }
+            reply.finish(failure, captureNotification = { captureNotification(address, session, initial.id) }, download = { kind, id ->
+                downloadAsset(address, secret, kind, id)
+            })
         }
     }
 
@@ -121,17 +113,24 @@ internal class AndroidChatDelivery(
             onNote("回复附件缺少可用编号。")
             return
         }
+        transfer(key, "chatbox-reply-download", onNote) {
+            val saved = findTurn(address, session, turn.id)
+            retryMobileReplyAsset(saved, asset, { kind, id -> downloadAsset(address, secret, kind, id) }) {
+                history.update(address, session, it)
+            }
+        }
+    }
+
+    private fun transfer(key: Pair<String, String>, name: String, onNote: (String) -> Unit, work: () -> String) {
         active[key] = true
+        val ready = AndroidChatTransferService.request(app)
         onNote("")
-        thread(name = "chatbox-reply-download", isDaemon = true) {
-            val note = try {
-                val saved = findTurn(address, session, turn.id)
-                retryMobileReplyAsset(saved, asset, { kind, id -> downloadAsset(address, secret, kind, id) }) {
-                    history.update(address, session, it)
-                }
-            } catch (_: Exception) { STORAGE_FAILURE }
+        thread(name = name, isDaemon = true) {
+            if (!ready.join()) main.post { onNote("系统未允许后台传输，请保持 Chatbox 在前台。") }
+            val note = try { work() } catch (_: Exception) { STORAGE_FAILURE }
             main.post {
                 active.remove(key)
+                if (active.isEmpty()) AndroidChatTransferService.finish()
                 onNote(note)
             }
         }
