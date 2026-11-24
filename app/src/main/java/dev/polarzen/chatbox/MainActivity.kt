@@ -1,6 +1,7 @@
 package dev.polarzen.chatbox
 
 import android.os.Bundle
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
@@ -10,6 +11,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
@@ -22,6 +25,8 @@ import java.util.concurrent.Executors
 class MainActivity : ComponentActivity() {
     private companion object { val transcriptLock = Any() }
     private val executor = Executors.newSingleThreadExecutor()
+    private val live = LiveHeartRate(monotonicNanos = SystemClock::elapsedRealtimeNanos)
+    private lateinit var heartRateReceiver: AndroidHeartRate
     private val prefs by lazy { getSharedPreferences("personal_chat", MODE_PRIVATE) }
     private val user by lazy {
         prefs.getString("user", null) ?: ("chatbox_" + UUID.randomUUID().toString().replace("-", "")).also {
@@ -53,9 +58,15 @@ class MainActivity : ComponentActivity() {
         }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        heartRateReceiver = AndroidHeartRate(this, live)
         setContent { MaterialTheme { Screen() } }
     }
+    override fun onResume() {
+        super.onResume()
+        heartRateReceiver.refreshAfterResume()
+    }
     override fun onDestroy() {
+        heartRateReceiver.close()
         executor.shutdownNow()
         super.onDestroy()
     }
@@ -68,6 +79,7 @@ class MainActivity : ComponentActivity() {
         var partial by remember { mutableStateOf("") }
         var transcript by remember { mutableStateOf(read(base)) }
         var askRetry by remember { mutableStateOf<String?>(null) }
+        var showHeartRate by rememberSaveable { mutableStateOf(false) }
         val scroll = rememberLazyListState()
         LaunchedEffect(transcript.lines.size, partial.length) {
             val index = transcript.lines.lastIndex
@@ -94,7 +106,7 @@ class MainActivity : ComponentActivity() {
             executor.execute {
                 val answer = StringBuilder()
                 val failure = runCatching {
-                    sendToAstrBot(server, token, user, session, clean) { chunk ->
+                    sendToAstrBot(server, token, user, session, clean, heartRate = live) { chunk ->
                         answer.clear()
                         answer.append(chunk)
                         val snapshot = answer.toString()
@@ -123,7 +135,12 @@ class MainActivity : ComponentActivity() {
         Surface(modifier = Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize().systemBarsPadding().imePadding().padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Chatbox · 小鲸鱼", style = MaterialTheme.typography.titleLarge)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Chatbox · 小鲸鱼", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+                    TextButton(onClick = { showHeartRate = true }) {
+                        Text(heartRateReceiver.bpm?.let { "心率 $it BPM" } ?: "心率")
+                    }
+                }
                 OutlinedTextField(base, {
                     base = it; transcript = read(it.trim().trimEnd('/')); note = ""
                 }, Modifier.fillMaxWidth(), enabled = !busy, singleLine = true,
@@ -151,6 +168,9 @@ class MainActivity : ComponentActivity() {
                     Text(if (busy) "等待回复…" else "发送")
                 }
             }
+        }
+        if (showHeartRate) {
+            AndroidHeartRatePanel(heartRateReceiver, onDismiss = { showHeartRate = false })
         }
         askRetry?.let { previous ->
             AlertDialog(onDismissRequest = { askRetry = null }, title = { Text("重新发送？") },
