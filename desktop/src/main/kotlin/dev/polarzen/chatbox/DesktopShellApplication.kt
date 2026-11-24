@@ -37,9 +37,7 @@ import java.nio.file.StandardOpenOption
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 // The screen acknowledges hide and exit only after its draft has been flushed.
 internal class DesktopShellVisibility {
@@ -104,12 +102,32 @@ internal class DesktopShellVisibility {
 }
 
 internal class DesktopReplyNotifier(
-    private val enabled: () -> Boolean,
+    initiallyEnabled: Boolean,
     private val isForeground: () -> Boolean,
     private val showToast: (ReplyDestination) -> Boolean,
 ) {
-    fun eligible(): Boolean = enabled() && !isForeground()
-    fun show(target: ReplyDestination): Boolean = showToast(target)
+    private var enabledPeriod: Any? = if (initiallyEnabled) Any() else null
+
+    fun capture(target: ReplyDestination, stillLive: () -> Boolean): ReplyToastPermit? {
+        val period = synchronized(this) { enabledPeriod } ?: return null
+        if (isForeground()) return null
+        return ReplyToastPermit {
+            synchronized(this) { period === enabledPeriod && stillLive() && showToast(target) }
+        }
+    }
+
+    @Synchronized fun saveSettings(notifyReplies: Boolean, persist: () -> Unit) {
+        persist()
+        if (!notifyReplies) enabledPeriod = null
+        else if (enabledPeriod == null) enabledPeriod = Any()
+    }
+}
+
+internal fun DesktopShellSettings.registrationForSave(updated: DesktopShellSettings, registered: DesktopHotkey?): DesktopHotkey? {
+    val previous = hotkey.takeIf { hotkeyEnabled }
+    val requested = updated.hotkey.takeIf { updated.hotkeyEnabled }
+    // An unchanged Save retries a failed startup registration. Saving unrelated edits preserves the actual binding.
+    return if (requested == previous && updated != this) registered else requested
 }
 
 private val LocalModalCount = staticCompositionLocalOf<MutableIntState?> { null }
@@ -296,11 +314,9 @@ private fun runPrimaryWindow(
                     tray.trayAvailable && tray.isMainForeground()
                 ) visibility.hide(true) else foreground(true)
             }
-            val hotkeys = remember(window) { WindowsHotkeys { keysPressed.value() } }
-            var registeredKey by remember { mutableStateOf<DesktopHotkey?>(null) }
-            val notificationScope = rememberCoroutineScope()
+            val hotkeys = remember(window) { DesktopHotkeySettings { keysPressed.value() } }
             val notifier = remember(tray) {
-                DesktopReplyNotifier({ activationAvailable && settings.notifyReplies && !visibility.exiting }, tray::isForeground) {
+                DesktopReplyNotifier(settings.notifyReplies, tray::isForeground) {
                     try {
                         WindowsReplyToast.show(DesktopInstanceActivation.toastUri(directoryKey, it))
                     } catch (_: Exception) {
@@ -313,8 +329,8 @@ private fun runPrimaryWindow(
                 trayAvailable = store != null && tray.installTray()
                 if (store != null && settings.hotkeyEnabled) {
                     val conflict = hotkeys.change(settings.hotkey)
-                    if (conflict == null) registeredKey = settings.hotkey else {
-                        shellError = listOfNotNull(shellError, "$conflict。快捷键尚未启用，请在“快捷键与托盘”中更改或关闭。").joinToString("\n")
+                    if (conflict != null) {
+                        shellError = listOfNotNull(shellError, "$conflict。快捷键尚未启用，可在“快捷键与托盘”中更改，或直接保存以重试。").joinToString("\n")
                     }
                 }
                 fun bindActivations() = inbox.bind(accepting = { !visibility.exiting }) { event ->
@@ -364,8 +380,9 @@ private fun runPrimaryWindow(
                                 openReply = null
                                 pendingReplies.removeFirstOrNull()
                             },
-                            mayNotifyReply = notifier::eligible,
-                            onReplyNotification = { target -> notificationScope.launch(Dispatchers.IO) { notifier.show(target) } },
+                            captureReplyNotification = { target, stillLive ->
+                                if (activationAvailable) notifier.capture(target, stillLive) else null
+                            },
                         ) {
                             DesktopAppearanceControls(
                                 appearance, onPreview = { appearance = it },
@@ -379,23 +396,13 @@ private fun runPrimaryWindow(
                     }
                     if (settingsOpen) {
                         DesktopModalGuard()
-                        DesktopShellSettingsDialog(settings, trayAvailable, onSave = { updated ->
-                            val oldKey = settings.hotkey.takeIf { settings.hotkeyEnabled }
-                            val newKey = updated.hotkey.takeIf { updated.hotkeyEnabled }
-                            val previousRegistration = registeredKey
-                            val changeRegistration = newKey != oldKey && newKey != previousRegistration
-                            val error = if (changeRegistration) hotkeys.change(newKey) else null
-                            if (error != null) error
-                            else try {
-                                if (changeRegistration) registeredKey = newKey
-                                settingsStore.save(updated)
-                                settings = updated
-                                null
-                            } catch (_: Exception) {
-                                val rollback = if (changeRegistration) hotkeys.change(previousRegistration) else null
-                                if (rollback == null) registeredKey = previousRegistration
-                                listOfNotNull("无法保存桌面设置。", rollback?.let { "恢复原快捷键失败：$it" }).joinToString(" ")
+                        DesktopShellSettingsDialog(settings, trayAvailable, hotkeys.registeredKey, onSave = { updated ->
+                            val registration = settings.registrationForSave(updated, hotkeys.registeredKey)
+                            val error = hotkeys.change(registration) {
+                                notifier.saveSettings(updated.notifyReplies) { settingsStore.save(updated) }
                             }
+                            if (error == null) settings = updated
+                            error
                         }, onDismiss = { settingsOpen = false })
                     }
                     shellError?.let { message ->

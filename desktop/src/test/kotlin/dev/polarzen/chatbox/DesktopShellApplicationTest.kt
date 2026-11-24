@@ -82,30 +82,135 @@ class DesktopShellApplicationTest {
     }
 
     @Test fun foregroundOrDisabledAtCompletionSkipsToastAndNativeSuppressionHasNoFallback() {
-        var enabled = true
         var foreground = true
         val target = ReplyDestination(SessionKey("profile", "session"), 2)
         val attempts = mutableListOf<ReplyDestination>()
-        val notifier = DesktopReplyNotifier({ enabled }, { foreground }) {
+        val notifier = DesktopReplyNotifier(true, { foreground }) {
             attempts.add(it)
             false // Windows suppresses delivery.
         }
         fun completed(answer: String): LiveReplyNotification {
-            val live = LiveReplyNotification { assertFalse(notifier.show(target)) }
-            live.complete(Entry("q", answer, "已完成"), persisted = true, notifier::eligible)
+            val live = LiveReplyNotification { assertFalse(it.show()) }
+            live.complete(Entry("q", answer, "已完成"), persisted = true) { notifier.capture(target) { true } }
             return live
         }
         completed("in foreground")
-        enabled = false
+        notifier.saveSettings(false) {}
         foreground = false
         completed("disabled")
         assertTrue(attempts.isEmpty())
-        enabled = true
+        notifier.saveSettings(true) {}
         val background = completed("")
         foreground = true
         background.initialAttachmentSaved()
         background.initialAttachmentSaved()
         assertEquals(listOf(target), attempts)
+    }
+
+    @Test fun oldImageAndAudioPermissionsAreRevokedOnlyByASavedDisable() {
+        val target = ReplyDestination(SessionKey("profile", "session"), 1)
+        for (type in listOf(ReplyAttachmentType.IMAGE, ReplyAttachmentType.AUDIO)) {
+            for (reenable in listOf(false, true)) {
+                for (saveFails in listOf(false, true)) {
+                    var foregroundChecks = 0
+                    var attempts = 0
+                    val notifier = DesktopReplyNotifier(true, { foregroundChecks++; false }) { attempts++; true }
+                    val live = LiveReplyNotification { it.show() }
+                    val media = Entry("question", "", "已完成", replyAttachments = listOf(ReplyAttachment("media", 0, type)))
+                    live.complete(media, true) { notifier.capture(target) { true } }
+                    if (saveFails) {
+                        assertThrows(java.io.IOException::class.java) {
+                            notifier.saveSettings(false) { throw java.io.IOException("read-only settings") }
+                        }
+                    } else notifier.saveSettings(false) {}
+                    if (reenable) notifier.saveSettings(true) {}
+                    live.initialAttachmentSaved()
+                    live.initialAttachmentSaved()
+                    assertEquals(1, foregroundChecks)
+                    assertEquals(if (saveFails) 1 else 0, attempts)
+                    if (reenable) assertTrue(checkNotNull(notifier.capture(target) { true }).show())
+                }
+            }
+        }
+    }
+
+    @Test fun queuedIoSubmissionChecksRevocationAndRequestLifetimeBeforeWindowsHandoff() {
+        val target = ReplyDestination(SessionKey("profile", "session"), 1)
+        val io = Executors.newSingleThreadExecutor()
+        try {
+            for (disable in listOf(false, true)) {
+                var live = true
+                val queued = CountDownLatch(1)
+                val proceed = CountDownLatch(1)
+                val notifier = DesktopReplyNotifier(true, { false }) { fail("Suppressed submission reached Windows"); false }
+                val permit = checkNotNull(notifier.capture(target) { live })
+                val sent = io.submit<Boolean> {
+                    queued.countDown()
+                    check(proceed.await(3, TimeUnit.SECONDS))
+                    permit.show()
+                }
+                try {
+                    assertTrue(queued.await(3, TimeUnit.SECONDS))
+                    if (disable) {
+                        notifier.saveSettings(false) {}
+                        notifier.saveSettings(true) {}
+                    } else live = false
+                } finally {
+                    proceed.countDown()
+                }
+                assertFalse(sent.get(3, TimeUnit.SECONDS))
+            }
+        } finally {
+            io.shutdownNow()
+        }
+    }
+
+    @Test fun settingsCannotCommitDuringWindowsHandoff() {
+        val windowsEntered = CountDownLatch(1)
+        val windowsReturn = CountDownLatch(1)
+        val saving = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(2)
+        val target = ReplyDestination(SessionKey("profile", "session"), 1)
+        val notifier = DesktopReplyNotifier(true, { false }) {
+            windowsEntered.countDown()
+            windowsReturn.await(3, TimeUnit.SECONDS)
+        }
+        val permit = checkNotNull(notifier.capture(target) { true })
+        try {
+            val sent = executor.submit<Boolean> { permit.show() }
+            assertTrue(windowsEntered.await(3, TimeUnit.SECONDS))
+            val saved = executor.submit {
+                saving.countDown()
+                notifier.saveSettings(false) { assertEquals(0L, windowsReturn.count) }
+            }
+            assertTrue(saving.await(3, TimeUnit.SECONDS))
+            assertThrows(java.util.concurrent.TimeoutException::class.java) { saved.get(100, TimeUnit.MILLISECONDS) }
+            windowsReturn.countDown()
+            assertTrue(sent.get(3, TimeUnit.SECONDS))
+            saved.get(3, TimeUnit.SECONDS)
+            assertNull(notifier.capture(target) { true })
+        } finally {
+            windowsReturn.countDown()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test fun savingOnlyNotificationAfterStartupConflictDoesNotRetryTheHotkeyButSavingAgainDoes() {
+        val current = DesktopShellSettings(hotkeyEnabled = true)
+        val updated = current.copy(notifyReplies = false)
+        val persisted = DesktopShellSettingsStore(temp.root.toPath())
+        val notifier = DesktopReplyNotifier(true, { false }) { true }
+        val permit = checkNotNull(notifier.capture(ReplyDestination(SessionKey("p", "s"), 0)) { true })
+        DesktopHotkeySettings {}.use { hotkeys ->
+            val key = current.registrationForSave(updated, hotkeys.registeredKey)
+            assertNull(key)
+            assertNull(hotkeys.change(key) { notifier.saveSettings(updated.notifyReplies) { persisted.save(updated) } })
+            assertEquals(updated, persisted.load())
+            assertFalse(permit.show())
+            assertEquals(updated.hotkey, updated.registrationForSave(updated, hotkeys.registeredKey))
+            val alternate = DesktopHotkey(3, 'K'.code)
+            assertEquals(alternate, updated.registrationForSave(updated.copy(hotkey = alternate), hotkeys.registeredKey))
+        }
     }
 
     @Test fun ownedModalSuppressesAndPinnedWindowLeavesTheOtherForegroundWindowActive() {
@@ -117,7 +222,7 @@ class DesktopShellApplicationTest {
         val otherWindow = DesktopTrayWindow(other, {}, {})
         val target = ReplyDestination(SessionKey("profile", "session"), 1)
         var attempts = 0
-        val notifier = DesktopReplyNotifier({ true }, tray::isForeground) { attempts++; false }
+        val notifier = DesktopReplyNotifier(true, tray::isForeground) { attempts++; false }
         val nativeForeground = if (com.sun.jna.Platform.isWindows()) {
             com.sun.jna.NativeLibrary.getInstance("user32").getFunction("GetForegroundWindow")
         } else null
@@ -151,12 +256,11 @@ class DesktopShellApplicationTest {
             assertTrue(tray.hasVisibleDialog())
             assertTrue(tray.isForeground())
             assertFalse(tray.isMainForeground())
-            assertFalse(notifier.eligible())
+            assertNull(notifier.capture(target) { true })
             EventQueue.invokeAndWait { owned.dispose(); otherWindow.foreground() }
             assumeTrue("The test window must obtain foreground", awaitActive(other))
             assertTrue(main.isAlwaysOnTop)
-            assertTrue(notifier.eligible())
-            assertFalse(notifier.show(target))
+            assertFalse(checkNotNull(notifier.capture(target) { true }).show())
             assertEquals(1, attempts)
             EventQueue.invokeAndWait { assertTrue("Pinned Chatbox took foreground", active(other)) }
         } finally {

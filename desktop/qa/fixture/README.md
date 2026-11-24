@@ -46,6 +46,14 @@ Pass `-VerifyMedia` to `Prepare-Fixture.ps1` to enable the Python 3 standard-lib
 
 Send `fixture:duration-pair` to receive one SSE response containing 8 seconds of mono audio and 65 seconds of stereo audio. Send `fixture:duration-edges` for 375 ms, 2.75 seconds with a RIFF metadata chunk, a corrupt WAV, and a missing WAV. Set `wav.repair.corrupt=true` and `wav.repair.missing=true` in the run's private controls file, then use the client's retry actions. The same attachment IDs will return 3.5 and 4.5 seconds of valid audio.
 
+For notification timing, send `fixture:delay-before-first-event fixture:gate-image:b01` or `fixture:delay-before-first-event fixture:gate-wav:b02`. Each response has a fresh attachment ID and ends the SSE stream immediately after the media events. The existing first-event delay gives the tester time to switch windows before completion. Use a fresh case name (1–32 ASCII letters, digits, underscores or hyphens) for each test.
+
+Wait for the history row to show completion and for `private\gate-b01.started` to appear in this fixture run. The file contains the attachment ID from the first GET. Change and save the desktop settings, return to the intended foreground application, then release the download:
+
+    New-Item -ItemType File -Path (Join-Path $runRoot 'private\gate-b01.release')
+
+To exercise manual retry, create `gate-b01.fail` instead of the release file. This ends the first HTTP 200 with an incomplete payload. The next GET for that ID returns the full PNG or two-second PCM WAV immediately. The first GET times out with the same incomplete payload after two minutes. While waiting, it streams one byte every five seconds so the client can keep its connection open.
+
 The private `controls.properties` file also supports focused send and upload cases. The two chat timing markers are included in the synthetic prompt, while the milliseconds can be adjusted in the control file:
 
 - `fixture:delay-before-headers` waits `chat.delay.before.headers.ms` (default 1500) before returning SSE headers.

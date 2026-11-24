@@ -4,6 +4,7 @@ import com.sun.jna.Platform
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.fail
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 
@@ -47,6 +48,41 @@ class DesktopHotkeyTest {
                 assertNull(other.change(first))
             }
             assertNull(owner.change(first))
+        }
+    }
+
+    @Test(timeout = 15000)
+    fun settingsKeepOldShortcutReservedThroughSaveAndReleaseUncommittedShortcut() {
+        assumeTrue(Platform.isWindows())
+        val old = requireNotNull(DesktopHotkey.parse("Ctrl+Alt+Shift+F23"))
+        val next = requireNotNull(DesktopHotkey.parse("Ctrl+Alt+Shift+F24"))
+        DesktopHotkeySettings {}.use { settings ->
+            WindowsHotkeys {}.use { external ->
+                assertNull(external.change(old))
+                assertNotNull(settings.change(old) { fail("Cannot save a conflicting binding") })
+                assertNull(settings.registeredKey)
+                assertNull(external.change(null))
+                assertNull(settings.change(old))
+
+                for (requested in listOf(next, null)) {
+                    assertNotNull(settings.change(requested) {
+                        assertNotNull(external.change(old))
+                        throw java.io.IOException("Read-only settings")
+                    })
+                    assertEquals(old, settings.registeredKey)
+                    assertNotNull(external.change(old))
+                    assertNull(external.change(next))
+                    assertNull(external.change(null))
+                }
+
+                assertNull(settings.change(next) { assertNotNull(external.change(old)) })
+                assertEquals(next, settings.registeredKey)
+                assertNull(external.change(old))
+                assertNotNull(external.change(next))
+                assertNull(settings.change(null))
+                assertNull(settings.registeredKey)
+                assertNull(external.change(next))
+            }
         }
     }
 }
