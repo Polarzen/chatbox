@@ -40,7 +40,24 @@ internal data class SharedTurn(val seq: Long, val id: String, val question: Stri
     }
 }
 
-internal data class SharedPage(val turns: List<SharedTurn>, val more: Boolean)
+internal data class SharedPage(val turns: List<SharedTurn>, val more: Boolean) {
+    companion object {
+        fun read(value: JSONObject, after: Long): SharedPage {
+            val rows = value.getJSONArray("turns")
+            val turns = ArrayList<SharedTurn>(rows.length())
+            var previous = 0L
+            for (i in 0 until rows.length()) {
+                val row = SharedTurn.read(rows.getJSONObject(i))
+                require(row.seq >= previous)
+                previous = row.seq
+                if (row.seq > after) turns.add(row)
+            }
+            val more = value.getBoolean("more")
+            require(!more || turns.isNotEmpty())
+            return SharedPage(turns, more)
+        }
+    }
+}
 
 internal class SharedChatTransport(private val allowLoopback: Boolean) {
     suspend fun connect(address: String, code: String, seed: SharedSeed?): SharedBinding {
@@ -60,18 +77,7 @@ internal class SharedChatTransport(private val allowLoopback: Boolean) {
 
     suspend fun page(binding: SharedBinding, after: Long): SharedPage {
         val value = request(binding.address, "turns?after=$after&limit=50", binding.token)
-        val rows = value.getJSONArray("turns")
-        val turns = ArrayList<SharedTurn>(rows.length())
-        var previous = 0L
-        for (i in 0 until rows.length()) {
-            val row = SharedTurn.read(rows.getJSONObject(i))
-            require(row.seq >= previous)
-            previous = row.seq
-            if (row.seq > after) turns.add(row)
-        }
-        val more = value.getBoolean("more")
-        require(!more || turns.isNotEmpty())
-        return SharedPage(turns, more)
+        return SharedPage.read(value, after)
     }
 
     suspend fun turn(binding: SharedBinding, id: String): SharedTurn {
@@ -86,7 +92,7 @@ internal class SharedChatTransport(private val allowLoopback: Boolean) {
     suspend fun manage(binding: SharedBinding, path: String): JSONObject =
         request(binding.address, path, binding.token, JSONObject())
 
-    private suspend fun request(address: String, path: String, token: String?, body: JSONObject? = null): JSONObject =
+    internal suspend fun request(address: String, path: String, token: String?, body: JSONObject? = null): JSONObject =
         withContext(Dispatchers.IO) {
             val uri = URI(sharedAddress(address, allowLoopback) + "/v1/" + path)
             val url = uri.toURL()

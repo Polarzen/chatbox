@@ -42,7 +42,7 @@ if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
         from(toastDll) { into("win32-x86-64") }
     }
 }
-val windowsPackageVersion = "0.1.17"
+val windowsPackageVersion = "0.1.18"
 compose.desktop {
     application {
         mainClass = "dev.polarzen.chatbox.DesktopMainKt"
