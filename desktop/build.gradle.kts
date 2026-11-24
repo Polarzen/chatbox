@@ -29,17 +29,18 @@ dependencies {
 if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
     val nativeDir = layout.buildDirectory.dir("native/reply-toast")
     val toastDll = nativeDir.map { it.file("chatbox_toast.dll") }
+    val heartExe = nativeDir.map { it.file("chatbox_heart.exe") }
     val nativeSource = layout.projectDirectory.dir("native")
     val buildReplyToast by tasks.registering(Exec::class) {
-        inputs.files(nativeSource.file("reply-toast.cpp"), nativeSource.file("build-toast.cmd"))
-        outputs.file(toastDll)
+        inputs.files(nativeSource.asFileTree.matching { include("*.cpp", "*.h", "build-toast.cmd") })
+        outputs.files(toastDll, heartExe)
         workingDir(nativeDir.get().asFile)
         doFirst { workingDir.mkdirs() }
         commandLine("cmd.exe", "/d", "/c", "call", nativeSource.file("build-toast.cmd").asFile.absolutePath)
     }
     tasks.processResources {
         dependsOn(buildReplyToast)
-        from(toastDll) { into("win32-x86-64") }
+        from(toastDll, heartExe) { into("win32-x86-64") }
     }
 }
 val windowsPackageVersion = "0.1.15"

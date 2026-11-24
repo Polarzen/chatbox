@@ -9,4 +9,6 @@ if not defined vsdir (
 )
 call "%vsdir%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
 cl /nologo /LD /MT /O2 /EHsc /std:c++20 /utf-8 "%~dp0reply-toast.cpp" /link /OUT:chatbox_toast.dll windowsapp.lib
+if errorlevel 1 exit /b %errorlevel%
+cl /nologo /MT /O2 /EHsc /std:c++20 /utf-8 "%~dp0heart-rate.cpp" /link /OUT:chatbox_heart.exe windowsapp.lib
 exit /b %errorlevel%

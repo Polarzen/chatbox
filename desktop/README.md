@@ -2,6 +2,10 @@
 
 Windows 桌面版使用 AstrBot OpenAPI 收发文字和图片，也可播放服务端返回的 WAV 语音附件。每个服务配置可以保留多个会话，桌面端和 Android 各自保存本机历史。
 
+## 开发分支 · 手环心率
+
+在手环上开启心率广播，打开 Chatbox 顶栏的「心率」，点击「扫描设备」并选择附近的设备。当前仅发现广播标准 BLE Heart Rate Service 的设备。关闭面板后仍可在顶栏看到 BPM；点击「停止」可断开连接。停止佩戴或读数中断时会清除旧读数，重新连接可再次扫描。心率只在本机内存中显示。此功能需要从分支构建 Windows 客户端，小米手环 9 的实机兼容性待验证。
+
 ## 安装与构建
 
 Windows 0.1.15 安装包为 `Chatbox-0.1.15.msi`。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.15/Chatbox-0.1.15.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.15/SHA256SUMS.txt) · [v0.1.15 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.15)

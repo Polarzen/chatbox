@@ -789,6 +789,7 @@ internal fun DesktopScreen(
             },
             canCreate = canCreate,
             topActions = {
+                HeartRateControl()
                 IconButton(
                     onClick = { searchOpen = true },
                     modifier = Modifier.size(36.dp).testTag("history-search-open"),
