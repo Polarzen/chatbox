@@ -10,17 +10,27 @@ import androidx.compose.material.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.produceIn
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
-private data class HeartDevice(val address: String, val type: String, val name: String) {
-    val label get() = "${name.ifBlank { "心率设备" }} · ${address.toLong().toString(16).takeLast(6).uppercase()}"
+internal data class HeartDevice(val address: String, val type: String, val name: String) {
+    val label: String get() {
+        val mac = address.toLong().toString(16).padStart(12, '0').uppercase().chunked(2).joinToString(":")
+        return "${name.ifBlank { "心率设备" }} · $mac（${if (type == "R") "随机地址" else "公共地址"}）"
+    }
 }
 
 private object HeartReader {
@@ -34,110 +44,209 @@ private object HeartReader {
     }
 }
 
-private fun heartEvents(device: HeartDevice?) = flow {
+private fun heartEvents(device: HeartDevice?): Flow<String> = heartProcessLines {
     val args = if (device == null) listOf("scan") else listOf("connect", device.address, device.type)
-    val process = ProcessBuilder(listOf(HeartReader.executable) + args).start()
+    ProcessBuilder(listOf(HeartReader.executable) + args).start()
+}
+
+internal fun heartProcessLines(start: () -> Process): Flow<String> = channelFlow {
+    val process = start()
     try {
-        val reader = process.inputStream.bufferedReader(Charsets.UTF_8)
-        var lastEvent = System.nanoTime()
-        var streaming = false
-        while (true) {
-            if (reader.ready() || !process.isAlive) {
-                val event = reader.readLine() ?: break
-                if (event == "SUBSCRIBED" || event.startsWith("BPM\t") || event == "NO_READING") {
-                    streaming = true
-                    lastEvent = System.nanoTime()
+        // The owner can terminate the process even when the reader is blocked on a partial line.
+        val reader = launch {
+            try {
+                process.inputStream.bufferedReader(Charsets.UTF_8).use {
+                    while (true) send(it.readLine() ?: break)
                 }
-                emit(event)
-            } else {
-                val limit = if (streaming) 10_000_000_000L else 30_000_000_000L
-                if (System.nanoTime() - lastEvent > limit) {
-                    emit("TIMEOUT")
-                    return@flow
-                }
-                delay(100)
+                if (process.waitFor() != 0) send("ERROR\tREADER")
+            } catch (error: IOException) {
+                ensureActive()
+                throw error
             }
         }
-        check(process.waitFor() == 0)
+        reader.join()
     } finally {
-        process.destroyForcibly()
-        process.inputStream.close()
-        process.outputStream.close()
-        process.errorStream.close()
+        try {
+            try {
+                process.outputStream.close()
+            } finally {
+                if (!process.waitFor(750, TimeUnit.MILLISECONDS)) process.destroyForcibly().waitFor()
+            }
+        } finally {
+            process.inputStream.close()
+            process.errorStream.close()
+        }
     }
 }.flowOn(Dispatchers.IO)
 
-@Composable
-internal fun HeartRateControl() {
-    if (!System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) return
-    var open by remember { mutableStateOf(false) }
-    var scanning by remember { mutableStateOf(false) }
-    var target by remember { mutableStateOf<HeartDevice?>(null) }
-    val devices = remember { mutableStateListOf<HeartDevice>() }
-    var status by remember { mutableStateOf("请在手环上开启心率广播。") }
-    var bpm by remember { mutableStateOf<Int?>(null) }
+// Each start has its own identity, including reconnects to the same device.
+internal class HeartRun(val device: HeartDevice?)
 
-    LaunchedEffect(scanning, target) {
-        val selected = target
-        if (!scanning && selected == null) return@LaunchedEffect
-        var timeout = false
+private enum class HeartPhase { CONNECTING, WAITING_FOR_PACKET, RECEIVING }
+
+internal class HeartRateState(private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 }) {
+    var active by mutableStateOf<HeartRun?>(null)
+        private set
+    var selected by mutableStateOf<HeartDevice?>(null)
+        private set
+    val devices = mutableStateListOf<HeartDevice>()
+    var status by mutableStateOf("请在手环上开启心率广播。")
+        private set
+    var bpm by mutableStateOf<Int?>(null)
+        private set
+
+    fun start(device: HeartDevice?) {
+        if (device == null) {
+            devices.clear()
+            status = "正在扫描附近的心率广播…"
+        } else {
+            selected = device
+            status = "正在连接 ${device.label}…"
+        }
+        bpm = null
+        active = HeartRun(device)
+    }
+
+    fun stop() {
+        active = null
+        bpm = null
+        status = "已停止。"
+    }
+
+    private fun finish(run: HeartRun, message: String) {
+        if (active !== run) return
+        bpm = null
+        status = message
+        active = null
+    }
+
+    private fun recordDevice(parts: List<String>) {
+        if (parts.size != 4 || (parts[1].toLongOrNull() ?: -1) !in 0L..0xffffffffffffL || parts[2] !in listOf("P", "R")) return
+        val device = HeartDevice(parts[1], parts[2], parts[3])
+        val index = devices.indexOfFirst { it.address == device.address && it.type == device.type }
+        if (index < 0) {
+            devices.add(device)
+        } else if (device.name.isNotBlank()) {
+            devices[index] = device
+        }
+        if (device.name.isNotBlank() && selected?.address == device.address && selected?.type == device.type) {
+            selected = device
+        }
+    }
+
+    private fun errorMessage(code: String?, scanning: Boolean) = when (code) {
+        "RADIO" -> "蓝牙不可用，请开启电脑蓝牙并检查蓝牙适配器。"
+        "SCAN" -> "扫描失败，请检查电脑蓝牙后重新扫描。"
+        "DEVICE" -> "无法连接设备，请靠近手环并确认心率广播已开启。"
+        "SERVICE" -> "无法访问心率服务，请确认手环已开启标准蓝牙心率广播。"
+        "CHARACTERISTIC" -> "无法读取心率测量特征，请确认设备支持标准心率广播。"
+        "SUBSCRIBE" -> "无法订阅心率通知，请断开其他连接手环的应用后重试。"
+        else -> if (scanning) "扫描失败，请检查电脑蓝牙。" else "连接失败，请检查心率广播后重新连接。"
+    }
+
+    suspend fun read(run: HeartRun, events: Flow<String>) {
+        if (active !== run) return
+        val scanning = run.device == null
+        var phase = HeartPhase.CONNECTING
+        var deadline = nowMs() + 30_000
         try {
-            heartEvents(selected).collect { event ->
-                val parts = event.split('\t', limit = 4)
-                when (parts.first()) {
-                    "DEVICE" -> if (parts.size == 4 && parts[1].toLongOrNull() != null) {
-                        devices.add(HeartDevice(parts[1], parts[2], parts[3]))
+            coroutineScope {
+                val lines = events.produceIn(this)
+                try {
+                    while (active === run) {
+                        val result = withTimeoutOrNull(deadline - nowMs()) { lines.receiveCatching() }
+                        if (active !== run) break
+                        if (result == null) {
+                            val message = when {
+                                scanning -> "扫描超时，请检查电脑蓝牙后重新扫描。"
+                                phase == HeartPhase.CONNECTING -> "连接超时，请靠近手环并检查心率广播后重新连接。"
+                                phase == HeartPhase.WAITING_FOR_PACKET -> "未收到首个心率读数，请检查手环佩戴和广播后重新连接。"
+                                else -> "心率数据已中断，请检查手环距离和佩戴状态后重新连接。"
+                            }
+                            finish(run, message)
+                            break
+                        }
+                        result.exceptionOrNull()?.let { throw it }
+                        val event = result.getOrNull()
+                        if (event == null) {
+                            val message = when {
+                                !scanning -> "设备已断开，请检查手环后重新连接。"
+                                devices.isEmpty() -> "未发现心率广播，请检查手环和电脑蓝牙。"
+                                else -> "请选择心率设备。"
+                            }
+                            finish(run, message)
+                            break
+                        }
+                        val parts = event.split('\t', limit = 4)
+                        when (parts.first()) {
+                            "DEVICE" -> if (scanning) recordDevice(parts)
+                            "ERROR" -> finish(run, errorMessage(parts.getOrNull(1), scanning))
+                            "DISCONNECTED" -> finish(run, "设备已断开，请检查手环后重新连接。")
+                            "SUBSCRIBED" -> if (!scanning && phase == HeartPhase.CONNECTING) {
+                                phase = HeartPhase.WAITING_FOR_PACKET
+                                deadline = nowMs() + 10_000
+                                status = "已订阅心率通知，等待首个读数…"
+                            }
+                            "BPM", "NO_READING" -> if (!scanning) {
+                                phase = HeartPhase.RECEIVING
+                                deadline = nowMs() + 10_000
+                                bpm = if (parts.first() == "BPM") {
+                                    parts.getOrNull(1)?.toIntOrNull()?.takeIf { it in 1..65535 }
+                                } else null
+                                status = if (bpm == null) "暂无有效读数，请检查佩戴状态。" else "实时心率"
+                            }
+                        }
                     }
-                    "SUBSCRIBED" -> status = "已连接，等待读数。"
-                    "NO_READING" -> { bpm = null; status = "暂无有效读数，请检查佩戴状态。" }
-                    "BPM" -> { bpm = parts.getOrNull(1)?.toIntOrNull(); status = "实时心率" }
-                    "TIMEOUT" -> timeout = true
+                } finally {
+                    lines.cancel()
                 }
-            }
-            status = when {
-                timeout -> "长时间未收到数据，请重新扫描连接。"
-                devices.isEmpty() -> "未发现心率广播，请检查手环和电脑蓝牙。"
-                else -> "请选择心率设备。"
             }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (_: Exception) {
-            status = if (selected == null) "扫描失败，请检查电脑蓝牙。" else "设备已断开或连接失败，请重新扫描。"
+            finish(run, errorMessage(null, scanning))
         }
-        bpm = null
-        scanning = false
-        target = null
+    }
+}
+
+@Composable
+internal fun HeartRateControl() {
+    if (!System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) return
+    HeartRatePanel(remember { HeartRateState() }, ::heartEvents)
+}
+
+@Composable
+internal fun HeartRatePanel(state: HeartRateState, events: (HeartDevice?) -> Flow<String>) {
+    var open by remember { mutableStateOf(false) }
+    LaunchedEffect(state) {
+        snapshotFlow { state.active }.collectLatest { run ->
+            if (run != null) state.read(run, events(run.device))
+        }
     }
 
-    TextButton(onClick = { open = true }) { Text(bpm?.let { "♥ $it" } ?: "心率") }
+    TextButton(onClick = { open = true }) { Text(state.bpm?.let { "♥ $it" } ?: "心率") }
     if (open) AlertDialog(
         onDismissRequest = { open = false },
         title = { Text("手环心率") },
         text = {
             Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
-                Text(bpm?.let { "$it BPM" } ?: status)
-                if (target == null && !scanning) devices.forEach { device ->
-                    TextButton(onClick = {
-                        status = "正在连接…"
-                        target = device
-                    }) { Text(device.label) }
+                Text(state.bpm?.let { "$it BPM" } ?: state.status)
+                if (state.active == null) {
+                    state.selected?.let { device ->
+                        TextButton(onClick = { state.start(device) }) { Text("重新连接 ${device.label}") }
+                    }
+                    state.devices.forEach { device ->
+                        if (device.address != state.selected?.address || device.type != state.selected?.type) {
+                            TextButton(onClick = { state.start(device) }) { Text(device.label) }
+                        }
+                    }
                 }
             }
         },
         confirmButton = {
             TextButton(onClick = {
-                if (scanning || target != null) {
-                    scanning = false
-                    target = null
-                    bpm = null
-                    status = "已停止。"
-                    devices.clear()
-                } else {
-                    devices.clear()
-                    status = "正在扫描附近的心率广播…"
-                    scanning = true
-                }
-            }) { Text(if (scanning || target != null) "停止" else "扫描设备") }
+                if (state.active != null) state.stop() else state.start(null)
+            }) { Text(if (state.active != null) "停止" else "扫描设备") }
         },
         dismissButton = { TextButton(onClick = { open = false }) { Text("关闭面板") } }
     )

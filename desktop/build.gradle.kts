@@ -40,7 +40,7 @@ if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
     }
     tasks.processResources {
         dependsOn(buildReplyToast)
-        from(toastDll, heartExe) { into("win32-x86-64") }
+        from(files(toastDll, heartExe)) { into("win32-x86-64") }
     }
 }
 val windowsPackageVersion = "0.1.15"

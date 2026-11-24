@@ -1,7 +1,9 @@
 package dev.polarzen.chatbox
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
@@ -10,6 +12,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -19,6 +22,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -27,7 +31,7 @@ class DesktopResponsiveHeaderTest {
     @get:Rule val ui = createComposeRule()
     @get:Rule val files = TemporaryFolder()
 
-    private fun render(initialWidth: Dp, density: Density) = mutableStateOf(initialWidth).also { width ->
+    private fun render(initialWidth: Dp, density: Density, height: Dp = 600.dp) = mutableStateOf(initialWidth).also { width ->
         val dir = files.root.toPath()
         val store = DesktopStore(dir.resolve("history.json"))
         val keys = NamedKeys(dir, DesktopCredentials(dir.resolve("credentials")))
@@ -35,10 +39,12 @@ class DesktopResponsiveHeaderTest {
         val appearance = mutableStateOf(DesktopAppearance())
         ui.setContent {
             CompositionLocalProvider(LocalDensity provides density) {
-                Box(Modifier.requiredSize(width.value, 600.dp)) {
+                Box(Modifier.requiredSize(width.value, height)) {
                     DesktopTheme(appearance.value.dark) {
                         DesktopScreen(store, keys, cache, appearanceActions = {
                             DesktopAppearanceControls(appearance.value, { appearance.value = it }, { appearance.value = it })
+                            // The desktop shell supplies a 36 dp menu button after the appearance controls.
+                            Spacer(Modifier.width(36.dp))
                         })
                     }
                 }
@@ -67,6 +73,37 @@ class DesktopResponsiveHeaderTest {
             assertEquals(draft, ui.onNodeWithTag("composer-field").fetchSemanticsNode()
                 .config[SemanticsProperties.EditableText].text)
         }
+    }
+
+    @Test
+    fun heartPanelSurvivesResizingFromMinimumWidthAndComposerRemainsEditable() {
+        assumeTrue(System.getProperty("os.name").startsWith("Windows", ignoreCase = true))
+        // The focused composer keeps scheduling caret frames while the panel is open.
+        ui.mainClock.autoAdvance = false
+        val width = render(480.dp, Density(1f), height = 400.dp)
+        ui.mainClock.advanceTimeByFrame()
+        assertHeader(compact = true)
+        ui.onNodeWithContentDescription("展开密钥菜单", useUnmergedTree = true).assertIsDisplayed()
+        ui.onNodeWithTag("composer-field").performTextInput("Before")
+        ui.mainClock.advanceTimeByFrame()
+        val heart = ui.onNodeWithText("心率").assertIsDisplayed()
+        val heartBounds = heart.fetchSemanticsNode().boundsInRoot
+        val firstAction = ui.onNodeWithTag("history-search-open").fetchSemanticsNode().boundsInRoot
+        assertTrue(heartBounds.width > 0 && heartBounds.right <= firstAction.left)
+        heart.performClick()
+        ui.mainClock.advanceTimeBy(200)
+        for (windowWidth in listOf(640.dp, 480.dp)) {
+            ui.runOnIdle { width.value = windowWidth }
+            ui.mainClock.advanceTimeByFrame()
+            assertHeader(compact = windowWidth == 480.dp)
+            ui.onNodeWithText("手环心率").assertIsDisplayed()
+        }
+        ui.onNodeWithText("关闭面板").performClick()
+        ui.mainClock.advanceTimeBy(200)
+        ui.onNodeWithTag("composer-field").performTextInput(" after")
+        ui.mainClock.advanceTimeByFrame()
+        assertEquals("Before after", ui.onNodeWithTag("composer-field").fetchSemanticsNode()
+            .config[SemanticsProperties.EditableText].text)
     }
 
     @Test
