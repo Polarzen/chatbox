@@ -72,7 +72,7 @@ class MainActivity : ComponentActivity() {
                     bars.isAppearanceLightStatusBars = !dark
                     bars.isAppearanceLightNavigationBars = !dark
                 }
-                Screen()
+                key(chatGeneration) { Screen() }
             }
         }
     }
@@ -191,7 +191,7 @@ class MainActivity : ComponentActivity() {
         val session = history.selected(base)
         val storage = remember(base, session.id) { app.storage(session) }
         val busy = app.delivery.busy(base, session.id)
-        val screens = key(chatGeneration) { rememberSaveableStateHolder() }
+        val screens = rememberSaveableStateHolder()
         val closePage = { page = ChatPage.CHAT }
         BackHandler(page != ChatPage.CHAT, onBack = closePage)
         fun send(draft: MobileDraft? = null) {
