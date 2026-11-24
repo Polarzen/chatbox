@@ -30,6 +30,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,9 +40,16 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
-internal fun SharedChatPanel(seed: SharedSeed, storage: SharedLocalStorage, allowLoopback: Boolean, onClose: () -> Unit) {
+internal fun SharedChatPanel(
+    seed: SharedSeed,
+    storage: SharedLocalStorage,
+    allowLoopback: Boolean,
+    decorateQuestion: (String) -> String = { it },
+    onClose: () -> Unit,
+) {
     key(storage, seed.sourceBase, seed.username, seed.session, allowLoopback) {
-        val state = remember { SharedChatState(storage, allowLoopback) }
+        val decorate by rememberUpdatedState(decorateQuestion)
+        val state = remember { SharedChatState(storage, allowLoopback) { decorate(it) } }
         val scope = rememberCoroutineScope()
         val binding = state.local.binding
         LaunchedEffect(binding) {
@@ -200,11 +208,30 @@ private fun SharedRoom(state: SharedChatState, binding: SharedBinding, onClose: 
 private fun SharedMessages(question: String, answer: String, status: String?) {
     Column(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Text("提问", style = MaterialTheme.typography.caption, color = MaterialTheme.colors.primary)
-        SelectionContainer { Text(question) }
+        SharedMessageBody(question)
         Text("回复", style = MaterialTheme.typography.caption, color = MaterialTheme.colors.primary)
-        if (answer.isNotEmpty()) SelectionContainer { Text(answer) }
+        if (answer.isNotEmpty()) SharedMessageBody(answer)
         if (status != null) Text(status, style = MaterialTheme.typography.caption)
         Divider(Modifier.padding(top = 6.dp))
+    }
+}
+
+// The protocol carries inline text for both imported media and new bridge replies.
+private val sharedHint = Regex("""\[(?:图片|语音|文件)附件]|〔(?:图片|语音|附件(?:：[^〕\r\n]*)?)〕""")
+private val namedHint = Regex("""〔附件：([^〕\r\n]*)〕""")
+
+@Composable
+private fun SharedMessageBody(text: String) {
+    val display = remember(text) {
+        namedHint.replace(text) { match ->
+            val name = match.groupValues[1]
+            if ('/' in name || '\\' in name) "〔附件〕" else match.value
+        }
+    }
+    SelectionContainer { Text(display) }
+    // Android imports that already say “仅原设备可用” carry their own availability label.
+    if (remember(display) { sharedHint.containsMatchIn(display) }) {
+        Text("共享记录仅含附件提示，无法在此打开文件。", style = MaterialTheme.typography.caption)
     }
 }
 

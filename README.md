@@ -50,31 +50,26 @@ Windows 0.1.15 安装包为 `Chatbox-0.1.15.msi`。[下载 MSI](https://github.c
 
 0.1.7 发布时，托管 Windows 已验证从 0.1.5 原目录升级，日常机器已验证从 0.1.6 原目录升级。安装版现场验收覆盖会话列表、冷启动恢复和资源管理器混合拖放。[0.1.7 验收记录](docs/WINDOWS_017_RELEASE_ACCEPTANCE.md) · [0.1.5 历史发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.5)
 
-以下为 Kotlin + Jetpack Compose 实现的 Android 首版原型，仍待真实手机与服务端联合验收。
+## Android 0.1.17 候选版
 
-## Android 客户端范围
+Android 8.0 及以上可安装。手机从「连接设置」添加可信 HTTPS 服务、命名密钥并验证。会话、草稿和下载的附件保存在应用私有空间，命名密钥由 Android Keystore 保护。首次启动会迁移旧单会话记录。竖屏点会话按钮打开「最近对话」；在聊天页可搜索、选图和录音。
 
-在支持本功能的分支测试版里，手机可通过蓝牙直连手环。佩戴手环、开启心率广播，在聊天页点击「心率」→「扫描设备」，按系统提示授予蓝牙扫描权限，然后选择手环。在 Android 11 及更早版本上，蓝牙扫描需要位置权限。手机收到 BPM 后可以关闭面板继续聊天，全程无需电脑。
+手机直连 AstrBot 时，文字需要 `chat` 权限，收发附件还需要 `file` 权限。共享房间通过个人共享服务接续文字与历史附件提示，安装与配对方式见[跨端指南](docs/SHARED_CHAT_GUIDE.md)。本地 Launcher 的 WhaleTask 命令使用 Windows 端登录入口。
+
+### 手环心率
+
+手机可通过蓝牙直连手环。佩戴手环、开启心率广播，在聊天页点击「心率」→「扫描设备」，按系统提示授予蓝牙扫描权限，然后选择手环。在 Android 11 及更早版本上，蓝牙扫描需要位置权限。手机收到 BPM 后可以关闭面板继续聊天，全程无需电脑。
 
 连接期间，发送普通消息或重发时，Chatbox 会把最近 10 秒内的最新心率和接收时间自动发给当前 AstrBot。仅佩戴手环不会触发网络请求。点击「停止」即可停止读取；断线或读数过期后，后续消息只发送原文。已经随消息发出的心率可能保存在服务端会话或助手的回复中。
 
-- 中文单会话界面，逐步显示文字回复；同一服务地址复用同一会话 ID。
-- 手机本地保存聊天记录，关闭应用后可继续。暂不拉取服务端历史，也不会自动迁移 QQ 历史。
-- 连接故障会提示，且不会自动重发。手动重发需要确认，因为上一条消息可能已到达服务器。
-- 使用 AstrBot 官方 OpenAPI `POST /api/v1/chat`，按 v4.29.4 上游结构处理文字 SSE，跳过工具内部及推理事件。语音、通知、多个会话和 Codex 审批留待后续。
+### 构建
 
-## Android 构建与配置
+使用 JDK 17、Android SDK Platform 35 和相应 Build Tools，在仓库根目录执行以下命令。
 
-使用 JDK 17 或 21、Android SDK Platform 35、Build Tools 35.0.0。运行：
+```powershell
+.\gradlew.bat :app:testDebugUnitTest :app:assembleDebug
+```
 
-    ./gradlew testDebugUnitTest assembleDebug
+Android 调试安装包位于 `app/build/outputs/apk/debug/app-debug.apk`。安装、覆盖升级、测试账户和现场验收见[0.1.17 初验说明](docs/ANDROID_PARITY_QA.md)。
 
-Windows 下用 `gradlew.bat`。如果构建通过，调试包位于 `app/build/outputs/apk/debug/app-debug.apk`。
-
-1. 在 AstrBot WebUI 的 OpenAPI 设置中创建仅含聊天权限的 Key，不授予管理员权限。
-2. 打开 Chatbox，输入手机可访问且证书受信任的 HTTPS 服务地址和 Key。Key 只保留在当前界面内存，关闭重开后需重输。模型密钥仍留在服务端。
-3. 发送一条文字并确认实时回复。关闭并重新打开应用、重输 Key，再验证是否能继续原会话。应单独验收「小鲸鱼」人格是否随服务器当前配置生效，不预设 QQ 人格或插件规则会自动适用。
-
-聊天记录存于手机应用私有空间，未另行加密，并禁用 Android 备份。不要提交真实聊天记录、令牌或含隐私的日志；不建议为了测试直接暴露 AstrBot 管理面板。
-
-[官方 HTTP API](https://docs.astrbot.app/dev/openapi.html) · [v4.29.4 服务端事件实现](https://github.com/AstrBotDevs/AstrBot/blob/v4.29.4/astrbot/dashboard/services/chat_service.py)
+[官方 HTTP API](https://docs.astrbot.app/dev/openapi.html)

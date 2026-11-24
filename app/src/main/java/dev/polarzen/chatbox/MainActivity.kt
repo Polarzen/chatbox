@@ -1,78 +1,247 @@
 package dev.polarzen.chatbox
 
+import android.Manifest
+import android.app.NotificationManager
+import android.content.ContentResolver
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Process
 import android.os.SystemClock
+import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.ui.Alignment
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import org.json.JSONArray
-import org.json.JSONObject
-import java.util.UUID
-import java.util.concurrent.Executors
+
+private enum class ChatPage { CHAT, CONNECTIONS, APPEARANCE, SHARED }
 
 class MainActivity : ComponentActivity() {
-    private companion object { val transcriptLock = Any() }
-    private val executor = Executors.newSingleThreadExecutor()
-    private val live = LiveHeartRate(monotonicNanos = SystemClock::elapsedRealtimeNanos)
-    private lateinit var heartRateReceiver: AndroidHeartRate
-    private val prefs by lazy { getSharedPreferences("personal_chat", MODE_PRIVATE) }
-    private val user by lazy {
-        prefs.getString("user", null) ?: ("chatbox_" + UUID.randomUUID().toString().replace("-", "")).also {
-            check(prefs.edit().putString("user", it).commit())
-        }
+    private lateinit var app: AndroidAppState
+    private lateinit var heart: AndroidHeartRate
+    private var page by mutableStateOf(ChatPage.CHAT)
+    private var heartOpen by mutableStateOf(false)
+    private var images by mutableStateOf<List<Uri>>(emptyList())
+    private var jumpTurn by mutableStateOf<String?>(null)
+    private var chatGeneration by mutableIntStateOf(0)
+    private var notificationsAllowed by mutableStateOf(false)
+    private val permission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        updateSystemNotifications()
     }
-    private data class Line(val question: String, val answer: String, val state: String)
-    private data class Transcript(val session: String, val lines: List<Line>)
-    private fun read(base: String): Transcript {
-        val entry = runCatching { JSONObject(prefs.getString("chat:$base", "{}") ?: "{}") }.getOrElse { JSONObject() }
-        val rows = entry.optJSONArray("lines") ?: JSONArray()
-        return Transcript(entry.optString("session").ifBlank { UUID.randomUUID().toString() },
-            (0 until rows.length()).mapNotNull { rows.optJSONObject(it) }.map {
-                val state = it.optString("state")
-                Line(it.optString("question"), it.optString("answer"), if (state == "发送中") "上次回复未确认" else state)
-            })
-    }
-    private fun encode(session: String, lines: List<Line>): String {
-        val rows = JSONArray()
-        lines.forEach { rows.put(JSONObject().put("question", it.question).put("answer", it.answer).put("state", it.state)) }
-        return JSONObject().put("session", session).put("lines", rows).toString()
-    }
-    private fun write(base: String, session: String, lines: List<Line>, expected: String? = null): Boolean =
-        synchronized(transcriptLock) {
-            if (expected != null && prefs.getString("chat:$base", null) != expected) return@synchronized false
-            val edit = prefs.edit().putString("chat:$base", encode(session, lines))
-            if (expected == null) edit.putString("base", base)
-            edit.commit()
-        }
+
+    @Suppress("DEPRECATION")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        heartRateReceiver = AndroidHeartRate(this, live)
-        setContent { MaterialTheme { Screen() } }
+        enableEdgeToEdge()
+        app = AndroidAppState.get(this)
+        heart = lastCustomNonConfigurationInstance as? AndroidHeartRate
+            ?: AndroidHeartRate(this, LiveHeartRate(monotonicNanos = SystemClock::elapsedRealtimeNanos))
+        if (savedInstanceState == null) {
+            if (app.storage(app.history.selected(app.connections.base)).hasState()) page = ChatPage.SHARED
+            acceptIntent(intent)
+        } else {
+            page = savedInstanceState.getString("page")?.let(ChatPage::valueOf) ?: ChatPage.CHAT
+            heartOpen = savedInstanceState.getBoolean("heart")
+            images = savedInstanceState.getStringArrayList("images").orEmpty().map(Uri::parse)
+            jumpTurn = savedInstanceState.getString("jumpTurn")
+            chatGeneration = savedInstanceState.getInt("chatGeneration")
+        }
+        setContent {
+            AndroidChatTheme(app.dark) {
+                val dark = app.dark
+                SideEffect {
+                    val bars = WindowCompat.getInsetsController(window, window.decorView)
+                    bars.isAppearanceLightStatusBars = !dark
+                    bars.isAppearanceLightNavigationBars = !dark
+                }
+                Screen()
+            }
+        }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        acceptIntent(intent)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("page", page.name)
+        outState.putBoolean("heart", heartOpen)
+        outState.putStringArrayList("images", ArrayList(images.map(Uri::toString)))
+        outState.putString("jumpTurn", jumpTurn)
+        outState.putInt("chatGeneration", chatGeneration)
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        app.activityStarted()
+    }
+
     override fun onResume() {
         super.onResume()
-        heartRateReceiver.refreshAfterResume()
+        heart.refreshAfterResume()
+        updateSystemNotifications()
     }
+
+    override fun onStop() {
+        app.activityStopped(isChangingConfigurations)
+        super.onStop()
+    }
+
+    @Deprecated("ComponentActivity retains the BLE receiver across configuration changes")
+    override fun onRetainCustomNonConfigurationInstance(): Any = heart
+
     override fun onDestroy() {
-        heartRateReceiver.close()
-        executor.shutdownNow()
+        if (!isChangingConfigurations) heart.close()
         super.onDestroy()
+    }
+
+    private fun updateSystemNotifications() {
+        val manager = getSystemService(NotificationManager::class.java)
+        notificationsAllowed = manager?.areNotificationsEnabled() == true &&
+            manager.getNotificationChannel("chat_replies")?.importance != NotificationManager.IMPORTANCE_NONE
+    }
+
+    private fun requestNotifications(onFirstSend: Boolean) {
+        if (!app.delivery.notificationsEnabled || Build.VERSION.SDK_INT < 33 ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED ||
+            (onFirstSend && app.notificationPermissionAsked)) return
+        app.notificationPermissionAsked = true
+        permission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    private fun openLocalChat(turn: String? = null) {
+        page = ChatPage.CHAT
+        heartOpen = false
+        images = emptyList()
+        jumpTurn = turn
+        // A notification or confirmed share must also dismiss any drawer, search or edit dialog.
+        chatGeneration++
+    }
+
+    private fun message(text: String) = Toast.makeText(this, text, Toast.LENGTH_LONG).show()
+
+    private fun acceptIntent(input: Intent) {
+        when (input.action) {
+            "dev.polarzen.chatbox.REPLY" -> {
+                val turn = runCatching {
+                    val base = input.getStringExtra("base") ?: return@runCatching null
+                    val session = input.getStringExtra("session") ?: return@runCatching null
+                    input.getStringExtra("turn")?.takeIf { app.openReply(base, session, it) }
+                }.getOrNull()
+                if (turn == null) message("原会话或回复已不存在。") else openLocalChat(turn)
+            }
+            Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE -> {
+                val granted = runCatching { sharedImages(input) }.getOrDefault(emptyList())
+                if (granted.isEmpty()) message("无法读取分享的图片，请从图片应用重新分享。")
+                else { heartOpen = false; images = granted }
+            }
+            else -> return
+        }
+        // Do not keep the triggering intent as a navigation command on recreation.
+        setIntent(Intent(this, MainActivity::class.java).setAction(Intent.ACTION_MAIN))
+    }
+
+    @Suppress("DEPRECATION")
+    private fun sharedImages(input: Intent): List<Uri> {
+        if (input.type?.startsWith("image/") != true ||
+            input.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION == 0) return emptyList()
+        val grantUris = buildList {
+            input.data?.let(::add)
+            input.clipData?.let { clip ->
+                for (index in 0 until clip.itemCount) clip.getItemAt(index).uri?.let(::add)
+            }
+        }
+        // Android normally moves EXTRA_STREAM to ClipData when granting access. If a sender supplies
+        // both, only the grant-bearing carriers can nominate an image for this request.
+        val uris = grantUris.ifEmpty {
+            if (input.action == Intent.ACTION_SEND) listOfNotNull(input.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))
+            else input.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM).orEmpty()
+        }
+        return uris.distinct().filter { uri ->
+            uri.scheme == ContentResolver.SCHEME_CONTENT && !uri.authority.isNullOrBlank() &&
+                checkUriPermission(uri, Process.myPid(), Process.myUid(), Intent.FLAG_GRANT_READ_URI_PERMISSION) ==
+                    PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    @Composable private fun Screen() {
+        val history = app.history
+        val connections = app.connections
+        val base = connections.base
+        val session = history.selected(base)
+        val storage = remember(base, session.id) { app.storage(session) }
+        val busy = app.delivery.busy(base, session.id)
+        val screens = key(chatGeneration) { rememberSaveableStateHolder() }
+        val closePage = { page = ChatPage.CHAT }
+        BackHandler(page != ChatPage.CHAT, onBack = closePage)
+        fun send(draft: MobileDraft? = null) {
+            if (app.send(base, session, draft, heart.live)) requestNotifications(onFirstSend = true)
+        }
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            when (page) {
+                ChatPage.CHAT -> screens.SaveableStateProvider("chat") {
+                    AndroidChatScreen(history, connections, session, history.sessions(base), busy,
+                        storage.hasRecord, app.note(base, session.id), jumpTurn,
+                        onJumpHandled = { jumpTurn = null },
+                        onSelect = { jumpTurn = null; history.select(base, it) },
+                        onCreate = { jumpTurn = null; history.create(base) },
+                        onRename = { id, name -> history.rename(base, id, name) },
+                        onDelete = { id -> history.delete(base, id); app.showNote(base, id, "") },
+                        onDraft = { history.draft(base, session.id, it) },
+                        onSend = { send() },
+                        onRetry = { turn -> send(MobileDraft(turn.question, turn.sent)) },
+                        onRetryMedia = { turn, asset -> app.retryMedia(base, session.id, turn, asset) },
+                        onSettings = { page = ChatPage.CONNECTIONS },
+                        onAppearance = { page = ChatPage.APPEARANCE },
+                        onShared = {
+                            if (busy) app.showNote(base, session.id, "请等待当前回复结束，再打开共享会话。")
+                            else page = ChatPage.SHARED
+                        }, onHeart = { heartOpen = true })
+                }
+                ChatPage.CONNECTIONS -> AndroidConnectionSettings(connections, closePage)
+                ChatPage.APPEARANCE -> Box(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
+                    AndroidAppearanceScreen(app.dark, app::useDark, app.delivery.notificationsEnabled, { wanted ->
+                        app.delivery.notificationsEnabled = wanted
+                        if (wanted) requestNotifications(onFirstSend = false)
+                    }, notificationsAllowed, {
+                        startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                            .putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
+                    }, closePage)
+                }
+                ChatPage.SHARED -> Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
+                    if (storage.hasRecord) TextButton(onClick = closePage) { Text("返回本地历史与档案") }
+                    val seed = remember(storage) { androidSharedSeed(base, history.user, session) }
+                    ForegroundPanel(seed, storage, closePage)
+                }
+            }
+        }
+        if (heartOpen) AndroidHeartRatePanel(heart) { heartOpen = false }
+        if (images.isNotEmpty()) key(images) {
+            ShareDestination(app, session.id, images.size, onCancel = { images = emptyList() }) { address, id ->
+                if (app.addSharedImages(address, id, images)) openLocalChat()
+                else message("该本地会话已不可用，请选择其他会话。")
+            }
+        }
     }
 
     @Composable private fun ForegroundPanel(seed: SharedSeed, storage: AndroidSharedStorage, onClose: () -> Unit) {
@@ -82,10 +251,10 @@ class MainActivity : ComponentActivity() {
         DisposableEffect(view, bound) {
             fun display() {
                 if (!bound || lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-                    // The unbound form may be waiting for a one-time create/join response.
-                    view.setContent { SharedChatPanel(seed, storage, false, close) }
+                    view.setContent { AndroidChatTheme(app.dark) {
+                        SharedChatPanel(seed, storage, false, decorateQuestion = heart.live::appendTo, onClose = close)
+                    } }
                 } else {
-                    // Dispose polling immediately even when Android has stopped producing UI frames.
                     view.setContent { }
                     view.disposeComposition()
                 }
@@ -99,182 +268,55 @@ class MainActivity : ComponentActivity() {
         }
         AndroidView(factory = { view }, modifier = Modifier.fillMaxSize())
     }
-    @Composable private fun Screen() {
-        var base by remember { mutableStateOf(prefs.getString("base", "") ?: "") }
-        val server = base.trim().trimEnd('/')
-        var key by remember { mutableStateOf("") }
-        val draftKey = "draft:$server"
-        var draft by remember(draftKey) { mutableStateOf(prefs.getString(draftKey, "") ?: "") }
-        var busy by remember { mutableStateOf(false) }
-        var note by remember { mutableStateOf("") }
-        var partial by remember { mutableStateOf("") }
-        var transcript by remember(server) { mutableStateOf(read(server)) }
-        val storage = remember(server, transcript.session) { AndroidSharedStorage(this, server, transcript.session) }
-        var panelOpen by remember { mutableStateOf(storage.hasState()) }
-        var profileMenu by remember { mutableStateOf(false) }
-        var askRetry by remember { mutableStateOf<String?>(null) }
-        fun openShared() {
-            if (busy) return
-            if (server.isNotBlank() && runCatching { endpoint(server) }.isFailure) {
-                note = "请填写有效的 HTTPS 地址，或清空地址以加入共享会话。"
-                return
-            }
-            val ready = runCatching {
-                user // Persist the installation identity before presenting it to the panel.
-                synchronized(transcriptLock) {
-                    val entry = prefs.getString("chat:$server", null)
-                    val edit = prefs.edit().putString("base", server)
-                    if (entry == null) edit.putString("chat:$server", encode(transcript.session, transcript.lines))
-                    else check(JSONObject(entry).getString("session") == transcript.session)
-                    check(edit.commit())
-                }
-            }.isSuccess
-            if (ready) panelOpen = true else note = "无法保存本地会话，未打开共享会话。"
-        }
-        if (panelOpen) {
-            val seed = remember(storage) {
-                runCatching {
-                    SharedSeed(server, user, transcript.session, transcript.lines.map {
-                        SharedSeedTurn(it.question, it.answer, if (it.state == "已完成") "complete" else "unknown")
-                    })
-                }.getOrNull()
-            }
-            Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
-                if (seed != null) {
-                    if (storage.hasRecord) {
-                        TextButton(onClick = { panelOpen = false }) { Text("返回本地历史与档案") }
-                    }
-                    ForegroundPanel(seed, storage) { panelOpen = false }
-                } else {
-                    Text("无法读取本机用户信息。")
-                    TextButton(onClick = { panelOpen = false }) { Text("返回本地历史") }
-                }
-            }
-            return
-        }
-        val bound = storage.hasState()
-        var showHeartRate by rememberSaveable { mutableStateOf(false) }
-        val scroll = rememberLazyListState()
-        LaunchedEffect(transcript.lines.size, partial.length) {
-            val index = transcript.lines.lastIndex
-            if (index >= 0) scroll.scrollToItem(index)
-        }
-        fun send(message: String) {
-            val clean = message.trim()
-            if (busy || clean.isEmpty() || storage.hasState()) return
-            val token = key.trim()
-            if (token.isEmpty() || token.any { it.isWhitespace() }) {
-                note = "请输入有效的聊天 API 密钥。"; return
-            }
-            if (runCatching { endpoint(server) }.isFailure) {
-                note = "请填写 AstrBot 的 HTTPS 服务地址，不要包含登录信息、查询参数或片段。"; return
-            }
-            val session = transcript.session
-            val rows = transcript.lines + Line(clean, "", "发送中")
-            if (!write(server, session, rows)) {
-                note = "无法保存本地会话，消息未发送。"; return
-            }
-            transcript = Transcript(session, rows)
-            prefs.edit().remove(draftKey).apply()
-            draft = ""; note = ""; partial = ""; busy = true
-            executor.execute {
-                val answer = StringBuilder()
-                val failure = runCatching {
-                    sendToAstrBot(server, token, user, session, clean, heartRate = live) { chunk ->
-                        answer.clear()
-                        answer.append(chunk)
-                        val snapshot = answer.toString()
-                        runOnUiThread { if (!isDestroyed) partial = snapshot }
-                    }
-                }.exceptionOrNull()
-                val result = rows.dropLast(1) + Line(clean, answer.toString(),
-                    if (failure == null) "已完成" else "回复状态未确认")
-                val saved = write(server, session, result, expected = encode(session, rows))
-                runOnUiThread {
-                    if (!isDestroyed) {
-                        transcript = Transcript(session, result)
-                        busy = false
-                        partial = ""
-                        note = when {
-                            !saved -> "本地保存失败；请勿直接重复发送。"
-                            failure is IllegalStateException -> failure.message ?: "回复未确认。"
-                            failure != null -> "连接或解析失败。请检查网络、证书和服务版本；服务器可能已收到消息。"
-                            answer.isEmpty() -> "回复已结束，但没有可显示的文字。"
-                            else -> ""
-                        }
-                    }
-                }
-            }
-        }
-        Surface(modifier = Modifier.fillMaxSize()) {
-            Column(Modifier.fillMaxSize().systemBarsPadding().imePadding().padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Chatbox · 小鲸鱼", style = MaterialTheme.typography.titleLarge)
-                Row {
-                    TextButton(onClick = { openShared() }, enabled = !busy) {
-                        Text(if (bound) "打开共享会话" else "跨设备共享会话")
-                    }
-                    TextButton(onClick = { showHeartRate = true }) { Text("心率") }
-                    Box {
-                        TextButton(onClick = { profileMenu = true }, enabled = !busy) { Text("切换档案") }
-                        DropdownMenu(expanded = profileMenu, onDismissRequest = { profileMenu = false }) {
-                            val profiles = (prefs.all.keys.filter { it.startsWith("chat:") }
-                                .map { it.removePrefix("chat:") } + "").distinct().sorted()
-                            profiles.forEach { profile ->
-                                DropdownMenuItem(text = { Text(profile.ifBlank { "独立共享会话" }) }, onClick = {
-                                    profileMenu = false
-                                    val selected = read(profile)
-                                    if (prefs.edit().putString("base", profile).commit()) {
-                                        base = profile
-                                        key = ""
-                                        note = ""
-                                        panelOpen = AndroidSharedStorage(this@MainActivity, profile, selected.session).hasState()
-                                    } else note = "无法切换本地档案。"
-                                })
-                            }
-                        }
-                    }
-                }
-                OutlinedTextField(base, {
-                    base = it; key = ""; note = ""
-                }, Modifier.fillMaxWidth(), enabled = !busy, singleLine = true,
-                    label = { Text("AstrBot HTTPS 地址") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
-                OutlinedTextField(key, { key = it }, Modifier.fillMaxWidth(), enabled = !busy && !bound,
-                    singleLine = true, label = { Text("对话 API 密钥 · 不保存") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
-                LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = scroll, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(transcript.lines) { row ->
-                        Text("你：${row.question}")
-                        val active = busy && row === transcript.lines.lastOrNull()
-                        val reply = if (active) partial else row.answer
-                        if (reply.isNotBlank()) Text("助手：$reply")
-                        if (row.state != "已完成") Text(row.state, style = MaterialTheme.typography.labelMedium)
-                        if (!busy && !bound && row === transcript.lines.lastOrNull() && row.state != "已完成") {
-                            TextButton(onClick = { askRetry = row.question }) { Text("重新发送上一条") }
-                        }
-                    }
-                }
-                if (note.isNotBlank()) Text(note, color = MaterialTheme.colorScheme.error)
-                if (bound) Text("此会话已关联共享服务，请打开共享会话继续。")
-                OutlinedTextField(draft, {
-                    draft = it
-                    prefs.edit().putString(draftKey, it).apply()
-                }, Modifier.fillMaxWidth(), enabled = !busy && !bound,
-                    maxLines = 3, label = { Text("输入消息") })
-                Button(onClick = { send(draft) }, enabled = !busy && !bound && draft.isNotBlank()) {
-                    Text(if (busy) "等待回复…" else "发送")
-                }
-            }
-        }
-        if (showHeartRate) {
-            AndroidHeartRatePanel(heartRateReceiver, onDismiss = { showHeartRate = false })
-        }
-        askRetry?.let { previous ->
-            AlertDialog(onDismissRequest = { askRetry = null }, title = { Text("重新发送？") },
-                text = { Text("上一条可能已经被 AstrBot 接收。继续会发送一条新消息，可能重复执行。") },
-                confirmButton = { TextButton(onClick = { askRetry = null; send(previous) }) { Text("确认重发") } },
-                dismissButton = { TextButton(onClick = { askRetry = null }) { Text("取消") } })
-        }
+}
+
+@Composable
+private fun ShareDestination(app: AndroidAppState, currentSession: String, count: Int,
+                             onCancel: () -> Unit, onConfirm: (String, String?) -> Unit) {
+    val connections = app.connections
+    val profiles = connections.services.map { it.base to it.name } + ("" to "独立共享会话")
+    var address by rememberSaveable { mutableStateOf(connections.base) }
+    val sessions = app.history.sessions(address)
+    val available = remember(address, sessions) { sessions.filterNot { app.storage(it).hasState() } }
+    var id by rememberSaveable(address) {
+        mutableStateOf(if (address == connections.base && available.any { it.id == currentSession }) currentSession
+            else available.firstOrNull()?.id)
     }
+    val canConfirm = profiles.any { it.first == address } && (id == null || available.any { it.id == id })
+    AlertDialog(onDismissRequest = onCancel, title = { Text("分享图片到会话") }, text = {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("将 ${count} 张图片加入所选会话的草稿。")
+            Text("服务档案", style = MaterialTheme.typography.labelLarge)
+            var servicesOpen by remember { mutableStateOf(false) }
+            Box {
+                OutlinedButton(onClick = { servicesOpen = true }) {
+                    Text(profiles.find { it.first == address }?.second ?: "选择服务档案")
+                }
+                DropdownMenu(servicesOpen, { servicesOpen = false }) {
+                    profiles.forEach { (base, name) ->
+                        DropdownMenuItem(text = { Text(if (base.isBlank()) name else "$name\n$base") },
+                            onClick = { servicesOpen = false; address = base })
+                    }
+                }
+            }
+            Text("本地会话", style = MaterialTheme.typography.labelLarge)
+            var sessionsOpen by remember { mutableStateOf(false) }
+            Box {
+                OutlinedButton(onClick = { sessionsOpen = true }) {
+                    Text(available.firstOrNull { it.id == id }?.title ?: "新建会话")
+                }
+                DropdownMenu(sessionsOpen, { sessionsOpen = false }) {
+                    available.forEach { target ->
+                        DropdownMenuItem(text = { Text("${target.title} · ${target.turns.size} 轮") },
+                            onClick = { sessionsOpen = false; id = target.id })
+                    }
+                    DropdownMenuItem(text = { Text("新建会话") }, onClick = { sessionsOpen = false; id = null })
+                }
+            }
+            if (sessions.size != available.size) Text("共享会话仅支持文字，可选择其他本地会话。")
+        }
+    }, confirmButton = {
+        TextButton(enabled = canConfirm, onClick = { onConfirm(address, id) }) { Text("加入草稿") }
+    }, dismissButton = { TextButton(onClick = onCancel) { Text("取消") } })
 }

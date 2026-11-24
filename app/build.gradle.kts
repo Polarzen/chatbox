@@ -10,8 +10,8 @@ android {
         applicationId = "dev.polarzen.chatbox"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "0.1.16"
+        versionCode = 17
+        versionName = "0.1.17"
     }
     buildFeatures { compose = true }
     compileOptions {
@@ -26,4 +26,5 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

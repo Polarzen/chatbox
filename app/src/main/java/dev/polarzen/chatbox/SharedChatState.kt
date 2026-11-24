@@ -16,7 +16,7 @@ internal data class SharedBinding(val address: String, val room: String, val ins
     }
 }
 
-internal data class SharedPending(val id: String, val question: String)
+internal data class SharedPending(val id: String, val question: String, val draft: String = question)
 internal data class SharedInvite(val code: String, val expiresAt: Long)
 
 internal data class SharedLocal(
@@ -31,7 +31,11 @@ internal data class SharedLocal(
         val b = binding ?: return null
         val value = JSONObject().put("address", b.address).put("room", b.room).put("instance", b.instance)
             .put("token", b.token).put("owner", b.owner).put("draft", draft)
-        pending?.let { value.put("pending", JSONObject().put("id", it.id).put("question", it.question)) }
+        pending?.let {
+            val row = JSONObject().put("id", it.id).put("question", it.question)
+            if (it.draft != it.question) row.put("draft", it.draft)
+            value.put("pending", row)
+        }
         invite?.let { value.put("invite", JSONObject().put("code", it.code).put("expiresAt", it.expiresAt)) }
         return value.toString()
     }
@@ -46,7 +50,8 @@ internal data class SharedLocal(
                     value.getString("room"), value.getString("instance"), value.getString("token"), value.getBoolean("owner")),
                 draft = value.optString("draft"),
                 pending = value.optJSONObject("pending")?.let {
-                    SharedPending(it.getString("id").also(UUID::fromString), it.getString("question"))
+                    val question = it.getString("question")
+                    SharedPending(it.getString("id").also(UUID::fromString), question, it.optString("draft", question))
                 },
                 invite = value.optJSONObject("invite")?.let {
                     SharedInvite(it.getString("code"), it.getLong("expiresAt"))
@@ -58,7 +63,11 @@ internal data class SharedLocal(
 
 /** Accessed from the composition's main-thread scope. Serialize HTTP reads and mutations so
  * a delayed page can never replace a newer snapshot or outlive its authorization. */
-internal class SharedChatState(private val storage: SharedLocalStorage, private val allowLoopback: Boolean) {
+internal class SharedChatState(
+    private val storage: SharedLocalStorage,
+    private val allowLoopback: Boolean,
+    private val decorateQuestion: (String) -> String = { it },
+) {
     private val api = SharedChatTransport(allowLoopback)
     private val requests = Mutex()
     private var cursor = 0L
@@ -217,10 +226,13 @@ internal class SharedChatState(private val storage: SharedLocalStorage, private 
     suspend fun send() = action {
         val binding = local.binding ?: return@action
         if (!authorized || local.pending != null || local.draft.isBlank() || turns.any { it.status == "running" }) return@action
-        val pending = SharedPending(UUID.randomUUID().toString(), local.draft)
+        val draft = local.draft
+        if (blockSharedTask(draft)) return@action
+        val question = if (draft.trimStart().startsWith("/")) draft else decorateQuestion(draft)
+        val pending = SharedPending(UUID.randomUUID().toString(), question, draft)
         if (!save(local.copy(draft = "", pending = pending))) {
             // Nothing was posted. Keep the editable draft instead of an unresolvable pending id.
-            save(local.copy(draft = pending.question, pending = null))
+            save(local.copy(draft = draft, pending = null))
             notice = "本机未能保存发送编号，提问已保留。"
             return@action
         }
@@ -231,8 +243,16 @@ internal class SharedChatState(private val storage: SharedLocalStorage, private 
         val binding = local.binding ?: return@action
         val pending = local.pending?.takeIf { it.id == id } ?: return@action
         if (!pendingMissing || lookupPending(binding, pending)) return@action
+        if (blockSharedTask(pending.question)) return@action
         // The first POST can still arrive after this 404. The bridge deduplicates by room and ID.
         submit(binding, pending, retry = true)
+    }
+
+    private fun blockSharedTask(text: String): Boolean {
+        val command = text.trimStart()
+        if (!command.startsWith("/task") || (command.length > 5 && !command[5].isWhitespace())) return false
+        notice = "请在 Windows 客户端选择 Launcher 实例，登录 Dashboard 后，在该实例的本机会话中执行 /task。"
+        return true
     }
 
     private suspend fun submit(binding: SharedBinding, pending: SharedPending, retry: Boolean) {
@@ -245,13 +265,13 @@ internal class SharedChatState(private val storage: SharedLocalStorage, private 
             when {
                 handleRevocation(e) -> return
                 e is SharedHttpFailure && (e.status == 400 || e.status == 413) -> {
-                    save(local.copy(draft = pending.question, pending = null))
+                    save(local.copy(draft = pending.draft, pending = null))
                     notice = if (e.status == 413) "内容超过服务限制，提问已恢复为草稿。请缩短后再发送。"
                         else "服务拒绝了提问内容，提问已恢复为草稿。请检查后再发送。"
                     return
                 }
                 e is SharedHttpFailure && e.status == 409 -> {
-                    if (!retry) save(local.copy(draft = pending.question, pending = null))
+                    if (!retry) save(local.copy(draft = pending.draft, pending = null))
                     val conflict = when (e.conflict) {
                         SharedConflict.RUNNING -> "另一台设备正在生成回复，请稍后再发。"
                         SharedConflict.UNRESOLVED -> "上游执行结果未知，请服务管理员确认 AstrBot 已空闲并运行 resolve。"
@@ -268,7 +288,7 @@ internal class SharedChatState(private val storage: SharedLocalStorage, private 
     suspend fun releasePending() = action {
         val pending = local.pending ?: return@action
         if (!pendingMissing) return@action
-        save(local.copy(draft = pending.question, pending = null))
+        save(local.copy(draft = pending.draft, pending = null))
         pendingMissing = false
         notice = "提问已恢复为草稿。再次发送前，请先核对两台设备的记录。"
     }

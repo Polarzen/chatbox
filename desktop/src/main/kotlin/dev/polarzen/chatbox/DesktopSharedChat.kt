@@ -89,9 +89,12 @@ internal fun desktopSharedSeed(sourceBase: String, username: String, chat: Chat)
     if (sourceBase.isEmpty()) return SharedSeed("", "", "", emptyList())
     val history = chat.entries.map { entry ->
         val question = buildList {
-            val references = entry.attachmentReferences.ifEmpty { listOfNotNull(entry.attachmentReference) }
-            if (references.isEmpty() && entry.attachmentDisplayName != null) add("[图片附件]")
-            for (path in references) add(if (path.endsWith(".wav", true)) "[语音附件]" else "[图片附件]")
+            // Older histories sometimes kept only the display name. Use its extension as
+            // the type hint without copying a private name or path into shared history.
+            val references = entry.attachmentReferences.ifEmpty {
+                listOfNotNull(entry.attachmentReference ?: entry.attachmentDisplayName)
+            }
+            for (reference in references) add(if (reference.endsWith(".wav", true)) "[语音附件]" else "[图片附件]")
             if (entry.question.isNotEmpty()) add(entry.question)
         }.joinToString("\n")
         val answer = buildString {
