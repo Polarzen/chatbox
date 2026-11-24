@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$MsiPath,
 
-    [string]$ExpectedVersion = '0.1.5'
+    [string]$ExpectedVersion = '0.1.14'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,6 +37,7 @@ function Invoke-MsiSql($Database, [string]$Query) {
     finally {
         if ($null -ne $view) {
             [void]$view.Close()
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($view)
         }
     }
 }
@@ -48,7 +49,6 @@ function Get-MsiRows($Database, [string]$Table, [string[]]$Columns) {
     $rows = [System.Collections.Generic.List[object]]::new()
     try {
         $view = $Database.OpenView($query)
-        $columnInfo = $view.ColumnInfo(0)
         [void]$view.Execute()
         while ($null -ne ($record = $view.Fetch())) {
             $row = [ordered]@{}
@@ -71,6 +71,7 @@ function Get-MsiRows($Database, [string]$Table, [string[]]$Columns) {
     finally {
         if ($null -ne $view) {
             [void]$view.Close()
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($view)
         }
     }
     return $rows.ToArray()
@@ -123,6 +124,82 @@ function Set-MsiSequence($Database, [string]$Table, [string]$Action, [int]$Seque
     else {
         $quotedAction = ConvertTo-MsiSqlLiteral $Action
         Invoke-MsiSql $Database "UPDATE ``$Table`` SET ``Sequence``=$Sequence WHERE ``Action``=$quotedAction"
+    }
+}
+
+function Add-MsiRowIfMissing($Database, [string]$Table, $Fields, [string[]]$Identity) {
+    $columns = @($Fields.Keys)
+    $id = $Fields[$columns[0]]
+    $exists = $false
+    foreach ($row in @(Get-MsiRows $Database $Table $columns)) {
+        $sameIdentity = $true
+        foreach ($column in $Identity) {
+            if ($row.$column -ne $Fields[$column]) { $sameIdentity = $false; break }
+        }
+        if ($row.($columns[0]) -ne $id -and -not $sameIdentity) { continue }
+        foreach ($column in $columns) {
+            if ($row.$column -cne $Fields[$column]) { throw "Conflicting $Table row for '$id'." }
+        }
+        $exists = $true
+    }
+    if ($exists) { return }
+    $names = ($columns | ForEach-Object { '`' + $_ + '`' }) -join ', '
+    $values = ($columns | ForEach-Object {
+        $value = $Fields[$_]
+        if ($null -eq $value) { 'NULL' }
+        elseif ($value -is [int]) { [string]$value }
+        else { ConvertTo-MsiSqlLiteral $value }
+    }) -join ', '
+    Invoke-MsiSql $Database "INSERT INTO ``$Table`` ($names) VALUES ($values)"
+}
+
+function Add-ReplyToastRegistration($Database) {
+    if ((Get-MsiProperty $Database 'ALLUSERS') -ne '1') { throw 'Expected per-machine Chatbox installation.' }
+    $launchers = @(Get-MsiRows $Database 'File' @('File','Component_','FileName') | Where-Object {
+        ($_.FileName -split '\|')[-1] -eq 'Chatbox.exe'
+    })
+    if ($launchers.Count -ne 1) { throw 'Expected one tracked Chatbox.exe.' }
+    $launcher = $launchers[0]
+    $target = '[#' + $launcher.File + ']'
+    $menuDirs = @('ProgramMenuFolder') + @(Get-MsiRows $Database 'Directory' @('Directory','Directory_Parent') |
+        Where-Object { $_.Directory_Parent -eq 'ProgramMenuFolder' } | ForEach-Object { $_.Directory })
+    $shortcuts = @(Get-MsiRows $Database 'Shortcut' @('Shortcut','Directory_','Name','Target','Arguments') | Where-Object {
+        ($_.Name -split '\|')[-1] -eq 'Chatbox' -and $_.Target -ceq $target -and
+        -not $_.Arguments -and $menuDirs -contains $_.Directory_
+    })
+    if ($shortcuts.Count -ne 1) { throw 'Expected one Start menu shortcut targeting Chatbox.exe.' }
+
+    if (-not (Test-MsiTable $Database 'MsiShortcutProperty')) {
+        Invoke-MsiSql $Database 'CREATE TABLE `MsiShortcutProperty` (`MsiShortcutProperty` CHAR(72) NOT NULL, `Shortcut_` CHAR(72) NOT NULL, `PropertyKey` CHAR(0) NOT NULL, `PropVariantValue` CHAR(0) NOT NULL PRIMARY KEY `MsiShortcutProperty`)'
+    }
+    # A stub CLSID lets Windows persist protocol-activated toasts in Notification Center.
+    $properties = @{
+        ID = 'Polarzen.Chatbox'
+        ToastActivatorCLSID = '{4A8033D8-D9A3-499E-BDC1-EB485352F0DF}'
+    }
+    foreach ($name in $properties.Keys) {
+        Add-MsiRowIfMissing $Database 'MsiShortcutProperty' ([ordered]@{
+            MsiShortcutProperty = 'ChatboxReply' + $name
+            Shortcut_ = $shortcuts[0].Shortcut
+            PropertyKey = 'System.AppUserModel.' + $name
+            PropVariantValue = $properties[$name]
+        }) @('Shortcut_', 'PropertyKey')
+    }
+
+    $protocol = 'Software\Classes\polarzen-chatbox'
+    foreach ($entry in @(
+        @('ChatboxProtocolDescription', $protocol, $null, 'URL:Chatbox'),
+        @('ChatboxProtocolMarker', $protocol, 'URL Protocol', $null),
+        @('ChatboxProtocolCommand', ($protocol + '\shell\open\command'), $null, ('"' + $target + '" --open-toast "%1"'))
+    )) {
+        Add-MsiRowIfMissing $Database 'Registry' ([ordered]@{
+            Registry = $entry[0]
+            Root = 2
+            Key = $entry[1]
+            Name = $entry[2]
+            Value = $entry[3]
+            Component_ = $launcher.Component_
+        }) @('Root', 'Key', 'Name')
     }
 }
 
@@ -277,6 +354,7 @@ try {
         throw "Final MSI REINSTALLMODE property validation failed."
     }
 
+    Add-ReplyToastRegistration $database
     [void]$database.Commit()
     Write-Output "Patched MSI database: $MsiPath"
     Write-Output "  ProductVersion: $ExpectedVersion"

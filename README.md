@@ -4,9 +4,15 @@ Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 
 
 ## Windows 下载
 
-Windows 0.1.12 安装包为 `Chatbox-0.1.12.msi`。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.12/Chatbox-0.1.12.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.12/SHA256SUMS.txt) · [v0.1.12 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.12)
+Windows 0.1.14 安装包为 `Chatbox-0.1.14.msi`。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.14/Chatbox-0.1.14.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.14/SHA256SUMS.txt) · [v0.1.14 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.14)
 
-将 MSI 和 `SHA256SUMS.txt` 下载到同一目录。在该目录打开 PowerShell，运行 `Get-FileHash .\Chatbox-0.1.12.msi -Algorithm SHA256`，确认输出的哈希值与 `SHA256SUMS.txt` 中该 MSI 对应的值一致。从 0.1.5 至 0.1.11 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。0.1.1 用户先阅读[旧卸载器升级说明](desktop/README.md#从-011-升级)。
+将 MSI 和 `SHA256SUMS.txt` 下载到同一目录。在该目录打开 PowerShell，运行 `Get-FileHash .\Chatbox-0.1.14.msi -Algorithm SHA256`，确认输出的哈希值与 `SHA256SUMS.txt` 中该 MSI 对应的值一致。从 0.1.5 至 0.1.13 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。0.1.1 用户先阅读[旧卸载器升级说明](desktop/README.md#从-011-升级)。
+
+## Windows 0.1.14
+
+按 Ctrl+Alt+J 可从其他应用唤起 Chatbox，再按一次可收起当前窗口。用托盘菜单可以显示窗口或退出程序。窗口右上角的关闭按钮默认退出程序，在「桌面设置」可改为收起到托盘，也可更改全局快捷键或关闭后台回复提醒。点击回复通知可跳到对应轮次。[桌面操作说明](desktop/README.md#windows-0114) · [0.1.14 验收记录](docs/WINDOWS_014_RELEASE_ACCEPTANCE.md)
+
+日常使用的上一版 0.1.13 已支持在本机 Launcher 会话发送 WhaleTask 命令，例如 `/task help` 和 `/task list`。0.1.14 继续支持这些命令，以及下文的截图粘贴、会话草稿和语音功能。
 
 ## Windows 0.1.12
 

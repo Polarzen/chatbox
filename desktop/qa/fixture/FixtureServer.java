@@ -227,11 +227,18 @@ public final class FixtureServer {
             output.flush();
             return 200;
         }
+        boolean imageOnly = request.contains("fixture:image-only");
+        boolean voiceOnly = request.contains("fixture:voice-only");
+        if (imageOnly || voiceOnly || request.contains("fixture:empty-success")) {
+            if (imageOnly) writeReplyImage(profile, output);
+            if (voiceOnly) writeReplyVoice(profile, output);
+            writeEvent(output, "{\"type\":\"end\"}");
+            output.flush();
+            return 200;
+        }
         if (request.contains("fixture:voice-reply")) {
-            String id = "reply-voice-" + profile.toLowerCase(java.util.Locale.ROOT);
             writeEvent(output, "{\"type\":\"plain\",\"data\":\"语音前文\"}");
-            writeEvent(output, "{\"type\":\"record\",\"data\":\"[RECORD]fixture.wav\"}");
-            writeEvent(output, "{\"type\":\"attachment_saved\",\"data\":{\"id\":\"" + id + "\",\"type\":\"record\"}}");
+            writeReplyVoice(profile, output);
             writeEvent(output, "{\"type\":\"plain\",\"data\":\"语音后文\"}");
             writeEvent(output, "{\"type\":\"end\"}");
             output.flush();
@@ -304,6 +311,12 @@ public final class FixtureServer {
         String attachment = profile.equals("A") ? PNG_ID_A : PNG_ID_B;
         writeEvent(output, "{\"type\":\"image\",\"data\":\"[IMAGE]fixture.png\"}");
         writeEvent(output, "{\"type\":\"attachment_saved\",\"data\":{\"id\":\"" + attachment + "\",\"type\":\"image\"}}");
+    }
+
+    private static void writeReplyVoice(String profile, OutputStream output) throws IOException {
+        String id = "reply-voice-" + profile.toLowerCase(java.util.Locale.ROOT);
+        writeEvent(output, "{\"type\":\"record\",\"data\":\"[RECORD]fixture.wav\"}");
+        writeEvent(output, "{\"type\":\"attachment_saved\",\"data\":{\"id\":\"" + id + "\",\"type\":\"record\"}}");
     }
 
     private int serveUpload(String profile, HttpExchange exchange) throws IOException {

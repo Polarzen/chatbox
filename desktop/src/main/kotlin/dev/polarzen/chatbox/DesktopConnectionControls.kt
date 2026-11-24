@@ -227,6 +227,9 @@ internal fun DesktopConnectionControls(connection: DesktopConnection) {
         }
     }
 
+    DesktopModalGuard(
+        settingsExpanded || manageExpanded || permissionTarget != null || pendingRename != null || pendingRemoval != null,
+    )
     if (settingsExpanded) {
         ConnectionSettingsDialog(
             connection = connection,

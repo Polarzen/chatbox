@@ -158,13 +158,15 @@ internal fun DesktopChatLayout(
     onCancelRecording: () -> Unit = {},
     onReplaceMissingAttachment: ((Path) -> Unit)? = null,
     composerCommitInProgress: Boolean = false,
+    composerFocusSerial: Long = 0L,
+    replyNavigation: ReplyTurnNavigation? = null,
 ) {
     BoxWithConstraints(
         modifier = Modifier.fillMaxSize().background(desktopPalette.canvas).testTag("chat-root"),
     ) {
         val narrow = maxWidth < 790.dp
         var sidebarOpen by remember { mutableStateOf(!narrow) }
-        LaunchedEffect(narrow, searchSelectionSerial) {
+        LaunchedEffect(narrow, searchSelectionSerial, composerFocusSerial, replyNavigation?.serial) {
             if (narrow) sidebarOpen = false
         }
         val embeddedSidebar = sidebarOpen && !narrow
@@ -185,6 +187,8 @@ internal fun DesktopChatLayout(
             ConversationPane(
                 profileId = profileId,
                 navigation = searchNavigation,
+                replyNavigation = replyNavigation,
+                composerFocusSerial = composerFocusSerial,
                 sessions = sessions,
                 chat = chat,
                 narrow = narrow,
@@ -382,6 +386,7 @@ private fun SessionSidebar(
             }
         }
     }
+    DesktopModalGuard(pendingRename != null || pendingDeletion != null)
     pendingRename?.let { session ->
         RenameSessionDialog(
             session = session,
@@ -663,6 +668,8 @@ private fun ConversationToolbar(
 private fun ConversationPane(
     profileId: String,
     navigation: SearchHitNavigation?,
+    replyNavigation: ReplyTurnNavigation?,
+    composerFocusSerial: Long,
     sessions: List<SessionInfo>,
     chat: Chat,
     narrow: Boolean,
@@ -761,6 +768,7 @@ private fun ConversationPane(
             session = chat.session,
             entryCount = chat.entries.size,
             navigation = navigation,
+            replyNavigation = replyNavigation,
             modifier = Modifier.weight(1f).fillMaxWidth(),
         ) {
             if (chat.entries.isEmpty()) {
@@ -838,7 +846,7 @@ private fun ConversationPane(
                         LaunchedEffect(renderedState.value) {
                             if (renderedState.value) renderCallback?.invoke(chat.session, index)
                         }
-                        BoxWithConstraints(Modifier.fillMaxWidth()) {
+                        BoxWithConstraints(Modifier.fillMaxWidth().replyTurnAnchor(index)) {
                             Surface(
                                 modifier = Modifier.align(Alignment.CenterStart)
                                     .widthIn(max = minOf(760.dp, maxWidth * .86f))
@@ -878,6 +886,7 @@ private fun ConversationPane(
                                         val failed = entry.status.startsWith("发送失败：") ||
                                             entry.status.startsWith("未发送：") ||
                                             entry.status == "上次回复未确认"
+                                        val blockRetry = entry.blocksWhaleTaskRetry(profileId)
                                         val active = entry.status == "发送中" && entryProgress != null
                                         var detailsExpanded by remember(chat.session, index) {
                                             mutableStateOf(false)
@@ -892,6 +901,7 @@ private fun ConversationPane(
                                             Text(
                                                 when {
                                                     active -> "${entryProgress!!.stage} · ${elapsedSeconds} 秒"
+                                                    blockRetry -> WHALE_TASK_CHECK_STATUS
                                                     failed -> entryProgress?.failureSummary ?: failureSummary(entry.status)
                                                     else -> entry.status
                                                 },
@@ -905,7 +915,7 @@ private fun ConversationPane(
                                                     modifier = Modifier.testTag("failure-details-toggle-$index"),
                                                 ) { Text(if (detailsExpanded) "收起详情" else "查看详情", color = desktopPalette.accent, fontSize = 11.sp) }
                                             }
-                                            if (canRetry && !active && failed) {
+                                            if (canRetry && !active && failed && !blockRetry) {
                                                 Spacer(Modifier.width(6.dp))
                                                 TextButton(
                                                     onClick = { onRetry(entry) },
@@ -935,6 +945,7 @@ private fun ConversationPane(
             Text(it, color = MaterialTheme.colors.error, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 22.dp, vertical = 2.dp))
         }
         Composer(
+            composerFocusSerial = composerFocusSerial,
             draft = draft,
             onDraft = onDraft,
             onPasteAttachment = onPasteAttachment,
@@ -1020,6 +1031,16 @@ private fun droppedFilePaths(event: DragAndDropEvent): List<File> {
     return files.orEmpty().mapNotNull { it as? File }
 }
 
+internal const val WHALE_TASK_CHECK_STATUS = "命令可能已执行，请先用 /task list 或 /task status 核对。"
+
+internal fun Entry.blocksWhaleTaskRetry(profileId: String): Boolean {
+    if (status != "上次回复未确认" || !profileId.startsWith("launcher:")) return false
+    val command = question.trimStart()
+    if (!isWhaleTaskCommand(command)) return false
+    val verb = command.substring(5).trimStart().takeWhile { !it.isWhitespace() }
+    return verb !in setOf("", "help", "list", "status", "result")
+}
+
 private fun failureSummary(status: String): String = when {
     status == "上次回复未确认" -> "上次回复未确认"
     status.startsWith("未发送：") -> "消息尚未发送"
@@ -1050,7 +1071,12 @@ internal fun Composer(
     onCancelRecording: () -> Unit = {},
     onReplaceMissingAttachment: ((Path) -> Unit)? = null,
     composerCommitInProgress: Boolean = false,
+    composerFocusSerial: Long = 0L,
 ) {
+    val fieldFocus = remember { FocusRequester() }
+    LaunchedEffect(composerFocusSerial) {
+        if (composerFocusSerial > 0L) fieldFocus.requestFocus()
+    }
     Surface(
         modifier = modifier.testTag("composer"),
         color = desktopPalette.panel,
@@ -1115,6 +1141,7 @@ internal fun Composer(
                     onValueChange = { if (!composerCommitInProgress) onDraft(it) },
                     modifier = Modifier.weight(1f).heightIn(min = 39.dp, max = 112.dp)
                         .padding(vertical = 9.dp)
+                        .focusRequester(fieldFocus)
                         .onPreviewKeyEvent { event ->
                             if (event.type == KeyEventType.KeyDown && event.key == Key.V && event.isCtrlPressed &&
                                 !event.isShiftPressed && !event.isAltPressed && !event.isMetaPressed

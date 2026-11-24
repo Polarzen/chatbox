@@ -4,9 +4,22 @@ Windows 桌面版使用 AstrBot OpenAPI 收发文字和图片，也可播放服�
 
 ## 安装与构建
 
-Windows 0.1.12 安装包为 `Chatbox-0.1.12.msi`。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.12/Chatbox-0.1.12.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.12/SHA256SUMS.txt) · [v0.1.12 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.12)
+Windows 0.1.14 安装包为 `Chatbox-0.1.14.msi`。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.14/Chatbox-0.1.14.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.14/SHA256SUMS.txt) · [v0.1.14 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.14)
 
-将 MSI 和 `SHA256SUMS.txt` 下载到同一目录。在该目录打开 PowerShell，运行 `Get-FileHash .\Chatbox-0.1.12.msi -Algorithm SHA256`，确认输出的哈希值与 `SHA256SUMS.txt` 中该 MSI 对应的值一致。从 0.1.5 至 0.1.11 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。安装完成后从开始菜单打开 Chatbox。0.1.1 用户先阅读[旧卸载器升级说明](#从-011-升级)。
+将 MSI 和 `SHA256SUMS.txt` 下载到同一目录。在该目录打开 PowerShell，运行 `Get-FileHash .\Chatbox-0.1.14.msi -Algorithm SHA256`，确认输出的哈希值与 `SHA256SUMS.txt` 中该 MSI 对应的值一致。从 0.1.5 至 0.1.13 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。安装完成后从开始菜单打开 Chatbox。0.1.1 用户先阅读[旧卸载器升级说明](#从-011-升级)。
+
+## Windows 0.1.14
+
+- **显示或收起窗口**　在其他应用中按 Ctrl+Alt+J 可将 Chatbox 带到前台，继续在输入框写消息。Chatbox 位于前台时，再按一次可收起窗口。若此前打开了对话框，唤起时会回到该对话框。录音期间收起窗口会先停止录音，将录音保存到当前草稿，再隐藏窗口。
+- **更改快捷键**　打开「桌面设置」，在「显示或隐藏窗口」中输入新的组合键，点击「保存」。也可关闭「全局快捷键」后保存。若新组合键已被占用，设置页会提示冲突，原快捷键继续生效。
+- **托盘与退出**　右键点击 Windows 通知区域中的 Chatbox 图标，可选择显示窗口或退出程序。窗口右上角的关闭按钮默认退出程序。希望关闭后继续等待回复，可在「桌面设置」开启「关闭窗口时收起到托盘」并保存。从开始菜单再次打开 Chatbox，会唤起使用同一数据目录的现有窗口。
+- **后台回复提醒**　「桌面设置」中的「后台回复完成时提醒」默认开启，可随时关闭并保存。Chatbox 在后台收到完整回复时会发出通用提醒，通知中不会显示会话标题或消息正文。点击通知可回到相应服务配置、会话和回复轮次。若目标已删除，窗口会短暂提示。横幅显示取决于 Windows 的通知设置和「请勿打扰」状态，未看到横幅时仍可从托盘打开聊天查看回复。
+
+[0.1.14 验收记录](../docs/WINDOWS_014_RELEASE_ACCEPTANCE.md)
+
+## Windows 0.1.13
+
+日常使用的上一版 0.1.13 支持在本机 Launcher 会话中使用 WhaleTask。升级后仍可发送 `/task help` 或 `/task list`。[登录和发送步骤](#连接和发送)
 
 ## Windows 0.1.12
 
@@ -28,6 +41,8 @@ MSI 生成于 `desktop/build/compose/binaries/main/msi/`。从源码启动可运
 主窗口直接打开上次的会话。点击右上角的连接状态进入「连接设置」，选择运行中的 Launcher 实例，或填写自行部署的 HTTPS 地址。手动 HTTP 仅支持本机 `127.0.0.1`。
 
 首次使用时，点击「添加密钥」，填写本地名称和 AstrBot OpenAPI Key。已配置多把密钥时，点开顶栏密钥菜单，再点目标名称即可验证并切换。验证失败时可以继续使用原先已连接的密钥。「管理密钥」提供改名、权限信息和移除操作。名称用于本机识别，AstrBot WebUI 的 OpenAPI 设置列出服务端授予的权限。普通文字聊天需要 `chat`，图片上传与下载还需要 `file`；运行管理员命令需要服务端登记的管理员身份和 `chat:admin`。
+
+在已验证的本机 Launcher 配置中打开会话，以纯文字发送 `/task help`。首次使用时，按提示登录 AstrBot 管理面板。若已启用两步验证，输入当前验证码。登录后回到原草稿，再次发送即可查看命令帮助。发送 `/task list` 可查看任务列表。普通消息继续使用原有 OpenAPI Key。切换会话后，按提示重新登录管理面板。
 
 把资源管理器中的 PNG 或 JPEG 拖到聊天区或输入区，或点击「＋」选图。发送前可以逐张移除图片、补充说明。按 Enter 发送，按 Shift+Enter 换行。回复气泡显示图片上传进度、等待服务器响应和等待首段回复的时间。
 

@@ -10,7 +10,6 @@ import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -21,30 +20,25 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.TextFieldValue
-import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Window
-import androidx.compose.ui.window.application
-import androidx.compose.ui.window.rememberWindowState
-import java.awt.Dimension
 import java.io.File
 import java.io.IOException
-import java.nio.channels.FileChannel
 import java.nio.file.AccessDeniedException
 import java.nio.file.Files
 import java.nio.file.FileSystemException
 import java.nio.file.InvalidPathException
 import java.nio.file.Path
-import java.nio.file.StandardOpenOption
 import java.net.SocketTimeoutException
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CancellationException
+import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.JFileChooser
@@ -53,6 +47,11 @@ import javax.swing.filechooser.FileNameExtensionFilter
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.concurrent.thread
@@ -80,87 +79,7 @@ fun main(args: Array<String>) {
         return
     }
 
-    val dataDir = System.getenv("LOCALAPPDATA")?.takeIf { it.isNotBlank() }?.let { Path.of(it, "Chatbox") }
-        ?: Path.of(System.getProperty("user.home"), ".chatbox")
-    var lockChannel: FileChannel? = null
-    var historyLock: java.nio.channels.FileLock? = null
-    var lockFailure: Throwable? = null
-    val lockAcquired = runCatching {
-        Files.createDirectories(dataDir)
-        lockChannel = FileChannel.open(
-            dataDir.resolve("history.lock"),
-            StandardOpenOption.CREATE,
-            StandardOpenOption.WRITE,
-        )
-        historyLock = lockChannel?.tryLock()
-        historyLock != null
-    }.onFailure { lockFailure = it }.getOrDefault(false)
-    val store = if (lockAcquired) runCatching { DesktopStore(dataDir.resolve("history.json")) }.getOrNull() else null
-    // No process can be producing or uploading managed media at this point.
-    store?.let { runCatching { it.cleanupUnreferencedManagedMedia() } }
-    val credentials = DesktopCredentials(dataDir.resolve("credentials"))
-    val keys = NamedKeys(dataDir, credentials)
-    val replyImageCache = ReplyImageCache(dataDir.resolve("reply-images"))
-    try {
-        val appearanceStore = DesktopAppearanceStore(dataDir)
-        application {
-            var appearance by remember { mutableStateOf(appearanceStore.load()) }
-            var appearanceError by remember { mutableStateOf<String?>(null) }
-            var closeRequested by remember { mutableStateOf(false) }
-            val historySearchOpen = remember { mutableStateOf(false) }
-            Window(
-                onCloseRequest = { if (store == null) exitApplication() else closeRequested = true },
-                title = "chatbox",
-                onPreviewKeyEvent = { event ->
-                    if (event.opensHistorySearch() && lockAcquired && store != null) {
-                        historySearchOpen.value = true
-                        true
-                    } else false
-                },
-                state = rememberWindowState(size = DpSize(1000.dp, 760.dp)),
-            ) {
-                DesktopWindowEffects(window, appearance) { appearanceError = it }
-                LaunchedEffect(window) {
-                    window.minimumSize = Dimension(480, 400)
-                }
-                DesktopTheme(appearance.dark) {
-                    Surface(Modifier.fillMaxSize()) {
-                        when {
-                            !lockAcquired && lockFailure == null -> Text("Chatbox 已在运行，请使用已打开的窗口。", Modifier.padding(16.dp))
-                            !lockAcquired -> Text("无法锁定本地聊天历史文件，请检查数据目录权限。", Modifier.padding(16.dp))
-                            store == null -> Text("无法读取本地聊天历史。请先备份历史文件，再检查数据目录。", Modifier.padding(16.dp))
-                            else -> DesktopScreen(
-                                store, keys, replyImageCache, window, historySearchOpen,
-                                closeRequested = closeRequested,
-                                onCloseResult = { ready -> if (ready) exitApplication() else closeRequested = false },
-                            ) {
-                                DesktopAppearanceControls(
-                                    appearance,
-                                    onPreview = { appearance = it },
-                                    onCommit = { updated ->
-                                        appearance = updated
-                                        if (runCatching { appearanceStore.save(updated) }.isFailure) {
-                                            appearanceError = "无法保存窗口外观设置。"
-                                        }
-                                    },
-                                )
-                            }
-                        }
-                    }
-                    appearanceError?.let { message ->
-                        AlertDialog(
-                            onDismissRequest = { appearanceError = null },
-                            text = { Text(message) },
-                            confirmButton = { TextButton(onClick = { appearanceError = null }) { Text("关闭") } },
-                        )
-                    }
-                }
-            }
-        }
-    } finally {
-        runCatching { historyLock?.release() }
-        runCatching { lockChannel?.close() }
-    }
+    runDesktopShell(args)
 }
 
 private data class SendOperation(
@@ -196,6 +115,8 @@ internal data class SourceImageAddition(val paths: List<Path>, val notice: Strin
 private fun KeyEvent.opensHistorySearch(): Boolean =
     type == KeyEventType.KeyDown && key == Key.K && isCtrlPressed
 
+private val windowEventDispatcher = Executor(SwingUtilities::invokeLater).asCoroutineDispatcher()
+
 /** Production screen shared with the desktop UI harness. */
 @Composable
 internal fun DesktopScreen(
@@ -206,6 +127,16 @@ internal fun DesktopScreen(
     historySearchOpen: MutableState<Boolean> = remember { mutableStateOf(false) },
     closeRequested: Boolean = false,
     onCloseResult: (Boolean) -> Unit = {},
+    isClosing: () -> Boolean = { closeRequested },
+    hideRequested: Boolean = false,
+    onHideResult: (Boolean) -> Unit = {},
+    composerFocusSerial: Long = 0,
+    openReply: ReplyDestination? = null,
+    onOpenReplyHandled: () -> Unit = {},
+    canNavigateReply: () -> Boolean = { true },
+    mayNotifyReply: () -> Boolean = { false },
+    onReplyNotification: (ReplyDestination) -> Unit = {},
+    windowEvents: DesktopShellVisibility? = null,
     appearanceActions: @Composable () -> Unit = {},
 ) {
     val replyAudioCache = remember(replyImageCache) { ReplyAudioCache(replyImageCache.directory.resolveSibling("reply-audio")) }
@@ -225,17 +156,33 @@ internal fun DesktopScreen(
     val connection = rememberDesktopConnection(store, keys, composer::withLegacyDraftsSaved)
     var preparing by remember { mutableStateOf<Job?>(null) }
     var closeError by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(closeRequested) {
-        if (closeRequested) {
-            preparing?.join()
-            try {
-                closeError = composer.flushForExit()
-                onCloseResult(closeError == null)
-            } catch (error: Exception) {
-                closeError = "无法保存草稿，窗口保持打开。请检查本地数据目录后重试。（${error.javaClass.simpleName}）"
-                onCloseResult(false)
-            }
+    val windowCommit = closeRequested || hideRequested
+    val closingNow by rememberUpdatedState(isClosing)
+    val closeResult by rememberUpdatedState(onCloseResult)
+    val hideResult by rememberUpdatedState(onHideResult)
+    val mayNotify by rememberUpdatedState(mayNotifyReply)
+    val notifyReply by rememberUpdatedState(onReplyNotification)
+    val replyHandled by rememberUpdatedState(onOpenReplyHandled)
+    val canNavigateNow by rememberUpdatedState(canNavigateReply)
+    suspend fun saveForWindowChange() {
+        preparing?.join()
+        closeError = try {
+            composer.flushForExit()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            "无法保存草稿，窗口保持打开。请检查本地数据目录后重试。（${error.javaClass.simpleName}）"
         }
+        if (closingNow()) closeResult(closeError == null) else hideResult(closeError == null)
+    }
+    if (windowEvents != null) {
+        DisposableEffect(windowEvents, composer) {
+            // A hidden window cannot drive recomposition. Tray events still arrive on the AWT event queue.
+            windowEvents.bindDraftSave { scope.launch(windowEventDispatcher) { saveForWindowChange() } }
+            onDispose { windowEvents.bindDraftSave(null) }
+        }
+    } else {
+        LaunchedEffect(windowCommit) { if (windowCommit) saveForWindowChange() }
     }
     var sending by remember { mutableStateOf<SendOperation?>(null) }
     val activeOperationId = remember { AtomicInteger(0) }
@@ -249,12 +196,15 @@ internal fun DesktopScreen(
     var nextOperationId by remember { mutableIntStateOf(0) }
     var cacheGeneration by remember { mutableStateOf<Map<ReplyAttachmentKey, Int>>(emptyMap()) }
     var attachmentFailures by remember { mutableStateOf<Map<ReplyAttachmentKey, String>>(emptyMap()) }
-    var fetchingAttachments by remember { mutableStateOf<Set<ReplyAttachmentKey>>(emptySet()) }
+    // A repeated attachment ID may share one in-flight download across two live replies.
+    val fetchingAttachments = remember { mutableStateMapOf<ReplyAttachmentKey, MutableList<() -> Unit>>() }
 
     val profileId = connection.profileId
     var searchOpen by historySearchOpen
     var searchSerial by remember { mutableStateOf(0L) }
     var searchDestination by remember(profileId) { mutableStateOf<Pair<SessionKey, SearchHitNavigation>?>(null) }
+    var replySerial by remember { mutableStateOf(0L) }
+    var replyDestination by remember { mutableStateOf<Pair<SessionKey, ReplyTurnNavigation>?>(null) }
     val selectedProfile = connection.profiles.firstOrNull { it.id == profileId }
     val sessions = remember(profileId, connection.profiles, sessionsRevision.intValue) {
         profileId.takeIf(String::isNotBlank)?.let { runCatching { store.sessions(it) }.getOrDefault(emptyList()) }
@@ -265,6 +215,26 @@ internal fun DesktopScreen(
         sessions.firstOrNull { it.selected }?.id
             ?: sessions.firstOrNull()?.id.orEmpty()
     val currentKey = SessionKey(profileId, selectedSessionId)
+    val whaleGeneration = if (profileId.startsWith("launcher:") && connection.connected &&
+        !connection.verifying && !closeRequested
+    ) connection.snapshot()?.bindingGeneration else null
+    val whaleActive = remember(currentKey, whaleGeneration) { AtomicBoolean(true) }
+    var whaleSession by remember(whaleActive) { mutableStateOf<WhaleTaskSession?>(null) }
+    var whaleLoginTarget by remember(whaleActive) { mutableStateOf<DesktopSendTarget?>(null) }
+    var whaleLoginForRetry by remember(whaleActive) { mutableStateOf(false) }
+    DisposableEffect(whaleActive) {
+        onDispose {
+            whaleActive.set(false)
+            whaleSession = null
+            whaleLoginTarget = null
+        }
+    }
+    fun whaleTargetCurrent(target: DesktopSendTarget): Boolean =
+        !isClosing() && whaleActive.get() && whaleGeneration == target.bindingGeneration &&
+            connection.snapshot()?.bindingGeneration == whaleGeneration &&
+            store.activeProfileId == currentKey.profileId &&
+            store.profile(currentKey.profileId)?.currentSession == currentKey.sessionId
+
     val storedChat = chats[currentKey] ?: remember(currentKey, sessionsRevision.intValue) {
         if (profileId.isNotBlank() && selectedSessionId.isNotBlank()) {
             runCatching { store.sessionContent(profileId, selectedSessionId) }.getOrDefault(Chat(selectedSessionId))
@@ -279,7 +249,49 @@ internal fun DesktopScreen(
     val draft = editor?.field ?: TextFieldValue()
     val currentImages = editor?.draft?.attachments.orEmpty()
     val isOffline = selectedProfile?.offlineOnly == true
-    val isBusy = sending != null || preparing != null || closeRequested
+    fun hasScreenModal() = searchOpen || whaleLoginTarget != null || retryConfirmation != null || closeError != null || closingNow()
+    val screenModal = hasScreenModal()
+    DesktopModalGuard(screenModal)
+    val navigating = openReply != null && !screenModal
+    val composerLocked = windowCommit || navigating
+    fun composerLockedNow() = composerLocked || windowEvents?.let { it.exiting || it.hideRequested || !it.visible } == true
+    val isBusy = sending != null || preparing != null || composerLocked
+    LaunchedEffect(openReply, screenModal, windowCommit) {
+        val target = openReply ?: return@LaunchedEffect
+        if (screenModal || windowCommit) return@LaunchedEffect
+        try {
+            preparing?.join()
+            if (target.key != currentKey) {
+                val issue = composer.flushForExit()
+                if (issue != null) {
+                    notices[currentKey] = issue
+                    replyHandled()
+                    return@LaunchedEffect
+                }
+            }
+            // A modal can open while a recording or an import finishes, including inside AWT's nested event loop.
+            while (hasScreenModal() || !canNavigateNow()) delay(100)
+            val selected = synchronized(store) {
+                store.selectReplyIfPresent(target).also { found ->
+                    if (found) connection.adoptSelectedProfileForReply(checkNotNull(store.profile(target.key.profileId)))
+                }
+            }
+            if (selected) {
+                chats[target.key] = latestChat(target.key)
+                sessionsRevision.intValue++
+                searchDestination = null
+                replyDestination = target.key to ReplyTurnNavigation(++replySerial, target.entryIndex)
+            } else notices[currentKey] = "这条回复已不存在。"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            notices[currentKey] = safeHistoryFailureMessage(error, "打开回复")
+        }
+        replyHandled()
+    }
+    DisposableEffect(currentKey) {
+        onDispose { if (replyDestination?.first == currentKey) replyDestination = null }
+    }
     val currentOperation = sending?.takeIf { it.key == currentKey }
     val currentProgress = currentOperation?.let {
         EntryProgress(it.entryIndex, it.stage, it.stageStartedAtNanos)
@@ -288,6 +300,7 @@ internal fun DesktopScreen(
     }?.let { index -> failedProgressByEntry[TimedEntryKey(currentKey, index)] }
 
     fun chooseImages(replacing: Path? = null) {
+        if (composerLockedNow()) return
         val origin = currentKey
         val originEditor = composer.editor(origin)?.takeUnless { it.commitInProgress } ?: return
         originEditor.editSerial++
@@ -298,7 +311,7 @@ internal fun DesktopScreen(
                 isMultiSelectionEnabled = replacing == null
                 fileFilter = FileNameExtensionFilter("PNG / JPEG 图片", "png", "jpg", "jpeg")
             }
-            if (chooser.showOpenDialog(parentWindow) == JFileChooser.APPROVE_OPTION) {
+            if (chooser.showOpenDialog(parentWindow) == JFileChooser.APPROVE_OPTION && !composerLockedNow()) {
                 val selected = chooser.selectedFiles.takeIf { it.isNotEmpty() }
                     ?.toList()
                     ?: listOfNotNull(chooser.selectedFile)
@@ -306,7 +319,7 @@ internal fun DesktopScreen(
                 else composer.replaceMissingAttachment(origin, replacing, selected)
             }
         } catch (_: InvalidPathException) {
-            composer.addFiles(origin, emptyList(), invalidPathCount = 1)
+            if (!composerLockedNow()) composer.addFiles(origin, emptyList(), invalidPathCount = 1)
         }
     }
 
@@ -316,10 +329,14 @@ internal fun DesktopScreen(
         }
     }
 
-    fun fetchReplyAttachment(target: DesktopSendTarget, key: ReplyAttachmentKey) {
+    fun fetchReplyAttachment(target: DesktopSendTarget, key: ReplyAttachmentKey, onInitialSave: (() -> Unit)? = null) {
         val sessionKey = SessionKey(key.profileId, key.sessionId)
-        if (sessionKey in deletedSessionKeys || key in fetchingAttachments) return
-        fetchingAttachments = fetchingAttachments + key
+        if (sessionKey in deletedSessionKeys) return
+        fetchingAttachments[key]?.let { listeners ->
+            onInitialSave?.let(listeners::add)
+            return
+        }
+        fetchingAttachments[key] = listOfNotNull(onInitialSave).toMutableList()
         thread(isDaemon = true, name = "chatbox-reply-attachment") {
             val result = runCatching {
                 target.checkTarget()
@@ -338,11 +355,12 @@ internal fun DesktopScreen(
             if (sessionKey !in deletedSessionKeys) result.exceptionOrNull()?.let { invalidateOnFailure(target, it) }
             SwingUtilities.invokeLater {
                 if (sessionKey in deletedSessionKeys) return@invokeLater
-                fetchingAttachments = fetchingAttachments - key
+                val listeners = fetchingAttachments.remove(key).orEmpty()
                 val failure = result.exceptionOrNull()
                 if (failure == null) {
                     attachmentFailures = attachmentFailures - key
                     cacheGeneration = cacheGeneration + (key to ((cacheGeneration[key] ?: 0) + 1))
+                    listeners.forEach { it() }
                 } else {
                     attachmentFailures = attachmentFailures + (key to safeAttachmentFailureMessage(failure, key.type))
                 }
@@ -352,7 +370,8 @@ internal fun DesktopScreen(
 
     fun retryReplyAttachment(key: ReplyAttachmentKey) {
         val sessionKey = SessionKey(key.profileId, key.sessionId)
-        if (sessionKey != currentKey || sessionKey in deletedSessionKeys || isBusy || isOffline || !connection.connected || connection.verifying) return
+        if (sessionKey != currentKey || sessionKey in deletedSessionKeys || isBusy || composerLockedNow() ||
+            isOffline || !connection.connected || connection.verifying) return
         val target = runCatching { connection.snapshot() }.getOrNull()
         if (target == null || target.profileId != key.profileId) {
             notices[sessionKey] = "请先连接并验证当前服务，再获取回复${key.type.label}。"
@@ -363,7 +382,7 @@ internal fun DesktopScreen(
 
     fun startRequest(
         clickedAtNanos: Long, targetKey: SessionKey, target: DesktopSendTarget, entry: Entry,
-        pending: Chat, attachments: List<Path>,
+        pending: Chat, attachments: List<Path>, taskSession: WhaleTaskSession?,
     ) {
         unsavedReplies.remove(targetKey)
         chats[targetKey] = pending
@@ -378,6 +397,11 @@ internal fun DesktopScreen(
         timingByEntry[TimedEntryKey(targetKey, entryIndex)] = timing
         sending = operation
         activeOperationId.set(operationId)
+        val notification = LiveReplyNotification {
+            if (scope.isActive && !closingNow() && targetKey !in deletedSessionKeys && !operation.cancellation.get()) {
+                notifyReply(ReplyDestination(targetKey, entryIndex))
+            }
+        }
         val query = entry.question
         thread(isDaemon = true, name = "chatbox-request") {
             fun operationIsActive() = !operation.cancellation.get() && activeOperationId.get() == operationId
@@ -423,16 +447,35 @@ internal fun DesktopScreen(
                         sending = active.copy(answer = updatedEntry.answer, replyAttachments = updatedEntry.replyAttachments)
                     }
                     if (save.isFailure) notices[targetKey] = "本地保存失败；收到的${type.label}可能无法在重启后恢复。"
-                    if (key != null && fetch) fetchReplyAttachment(target, key)
+                    if (key != null && fetch) fetchReplyAttachment(target, key, notification::initialAttachmentSaved)
                 }
             }
 
             val result = runCatching {
                 check(operationIsActive()) { "会话已删除。" }
-                target.checkTarget()
-                check(operationIsActive()) { "会话已删除。" }
-                requestStarted = true
-                if (attachments.isEmpty()) {
+                if (taskSession == null) {
+                    target.checkTarget()
+                    check(operationIsActive()) { "会话已删除。" }
+                }
+                fun receiveText(delta: String) {
+                    if (!operationIsActive()) return
+                    answer = delta
+                    SwingUtilities.invokeLater {
+                        if (operationIsActive() && sending?.id == operationId) sending = sending?.copy(answer = delta)
+                    }
+                }
+                if (taskSession != null) {
+                    sendWhaleTask(
+                        target, taskSession, query, onEvent = ::observeTransportEvent, onText = ::receiveText,
+                        beforeRequest = {
+                            check(operationIsActive() && whaleTargetCurrent(target) && whaleSession === taskSession) {
+                                "鲸鱼任务登录目标已切换。"
+                            }
+                            requestStarted = true
+                        },
+                    )
+                } else if (attachments.isEmpty()) {
+                    requestStarted = true
                     sendToAstrBot(
                         target.address,
                         target.token,
@@ -443,17 +486,10 @@ internal fun DesktopScreen(
                         onReplyImage = { id, offset -> receiveAttachment(ReplyAttachmentType.IMAGE, id, offset) },
                         onReplyAudio = { id, offset -> receiveAttachment(ReplyAttachmentType.AUDIO, id, offset) },
                         onEvent = ::observeTransportEvent,
-                        onText = { delta ->
-                            if (!operationIsActive()) return@sendToAstrBot
-                            answer = delta
-                            SwingUtilities.invokeLater {
-                                if (!operationIsActive()) return@invokeLater
-                                val active = sending
-                                if (active?.id == operationId) sending = active.copy(answer = delta)
-                            }
-                        },
+                        onText = ::receiveText,
                     )
                 } else {
+                    requestStarted = true
                     sendAttachmentsToAstrBot(
                         target.address,
                         target.token,
@@ -465,15 +501,7 @@ internal fun DesktopScreen(
                         onReplyImage = { id, offset -> receiveAttachment(ReplyAttachmentType.IMAGE, id, offset) },
                         onReplyAudio = { id, offset -> receiveAttachment(ReplyAttachmentType.AUDIO, id, offset) },
                         onEvent = ::observeTransportEvent,
-                        onText = { delta ->
-                            if (!operationIsActive()) return@sendAttachmentsToAstrBot
-                            answer = delta
-                            SwingUtilities.invokeLater {
-                                if (!operationIsActive()) return@invokeLater
-                                val active = sending
-                                if (active?.id == operationId) sending = active.copy(answer = delta)
-                            }
-                        },
+                        onText = ::receiveText,
                     )
                 }
             }
@@ -490,14 +518,20 @@ internal fun DesktopScreen(
             val completed = pending.copy(entries = pending.entries.dropLast(1) + entry.copy(
                 answer = answer,
                 replyAttachments = attachments,
-                status = if (result.isSuccess) "已完成" else
-                    (if (requestStarted) "发送失败：" else "未发送：") + observedFailureStage + "：" +
-                        safeFailureMessage(failure!!, observedFailureStage),
+                status = when {
+                    result.isSuccess -> "已完成"
+                    failure is WhaleTaskOutcomeUnknownException -> "上次回复未确认"
+                    else -> (if (requestStarted) "发送失败：" else "未发送：") + observedFailureStage + "：" +
+                        safeFailureMessage(failure!!, observedFailureStage)
+                },
             ))
             val saved = runCatching { store.saveSessionContent(targetKey.profileId, completed) }
-            if (failure != null && operationIsActive()) invalidateOnFailure(target, failure)
+            if (failure != null && taskSession == null && operationIsActive()) invalidateOnFailure(target, failure)
             SwingUtilities.invokeLater {
                 if (!operationIsActive()) return@invokeLater
+                if (failure is WhaleTaskLoginRequiredException && taskSession != null &&
+                    whaleTargetCurrent(target) && whaleSession === taskSession
+                ) whaleSession = null
                 if (saved.isFailure) unsavedReplies[targetKey] = completed
                 chats[targetKey] = completed
                 sessionsRevision.intValue++
@@ -521,6 +555,7 @@ internal fun DesktopScreen(
                         result.isSuccess -> notices.remove(targetKey)
                         else -> notices[targetKey] = observedFailureStage + "：" + safeFailureMessage(failure!!, observedFailureStage)
                     }
+                    notification.complete(completed.entries.last(), saved.isSuccess) { !closingNow() && mayNotify() }
                 }
             }
         }
@@ -528,9 +563,13 @@ internal fun DesktopScreen(
 
     fun dispatch(retryEntry: Entry? = null, targetKey: SessionKey = currentKey) {
         val clickedAtNanos = System.nanoTime()
-        if (targetKey != currentKey || editor == null || closeRequested || sending != null || preparing != null ||
+        if (targetKey != currentKey || editor == null || composerLockedNow() || sending != null || preparing != null ||
             composer.recordingKey == targetKey || (retryEntry == null && editor.field.composition != null)
         ) return
+        if (retryEntry?.blocksWhaleTaskRetry(targetKey.profileId) == true) {
+            notices[targetKey] = WHALE_TASK_CHECK_STATUS
+            return
+        }
         if (isOffline) {
             notices[targetKey] = "离线历史不可发送。请选择已验证的服务配置。"
             return
@@ -563,7 +602,28 @@ internal fun DesktopScreen(
                     return@launch
                 }
                 val revision = editor.revision
-                val query = retryEntry?.question ?: committed.text.trim()
+                val original = retryEntry?.question ?: committed.text
+                val taskText = original.trimStart()
+                val task = target.profileId.startsWith("launcher:") && isWhaleTaskCommand(taskText)
+                val query = if (task) taskText else retryEntry?.question ?: original.trim()
+                val taskSession = if (task) {
+                    if (!whaleTargetCurrent(target)) {
+                        notices[targetKey] = "连接或会话已切换，请确认后重试。"
+                        return@launch
+                    }
+                    val hasAttachments = if (retryEntry == null) committed.attachments.isNotEmpty() else
+                        retryEntry.attachmentReferences.isNotEmpty() || retryEntry.attachmentReference != null ||
+                            retryEntry.attachmentDisplayName != null
+                    if (hasAttachments) {
+                        notices[targetKey] = "鲸鱼任务仅支持文字，请移除图片或语音后发送。"
+                        return@launch
+                    }
+                    whaleSession ?: run {
+                        whaleLoginForRetry = retryEntry != null
+                        whaleLoginTarget = target
+                        return@launch
+                    }
+                } else null
                 val paths = if (retryEntry == null) committed.attachments else try {
                     retryEntry.attachmentReferences.ifEmpty { listOfNotNull(retryEntry.attachmentReference) }.map { Path.of(it) }
                 } catch (_: InvalidPathException) {
@@ -603,7 +663,7 @@ internal fun DesktopScreen(
                 }
                 if (targetKey in deletedSessionKeys) return@launch
                 if (retryEntry == null) composer.consumed(targetKey, revision)
-                startRequest(clickedAtNanos, targetKey, target, entry, pending, paths)
+                startRequest(clickedAtNanos, targetKey, target, entry, pending, paths, taskSession)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -618,6 +678,7 @@ internal fun DesktopScreen(
     }
 
     fun selectSearchHit(hit: HistoryHit, query: String): Boolean {
+        if (composerLockedNow()) return false
         val key = SessionKey(hit.profileId, hit.sessionId)
         val selected = runCatching {
             synchronized(store) {
@@ -643,6 +704,7 @@ internal fun DesktopScreen(
             return false
         }
         chats[key] = selected
+        replyDestination = null
         searchSerial++
         searchDestination = if (hit.side == HistorySide.TITLE) null else key to SearchHitNavigation(
             searchSerial, hit.entryIndex, hit.side == HistorySide.ASSISTANT, hit.start, hit.endExclusive,
@@ -651,11 +713,12 @@ internal fun DesktopScreen(
         return true
     }
 
-    val canCreate = profileId.isNotBlank() && selectedProfile != null && !selectedProfile.offlineOnly
+    val canCreate = profileId.isNotBlank() && selectedProfile != null && !selectedProfile.offlineOnly && !composerLocked
     val canSend = selectedSessionId.isNotBlank() && !isBusy && !isOffline && connection.connected && !connection.verifying &&
         editor != null && draft.composition == null && composer.recordingKey != currentKey &&
         (draft.text.isNotBlank() || currentImages.isNotEmpty() || composer.pendingImport(currentKey) != null)
     val canRetry = !isBusy && !isOffline && connection.connected && !connection.verifying && composer.recordingKey != currentKey
+    val retryingAttachments = fetchingAttachments.keys.toSet()
 
     Surface(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
         if (event.opensHistorySearch()) {
@@ -664,13 +727,15 @@ internal fun DesktopScreen(
         } else false
     }) {
         DesktopChatLayout(
+            composerFocusSerial = composerFocusSerial,
+            replyNavigation = replyDestination?.takeIf { it.first == currentKey }?.second,
             searchSelectionSerial = searchSerial,
             searchNavigation = searchDestination?.takeIf { it.first == currentKey }?.second,
             profileId = profileId,
             sessions = sessions,
             chat = chat,
             onSelectSession = { sessionId ->
-                if (profileId.isNotBlank()) {
+                if (!composerLockedNow() && profileId.isNotBlank()) {
                     runCatching {
                         store.selectSession(profileId, sessionId)
                         searchDestination = null
@@ -681,7 +746,7 @@ internal fun DesktopScreen(
                 }
             },
             onDeleteSession = { sessionId ->
-                if (profileId.isNotBlank() && sessions.any { it.id == sessionId }) {
+                if (!composerLockedNow() && profileId.isNotBlank() && sessions.any { it.id == sessionId }) {
                     val key = SessionKey(profileId, sessionId)
                     runCatching { store.deleteSession(profileId, sessionId) }
                         .onSuccess {
@@ -697,7 +762,7 @@ internal fun DesktopScreen(
                             unsavedReplies.remove(key)
                             composer.forget(key)
                             notices.remove(key)
-                            fetchingAttachments = fetchingAttachments.filterNot { it.profileId == key.profileId && it.sessionId == key.sessionId }.toSet()
+                            fetchingAttachments.keys.removeIf { it.profileId == key.profileId && it.sessionId == key.sessionId }
                             attachmentFailures = attachmentFailures.filterKeys { it.profileId != key.profileId || it.sessionId != key.sessionId }
                             cacheGeneration = cacheGeneration.filterKeys { it.profileId != key.profileId || it.sessionId != key.sessionId }
                             timingByEntry.keys.removeIf { it.key == key }
@@ -713,7 +778,7 @@ internal fun DesktopScreen(
                     .exceptionOrNull()?.let { safeHistoryFailureMessage(it, "写入") }
             },
             onNewSession = {
-                if (canCreate) {
+                if (canCreate && !composerLockedNow()) {
                     runCatching {
                         val created = store.createSession(profileId)
                         searchDestination = null
@@ -729,30 +794,36 @@ internal fun DesktopScreen(
                     onClick = { searchOpen = true },
                     modifier = Modifier.size(36.dp).testTag("history-search-open"),
                 ) { Icon(Icons.Filled.Search, contentDescription = "搜索聊天记录 (Ctrl+K)") }
+                if (whaleSession != null) {
+                    TextButton(onClick = {
+                        whaleSession = null
+                        notices[currentKey] = "已退出鲸鱼任务。"
+                    }, enabled = !isBusy) { Text("退出鲸鱼任务") }
+                }
                 appearanceActions()
                 DesktopConnectionControls(connection)
             },
             draft = draft,
-            onDraft = { value -> if (!closeRequested) composer.input(currentKey, value) },
+            onDraft = { value -> if (!composerLockedNow()) composer.input(currentKey, value) },
             selectedImage = currentImages.firstOrNull(),
             selectedImages = currentImages,
             onChooseImage = { chooseImages() },
             onReplaceMissingAttachment = { path -> chooseImages(path) },
-            composerCommitInProgress = closeRequested || editor?.commitInProgress == true,
-            onAddImages = { files -> composer.addFiles(currentKey, files) },
-            onRemoveImage = { composer.remove(currentKey, null) },
-            onRemoveImagePath = { composer.remove(currentKey, it) },
-            onPasteAttachment = { selectedSessionId.isNotBlank() && composer.paste(currentKey) },
-            canRecord = selectedSessionId.isNotBlank() && editor?.commitInProgress == false && composer.recordingKey == null && !closeRequested,
+            composerCommitInProgress = composerLocked || editor?.commitInProgress == true,
+            onAddImages = { files -> if (!composerLockedNow()) composer.addFiles(currentKey, files) },
+            onRemoveImage = { if (!composerLockedNow()) composer.remove(currentKey, null) },
+            onRemoveImagePath = { if (!composerLockedNow()) composer.remove(currentKey, it) },
+            onPasteAttachment = { composerLockedNow() || (selectedSessionId.isNotBlank() && composer.paste(currentKey)) },
+            canRecord = selectedSessionId.isNotBlank() && editor?.commitInProgress == false && composer.recordingKey == null && !composerLocked,
             recordingMillis = composer.elapsed.takeIf { composer.recordingKey == currentKey },
-            onStartRecording = { composer.startMic(currentKey) },
-            onStopRecording = { composer.stopMic(currentKey) },
-            onCancelRecording = { composer.stopMic(currentKey, discard = true) },
+            onStartRecording = { if (!composerLockedNow()) composer.startMic(currentKey) },
+            onStopRecording = { if (!composerLockedNow()) composer.stopMic(currentKey) },
+            onCancelRecording = { if (!composerLockedNow()) composer.stopMic(currentKey, discard = true) },
             onSend = { dispatch() },
             canSend = canSend,
             notice = if (loadedDraft.isFailure) "本地草稿无法读取。" else notices[currentKey],
             onRetry = { entry ->
-                if (canRetry && chat.entries.any { it === entry || it == entry }) {
+                if (canRetry && !composerLockedNow() && chat.entries.any { it === entry || it == entry }) {
                     retryConfirmation = RetryConfirmation(currentKey, entry)
                 }
             },
@@ -767,7 +838,7 @@ internal fun DesktopScreen(
                     audioCache = replyAudioCache,
                     cacheGeneration = cacheGeneration,
                     failures = attachmentFailures,
-                    retrying = fetchingAttachments,
+                    retrying = retryingAttachments,
                     retryEnabled = canRetry,
                     onRetry = ::retryReplyAttachment,
                 )
@@ -779,6 +850,30 @@ internal fun DesktopScreen(
             },
             progress = currentProgress,
         )
+
+        whaleLoginTarget?.let { target ->
+            WhaleTaskLoginDialog(
+                target.address,
+                onDismiss = { whaleLoginTarget = null },
+                login = { username, password, totp ->
+                    val session = withContext(Dispatchers.IO) {
+                        val loginContext = currentCoroutineContext()
+                        loginWhaleTasks(target, username, password, totp, beforeRequest = {
+                            loginContext.ensureActive()
+                            check(whaleLoginTarget === target && whaleTargetCurrent(target)) {
+                                "鲸鱼任务登录目标已切换。"
+                            }
+                        })
+                    }
+                    if (whaleTargetCurrent(target) && whaleLoginTarget === target) {
+                        whaleSession = session
+                        whaleLoginTarget = null
+                        notices[currentKey] = if (whaleLoginForRetry) "登录成功，请再次点击重发并确认。"
+                            else "登录成功，请再次点击发送。"
+                    }
+                },
+            )
+        }
 
         if (closeRequested || closeError != null) {
             AlertDialog(
@@ -969,11 +1064,20 @@ private fun shouldInvalidateConnection(error: Throwable): Boolean = when (error.
 }
 
 /** Convert only known protocol failures to display text; never reflect arbitrary server or secret text. */
-private fun safeFailureMessage(
+internal fun safeFailureMessage(
     error: Throwable,
     failedStage: String? = null,
     fallback: String = "连接或服务错误；回复状态未确认。",
 ): String {
+    if (error is WhaleTaskOutcomeUnknownException) return WHALE_TASK_CHECK_STATUS
+    if (error is WhaleTaskLoginRequiredException) return "鲸鱼任务登录已失效，请重新登录后重试。"
+    when (error.message) {
+        "找不到任务接口，请检查 AstrBot 和任务插件版本。",
+        "任务插件返回的会话编号无效。",
+        "任务接口返回 HTTP 503。" -> return "任务接口尚不可用，请检查鲸鱼任务插件是否已启用并重载。"
+        "当前 Dashboard 账号无权使用此任务会话，请检查插件绑定。" ->
+            return "当前账号无权使用鲸鱼任务，请检查插件的管理账号绑定。"
+    }
     if (error is SocketTimeoutException) return when {
         failedStage?.startsWith("上传语音") == true -> "语音上传超时。"
         failedStage?.startsWith("上传图片") == true -> "图片上传超时。"
@@ -1008,6 +1112,9 @@ private fun safeAttachmentFailureMessage(error: Throwable, type: ReplyAttachment
 }
 
 private val SAFE_FAILURES = setOf(
+    "鲸鱼任务登录目标已切换。",
+    "任务请求中断，命令可能已执行，请先核对状态。",
+    "无法连接本机 Dashboard，请检查 Launcher。",
     "密钥无效或已撤销。",
     "权限不足，请检查聊天权限。",
     "缺少文件上传权限，请为 API 密钥启用 file 权限。",
