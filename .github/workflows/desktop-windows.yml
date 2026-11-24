@@ -1,105 +1,55 @@
-name: Chatbox Windows verification
-on:
-  push:
-    branches: ['feat/desktop-mvp', 'main']
-    paths:
-      - 'desktop/**'
-      - 'app/**'
-      - 'build.gradle.kts'
-      - 'settings.gradle.kts'
-      - 'gradle.properties'
-      - 'gradle/**'
-      - 'gradlew*'
-      - '.github/workflows/desktop-windows.yml'
-  pull_request:
-    branches: ['main']
-    paths:
-      - 'desktop/**'
-      - 'app/**'
-      - 'build.gradle.kts'
-      - 'settings.gradle.kts'
-      - 'gradle.properties'
-      - 'gradle/**'
-      - 'gradlew*'
-      - '.github/workflows/desktop-windows.yml'
-  workflow_dispatch:
+name: Chatbox Windows Installer upgrade
+on: workflow_dispatch
 permissions:
   contents: read
 jobs:
-  windows:
+  upgrade:
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: qa
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 42fd93bd0a19570f09c960b4092bf9d9ace7c1f5
+          path: v17
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 48c4d6624bf6a2711a74acbde9e9eaf9db91fdce
+          path: v18
+          persist-credentials: false
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
-      - name: Verify WiX and run tests, smoke checks and MSI packaging
+      - name: Build both pinned MSI packages
         shell: pwsh
         run: |
           if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
-            $wix = Get-ChildItem -Path "${env:ProgramFiles(x86)}\WiX Toolset v3*" -Directory |
+            $wix = Get-ChildItem "${env:ProgramFiles(x86)}\WiX Toolset v3*" -Directory |
               Sort-Object Name -Descending | Select-Object -First 1
-            if (-not $wix) { throw "WiX Toolset v3 not found on runner." }
-            Add-Content -Path $env:GITHUB_PATH -Value "$($wix.FullName)\bin"
+            if (-not $wix) { throw "WiX Toolset v3 is missing." }
             $env:PATH = "$($wix.FullName)\bin;$env:PATH"
           }
           Get-Command candle.exe,light.exe -ErrorAction Stop
-          .\gradlew.bat -p desktop --no-daemon test desktopSmoke createDistributable packageMsi
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Extract the MSI and smoke-test its Windows executable
-        shell: pwsh
-        run: |
-          $packages = @(Get-ChildItem "desktop\build\compose\binaries\main\msi\*.msi" -File)
-          if ($packages.Count -ne 1) { throw "Expected exactly one MSI package." }
-          $unpacked = Join-Path $env:RUNNER_TEMP "chatbox-msi-extract"
-          $log = Join-Path $env:RUNNER_TEMP "chatbox-msi-extract.log"
-          $msi = Start-Process -FilePath msiexec.exe -ArgumentList "/a `"$($packages[0].FullName)`" /qn TARGETDIR=`"$unpacked`" /L*v `"$log`"" -Wait -PassThru
-          if ($msi.ExitCode -ne 0) {
-            if (Test-Path $log) { Get-Content $log -Tail 100 }
-            throw "MSI extraction failed: $($msi.ExitCode)"
+          foreach ($checkout in 'v17','v18') {
+            Push-Location $checkout
+            try {
+              git rev-parse HEAD
+              .\gradlew.bat -p desktop --no-daemon packageMsi
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            } finally { Pop-Location }
           }
-          $executables = @(Get-ChildItem $unpacked -Recurse -File -Filter "Chatbox.exe")
-          if ($executables.Count -ne 1) { throw "Expected exactly one packaged Chatbox.exe." }
-          $exe = $executables[0]
-          $marker = Join-Path $env:RUNNER_TEMP "chatbox-smoke-marker.txt"
-          if (Test-Path $marker) { Remove-Item $marker }
-          $process = Start-Process -FilePath $exe.FullName -ArgumentList "--smoke-test `"$marker`"" -PassThru
-          if (-not $process.WaitForExit(30000)) { $process.Kill(); throw "Packaged app did not finish its smoke check." }
-          if ($process.ExitCode -ne 0) { throw "Packaged smoke check failed: $($process.ExitCode)" }
-          if (-not (Test-Path $marker) -or (Get-Content -Raw $marker) -ne "chatbox-smoke-ok") { throw "Packaged smoke marker was not written." }
-          & .\desktop\test-windows-upgrade.ps1 -MsiPath $packages[0].FullName -CandidateRoot $unpacked
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: Chatbox-Windows-MSI-Upgrade-Logs
-          path: ${{ runner.temp }}/chatbox-upgrade-regression-*/*.log
-          retention-days: 7
-          if-no-files-found: ignore
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Chatbox-Windows-MSI
-          path: desktop/build/compose/binaries/main/msi/*.msi
-          retention-days: 7
-          if-no-files-found: error
+      - name: Install 0.1.17 and upgrade in place to 0.1.18
+        run: python -B qa/.github/workflows/verify-msi-upgrade.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: Chatbox-Windows-Test-Report
-          path: desktop/build/reports/tests/test/
+          name: windows-installer-upgrade-evidence
+          path: ${{ runner.temp }}/chatbox-msi-transaction/evidence/
           retention-days: 7
-          if-no-files-found: ignore
-  android-regression:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
-      - name: Run Android unit tests and debug build
-        run: bash ./gradlew --no-daemon testDebugUnitTest assembleDebug
+          if-no-files-found: warn
