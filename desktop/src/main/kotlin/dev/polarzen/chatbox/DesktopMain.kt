@@ -140,6 +140,7 @@ internal fun DesktopScreen(
 ) {
     val replyAudioCache = remember(replyImageCache) { ReplyAudioCache(replyImageCache.directory.resolveSibling("reply-audio")) }
     val sessionsRevision = remember { mutableIntStateOf(0) }
+    val heartRate = rememberHeartRateState()
     val scope = rememberCoroutineScope()
     val deletedSessionKeys = remember { ConcurrentHashMap.newKeySet<SessionKey>() }
     val chats = remember { mutableStateMapOf<SessionKey, Chat>() }
@@ -480,6 +481,7 @@ internal fun DesktopScreen(
                         targetKey.sessionId,
                         query,
                         allowLoopbackHttp = target.allowLoopbackHttp,
+                        heartRate = heartRate.liveHeartRate,
                         onReplyImage = { id, offset -> receiveAttachment(ReplyAttachmentType.IMAGE, id, offset) },
                         onReplyAudio = { id, offset -> receiveAttachment(ReplyAttachmentType.AUDIO, id, offset) },
                         onEvent = ::observeTransportEvent,
@@ -495,6 +497,7 @@ internal fun DesktopScreen(
                         attachments,
                         query,
                         allowLoopbackHttp = target.allowLoopbackHttp,
+                        heartRate = heartRate.liveHeartRate,
                         onReplyImage = { id, offset -> receiveAttachment(ReplyAttachmentType.IMAGE, id, offset) },
                         onReplyAudio = { id, offset -> receiveAttachment(ReplyAttachmentType.AUDIO, id, offset) },
                         onEvent = ::observeTransportEvent,
@@ -789,7 +792,7 @@ internal fun DesktopScreen(
             },
             canCreate = canCreate,
             topActions = {
-                HeartRateControl()
+                if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) HeartRatePanel(heartRate)
                 IconButton(
                     onClick = { searchOpen = true },
                     modifier = Modifier.size(36.dp).testTag("history-search-open"),

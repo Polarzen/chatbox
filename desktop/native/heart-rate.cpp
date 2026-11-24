@@ -5,6 +5,7 @@
 #include <winrt/Windows.Devices.Bluetooth.Advertisement.h>
 #include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
 #include <winrt/Windows.Storage.Streams.h>
+#include <chrono>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -137,7 +138,13 @@ static int connect(uint64_t address, BluetoothAddressType type, HANDLE stop, con
             std::vector<uint8_t> data(reader.UnconsumedBufferLength());
             reader.ReadBytes(data);
             auto bpm = heartRate(data.data(), data.size());
-            line(bpm ? "BPM\t" + std::to_string(*bpm) : "NO_READING");
+            if (bpm) {
+                const auto received = winrt::clock::to_sys(args.Timestamp());
+                const auto epochMs = std::chrono::duration_cast<std::chrono::milliseconds>(received.time_since_epoch()).count();
+                line("BPM\t" + std::to_string(*bpm) + "\t" + std::to_string(epochMs));
+            } else {
+                line("NO_READING");
+            }
         } catch (...) {
             line("NO_READING");
         }

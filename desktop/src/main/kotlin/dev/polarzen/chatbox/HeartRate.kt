@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.AlertDialog
+import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.runtime.*
@@ -13,6 +14,7 @@ import androidx.compose.ui.unit.dp
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.time.Instant
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -84,7 +86,10 @@ internal class HeartRun(val device: HeartDevice?)
 
 private enum class HeartPhase { CONNECTING, WAITING_FOR_PACKET, RECEIVING }
 
-internal class HeartRateState(private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 }) {
+internal class HeartRateState(
+    val liveHeartRate: LiveHeartRate = LiveHeartRate(),
+    private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
+) {
     var active by mutableStateOf<HeartRun?>(null)
         private set
     var selected by mutableStateOf<HeartDevice?>(null)
@@ -95,6 +100,11 @@ internal class HeartRateState(private val nowMs: () -> Long = { System.nanoTime(
     var bpm by mutableStateOf<Int?>(null)
         private set
 
+    private fun clearReading() {
+        liveHeartRate.update(null)
+        bpm = null
+    }
+
     fun start(device: HeartDevice?) {
         if (device == null) {
             devices.clear()
@@ -103,19 +113,19 @@ internal class HeartRateState(private val nowMs: () -> Long = { System.nanoTime(
             selected = device
             status = "正在连接 ${device.label}…"
         }
-        bpm = null
+        clearReading()
         active = HeartRun(device)
     }
 
     fun stop() {
         active = null
-        bpm = null
+        clearReading()
         status = "已停止。"
     }
 
     private fun finish(run: HeartRun, message: String) {
         if (active !== run) return
-        bpm = null
+        clearReading()
         status = message
         active = null
     }
@@ -188,12 +198,21 @@ internal class HeartRateState(private val nowMs: () -> Long = { System.nanoTime(
                                 status = "已订阅心率通知，等待首个读数…"
                             }
                             "BPM", "NO_READING" -> if (!scanning) {
-                                phase = HeartPhase.RECEIVING
-                                deadline = nowMs() + 10_000
-                                bpm = if (parts.first() == "BPM") {
-                                    parts.getOrNull(1)?.toIntOrNull()?.takeIf { it in 1..65535 }
-                                } else null
-                                status = if (bpm == null) "暂无有效读数，请检查佩戴状态。" else "实时心率"
+                                val epochMs = if (parts.first() == "BPM" && parts.size == 3) parts[2].toLongOrNull() else null
+                                val reading = parts.getOrNull(1)?.toIntOrNull()
+                                if (epochMs != null && liveHeartRate.update(reading, Instant.ofEpochMilli(epochMs))) {
+                                    phase = HeartPhase.RECEIVING
+                                    deadline = nowMs() + liveHeartRate.remainingMillis()
+                                    bpm = reading
+                                    status = "实时心率"
+                                } else {
+                                    clearReading()
+                                    status = "暂无有效读数，请检查佩戴状态。"
+                                    if (parts.first() == "NO_READING") {
+                                        phase = HeartPhase.RECEIVING
+                                        deadline = nowMs() + 10_000
+                                    }
+                                }
                             }
                         }
                     }
@@ -210,20 +229,22 @@ internal class HeartRateState(private val nowMs: () -> Long = { System.nanoTime(
 }
 
 @Composable
-internal fun HeartRateControl() {
-    if (!System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) return
-    HeartRatePanel(remember { HeartRateState() }, ::heartEvents)
-}
-
-@Composable
-internal fun HeartRatePanel(state: HeartRateState, events: (HeartDevice?) -> Flow<String>) {
-    var open by remember { mutableStateOf(false) }
+internal fun rememberHeartRateState(events: (HeartDevice?) -> Flow<String> = ::heartEvents): HeartRateState {
+    val state = remember { HeartRateState() }
+    DisposableEffect(state) {
+        onDispose { state.stop() }
+    }
     LaunchedEffect(state) {
         snapshotFlow { state.active }.collectLatest { run ->
             if (run != null) state.read(run, events(run.device))
         }
     }
+    return state
+}
 
+@Composable
+internal fun HeartRatePanel(state: HeartRateState) {
+    var open by remember { mutableStateOf(false) }
     TextButton(onClick = { open = true }) { Text(state.bpm?.let { "♥ $it" } ?: "心率") }
     if (open) AlertDialog(
         onDismissRequest = { open = false },
@@ -231,6 +252,7 @@ internal fun HeartRatePanel(state: HeartRateState, events: (HeartDevice?) -> Flo
         text = {
             Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
                 Text(state.bpm?.let { "$it BPM" } ?: state.status)
+                Text("有实时心率时，读数和接收时间会随普通聊天消息发给 AstrBot 服务器。", style = MaterialTheme.typography.caption)
                 if (state.active == null) {
                     state.selected?.let { device ->
                         TextButton(onClick = { state.start(device) }) { Text("重新连接 ${device.label}") }

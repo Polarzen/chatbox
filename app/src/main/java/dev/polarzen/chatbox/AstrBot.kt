@@ -74,10 +74,21 @@ internal fun sendToAstrBot(
     onEvent: (AstrBotTransportEvent) -> Unit = {},
     onText: (String) -> Unit,
 ) {
+    sendToAstrBot(base, token, user, session, message, null, allowLoopbackHttp,
+        onReplyImage, onReplyAudio, onEvent, onText)
+}
+
+internal fun sendToAstrBot(
+    base: String, token: String, user: String, session: String, message: String,
+    heartRate: LiveHeartRate?, allowLoopbackHttp: Boolean = false,
+    onReplyImage: (String?, Int) -> Unit = { _, _ -> },
+    onReplyAudio: (String?, Int) -> Unit = { _, _ -> },
+    onEvent: (AstrBotTransportEvent) -> Unit = {},
+    onText: (String) -> Unit,
+) {
     sendToAstrBotPayload(
-        base, token, user, session, JSONObject().put("message", message),
-        allowLoopbackHttp, onReplyImage, onReplyAudio, onEvent, onText,
-    )
+        base, token, user, session, allowLoopbackHttp, onReplyImage, onReplyAudio, onEvent, onText,
+    ) { heartRate?.appendTo(message) ?: message }
 }
 
 /** Upload an image using OpenAPI's file scope, then send its attachment in the chat scope. */
@@ -133,7 +144,7 @@ internal fun sendImagesToAstrBot(
         require(Files.isRegularFile(path) && Files.isReadable(path)) { "无法读取所选图片。" }
         UploadAttachment(path, imageMediaType(path))
     }
-    sendPreparedAttachments(base, token, user, session, prepared, caption, allowLoopbackHttp,
+    sendPreparedAttachments(base, token, user, session, prepared, caption, null, allowLoopbackHttp,
         onReplyImage, onReplyAudio, onEvent, onText)
 }
 
@@ -141,6 +152,19 @@ internal fun sendAttachmentsToAstrBot(
     base: String, token: String, user: String, session: String,
     attachments: List<Path>, caption: String = "",
     allowLoopbackHttp: Boolean = false,
+    onReplyImage: (String?, Int) -> Unit = { _, _ -> },
+    onReplyAudio: (String?, Int) -> Unit = { _, _ -> },
+    onEvent: (AstrBotTransportEvent) -> Unit = {},
+    onText: (String) -> Unit,
+) {
+    sendAttachmentsToAstrBot(base, token, user, session, attachments, caption, null, allowLoopbackHttp,
+        onReplyImage, onReplyAudio, onEvent, onText)
+}
+
+internal fun sendAttachmentsToAstrBot(
+    base: String, token: String, user: String, session: String,
+    attachments: List<Path>, caption: String = "",
+    heartRate: LiveHeartRate?, allowLoopbackHttp: Boolean = false,
     onReplyImage: (String?, Int) -> Unit = { _, _ -> },
     onReplyAudio: (String?, Int) -> Unit = { _, _ -> },
     onEvent: (AstrBotTransportEvent) -> Unit = {},
@@ -160,7 +184,7 @@ internal fun sendAttachmentsToAstrBot(
         require(size <= 512L * 1024 * 1024) { "附件超过 512 MiB 限制：${path.fileName}。" }
         UploadAttachment(path, mediaType)
     }
-    sendPreparedAttachments(base, token, user, session, prepared, caption, allowLoopbackHttp,
+    sendPreparedAttachments(base, token, user, session, prepared, caption, heartRate, allowLoopbackHttp,
         onReplyImage, onReplyAudio, onEvent, onText)
 }
 
@@ -171,21 +195,24 @@ private data class UploadAttachment(val path: Path, val mediaType: String) {
 
 private fun sendPreparedAttachments(
     base: String, token: String, user: String, session: String,
-    prepared: List<UploadAttachment>, caption: String, allowLoopbackHttp: Boolean,
+    prepared: List<UploadAttachment>, caption: String, heartRate: LiveHeartRate?, allowLoopbackHttp: Boolean,
     onReplyImage: (String?, Int) -> Unit, onReplyAudio: (String?, Int) -> Unit,
     onEvent: (AstrBotTransportEvent) -> Unit, onText: (String) -> Unit,
 ) {
-    val parts = JSONArray()
-    if (caption.isNotEmpty()) parts.put(JSONObject().put("type", "plain").put("text", caption))
-    prepared.forEachIndexed { index, attachment ->
+    val attachments = prepared.mapIndexed { index, attachment ->
         onEvent(AstrBotTransportEvent.UploadStarted(index, prepared.size))
         val id = uploadAttachmentToAstrBot(base, token, attachment, allowLoopbackHttp)
         onEvent(AstrBotTransportEvent.UploadFinished(index, prepared.size))
-        parts.put(JSONObject().put("type", attachment.segmentType).put("attachment_id", id)
-            .put("filename", attachment.path.fileName.toString()))
+        JSONObject().put("type", attachment.segmentType).put("attachment_id", id)
+            .put("filename", attachment.path.fileName.toString())
     }
-    sendToAstrBotPayload(base, token, user, session, JSONObject().put("message", parts),
-        allowLoopbackHttp, onReplyImage, onReplyAudio, onEvent, onText)
+    sendToAstrBotPayload(base, token, user, session, allowLoopbackHttp, onReplyImage, onReplyAudio, onEvent, onText) {
+        val parts = JSONArray()
+        val text = heartRate?.appendTo(caption) ?: caption
+        if (text.isNotEmpty()) parts.put(JSONObject().put("type", "plain").put("text", text))
+        attachments.forEach { parts.put(it) }
+        parts
+    }
 }
 
 /** Download a reply attachment through the authenticated, same-origin OpenAPI file endpoint. */
@@ -338,9 +365,10 @@ private fun openAstrBotConnection(target: URI): HttpURLConnection {
 }
 
 private fun sendToAstrBotPayload(
-    base: String, token: String, user: String, session: String, messagePayload: JSONObject,
+    base: String, token: String, user: String, session: String,
     allowLoopbackHttp: Boolean, onReplyImage: (String?, Int) -> Unit,
     onReplyAudio: (String?, Int) -> Unit, onEvent: (AstrBotTransportEvent) -> Unit, onText: (String) -> Unit,
+    message: () -> Any,
 ) {
     val target = endpoint(base, allowLoopbackHttp)
     val c = openAstrBotConnection(target)
@@ -354,7 +382,7 @@ private fun sendToAstrBotPayload(
         c.setRequestProperty("Authorization", "Bearer $token")
         c.setRequestProperty("Accept", "text/event-stream")
         c.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-        val bytes = messagePayload.put("username", user).put("session_id", session)
+        val bytes = JSONObject().put("message", message()).put("username", user).put("session_id", session)
             .put("enable_streaming", true).toString().toByteArray(Charsets.UTF_8)
         c.setFixedLengthStreamingMode(bytes.size)
         c.outputStream.use { it.write(bytes) }
