@@ -82,6 +82,23 @@ class AndroidHistoryInstrumentation : Instrumentation() {
             check(history.selected(base).draft == mixed)
             history.begin(base, fresh.id, turn)
             check(history.selected(base).draft == MobileDraft())
+            history.addAssets(base, fresh.id, listOf(image))
+            history.draftText(base, fresh.id, "interleaved text")
+            check(history.selected(base).draft == MobileDraft("interleaved text", listOf(image)))
+            history.addAssets(base, fresh.id, listOf(audio))
+            history.removeAsset(base, fresh.id, image)
+            history.draftText(base, fresh.id, "second edit")
+            check(history.selected(base).draft == MobileDraft("second edit", listOf(audio)))
+            history.addAssets(base, fresh.id, listOf(image))
+            history.draftText(base, fresh.id, mixed.text)
+            history.removeAsset(base, fresh.id, audio)
+            check(history.selected(base).draft == MobileDraft(mixed.text, listOf(image)))
+            history.addAssets(base, fresh.id, listOf(audio))
+            history.begin(base, fresh.id, turn.copy(id = "identical-retry"), consumeDraft = false)
+            AndroidHistory(fixture).use { reopened ->
+                val persisted = reopened.selected(base)
+                check(persisted.turns.last().id == "identical-retry" && persisted.draft == mixed)
+            }
             history.draft(base, fresh.id, MobileDraft("next draft", listOf(audio)))
             history.begin(base, fresh.id, turn.copy(id = "retry", status = "上传中 1/2"))
             check(history.selected(base).draft.text == "next draft")
@@ -128,6 +145,7 @@ class AndroidHistoryInstrumentation : Instrumentation() {
             val directory = File(fixture.filesDir, "media").apply { mkdirs() }
             val owned = File.createTempFile("history-test-", ".png", directory)
             val outside = File.createTempFile("history-test-", ".png", fixture.cacheDir)
+            val pending = File.createTempFile("history-test-", ".png", directory)
             try {
                 val attached = MobileAsset(owned.absolutePath, "image", "same.png")
                 val outsideAsset = attached.copy(path = outside.absolutePath)
@@ -135,15 +153,18 @@ class AndroidHistoryInstrumentation : Instrumentation() {
                 val sibling = history.selected(otherBase)
                 history.draft(base, fresh.id, draft)
                 history.draft(otherBase, sibling.id, draft)
-                history.draft(base, fresh.id, MobileDraft())
+                history.removeAsset(base, fresh.id, attached)
                 check(owned.exists())
                 history.begin(otherBase, sibling.id, MobileTurn("file-turn", "", sent = draft.attachments))
                 check(owned.exists())
                 history.delete(otherBase, sibling.id)
                 check(!owned.exists() && outside.exists())
+                history.addAssets(otherBase, sibling.id, listOf(attached.copy(path = pending.absolutePath)))
+                check(!pending.exists() && history.sessions(otherBase).isEmpty())
             } finally {
                 owned.delete()
                 outside.delete()
+                pending.delete()
             }
         }
     }

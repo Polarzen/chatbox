@@ -225,10 +225,24 @@ internal class AndroidHistory(context: Context) : AutoCloseable {
         removeUnreferenced(removed.draft.attachments + removed.turns.flatMap { it.sent + it.replies })
     }
 
-    @Synchronized fun draft(base: String, id: String, value: MobileDraft) {
+    @Synchronized fun draft(base: String, id: String, value: MobileDraft) =
+        editDraft(base, id, value.attachments) { value }
+
+    @Synchronized fun draftText(base: String, id: String, text: String) =
+        editDraft(base, id) { it.copy(text = text) }
+
+    @Synchronized fun addAssets(base: String, id: String, assets: List<MobileAsset>) =
+        editDraft(base, id, assets) { it.copy(attachments = it.attachments + assets) }
+
+    @Synchronized fun removeAsset(base: String, id: String, asset: MobileAsset) =
+        editDraft(base, id) { it.copy(attachments = it.attachments - asset) }
+
+    private fun editDraft(base: String, id: String, incoming: List<MobileAsset> = emptyList(),
+        edit: (MobileDraft) -> MobileDraft) {
         val key = normalizeBase(base)
         val profile = view(key)
-        val session = profile.value.sessions.firstOrNull { it.id == id } ?: return removeUnreferenced(value.attachments)
+        val session = profile.value.sessions.firstOrNull { it.id == id } ?: return removeUnreferenced(incoming)
+        val value = edit(session.draft)
         if (session.draft == value) return
         helper.writableDatabase.execSQL("UPDATE sessions SET draftText=?,draftAssets=? WHERE base=? AND id=?",
             arrayOf(value.text, writeAssets(value.attachments), key, id))
@@ -236,11 +250,11 @@ internal class AndroidHistory(context: Context) : AutoCloseable {
         removeUnreferenced(session.draft.attachments - value.attachments.toSet())
     }
 
-    @Synchronized fun begin(base: String, id: String, turn: MobileTurn) {
+    @Synchronized fun begin(base: String, id: String, turn: MobileTurn, consumeDraft: Boolean = true) {
         val key = normalizeBase(base)
         val profile = view(key)
         val session = checkNotNull(profile.value.sessions.firstOrNull { it.id == id }) { "本机会话已删除。" }
-        val matches = session.draft.text.trim() == turn.question.trim() && session.draft.attachments == turn.sent
+        val matches = consumeDraft && session.draft.text.trim() == turn.question.trim() && session.draft.attachments == turn.sent
         transaction { db ->
             insertTurn(db, key, id, turn)
             if (matches) db.execSQL("UPDATE sessions SET draftText='',draftAssets='[]' WHERE base=? AND id=?", arrayOf(key, id))

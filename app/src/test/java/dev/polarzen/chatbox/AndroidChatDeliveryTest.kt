@@ -64,7 +64,7 @@ class AndroidChatDeliveryTest {
     }
 
     @Test fun mediaOnlyNotificationsRequirePersistedReadableContentAndCurrentEligibility() {
-        for (transition in listOf("none", "foreground", "toggle", "permission", "cacheFailure", "writeFailure")) {
+        for (transition in listOf("none", "foreground", "toggle", "permission", "removedProfile", "cacheFailure", "writeFailure")) {
             val gate = MobileNotificationGate().apply { setForeground(false) }
             val snapshots = mutableListOf<MobileTurn>()
             val reply = MobileReplyDelivery(turn) {
@@ -76,10 +76,11 @@ class AndroidChatDeliveryTest {
             reply.media("audio", "audio")
             var notifications = 0
             var permitted = true
+            var profileAvailable = true
             val fetched = mutableListOf<String>()
             val note = reply.finish(null, {
                 gate.capture { permitted }?.let { permit ->
-                    { gate.show(permit, { permitted }) {
+                    { gate.show(permit, { profileAvailable && permitted }) {
                         assertTrue(snapshots.last().replies.any { it.path.isNotEmpty() })
                         notifications++
                     } }
@@ -90,6 +91,7 @@ class AndroidChatDeliveryTest {
                     "foreground" -> { gate.setForeground(true); gate.setForeground(false) }
                     "toggle" -> { gate.setEnabled(false); gate.setEnabled(true) }
                     "permission" -> permitted = false
+                    "removedProfile" -> profileAvailable = false
                     "cacheFailure" -> throw IOException("private server body")
                 }
                 MobileAsset("/cache/$id", kind, id)

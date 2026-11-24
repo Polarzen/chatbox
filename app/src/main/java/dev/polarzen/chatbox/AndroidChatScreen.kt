@@ -77,7 +77,8 @@ internal fun AndroidChatScreen(
     session: MobileSession, sessions: List<MobileSession>, busy: Boolean, bound: Boolean,
     note: String, jumpTurn: String?, onJumpHandled: () -> Unit, onSelect: (String) -> Unit,
     onCreate: () -> Unit, onRename: (String, String) -> Unit, onDelete: (String) -> Unit,
-    onDraft: (MobileDraft) -> Unit, onSend: () -> Unit, onRetry: (MobileTurn) -> Unit,
+    onDraftText: (String) -> Unit, onRemoveAsset: (MobileAsset) -> Unit,
+    onAddAssets: (List<MobileAsset>) -> Unit, onSend: () -> Unit, onRetry: (MobileTurn) -> Unit,
     onRetryMedia: (MobileTurn, MobileAsset) -> Unit,
     onSettings: () -> Unit, onAppearance: () -> Unit, onShared: () -> Unit, onHeart: () -> Unit,
 ) {
@@ -87,7 +88,7 @@ internal fun AndroidChatScreen(
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     var search by rememberSaveable(base) { mutableStateOf(false) }
-    var selectedHit by remember(base) { mutableStateOf<MobileHistoryHit?>(null) }
+    var selectedHit by remember(history, base) { mutableStateOf<MobileHistoryHit?>(null) }
     var retry by rememberSaveable(scopeId) { mutableStateOf<String?>(null) }
     var mediaNote by rememberSaveable(scopeId) { mutableStateOf("") }
     val focus = LocalFocusManager.current
@@ -118,11 +119,12 @@ internal fun AndroidChatScreen(
         LaunchedEffect(wide) { if (wide) drawer.close() }
         BackHandler(!wide && drawer.isOpen) { closeDrawer() }
         val sidebar: @Composable (Modifier, Boolean) -> Unit = { modifier, overlay ->
-            AndroidSessionSidebar(modifier, profileSessions, session.id,
+            AndroidSessionSidebar(modifier, profileSessions, session.id, bound,
                 onSelect = { id -> selectedHit = null; onSelect(id); if (overlay) closeDrawer() },
                 onCreate = { selectedHit = null; onCreate(); if (overlay) closeDrawer() },
                 onRename = onRename,
                 onDelete = { id -> onDelete(id); readings.removeState("${base.length}:$base:$id") },
+                onShared = { if (overlay) closeDrawer(); onShared() },
                 onDismiss = if (overlay) ::closeDrawer else null)
         }
         ModalNavigationDrawer(
@@ -169,21 +171,8 @@ internal fun AndroidChatScreen(
                     if (bound) {
                         TextButton(onClick = onShared, modifier = Modifier.fillMaxWidth()) { Text("打开共享会话") }
                     } else {
-                        // Keep the ActivityResult registration at the same composition position on session switches.
-                        // Its callback captures the origin. Read that session's current draft when the picker
-                        // or microphone actually finishes, including after leaving and reopening the session.
-                        val addToOrigin = remember(history, base, session.id, onDraft) {
-                            { added: List<MobileAsset> ->
-                                if (added.isNotEmpty()) {
-                                    try {
-                                        val origin = history.sessions(base).firstOrNull { it.id == session.id }
-                                        if (origin != null) onDraft(origin.draft.copy(attachments = origin.draft.attachments + added))
-                                    } catch (_: Exception) { mediaNote = "无法保存附件草稿，请检查本机存储后重新添加。" }
-                                }
-                            }
-                        }
-                        ChatComposer(scopeId, session.draft, busy, compactHeight, onDraft, onSend,
-                            addToOrigin, onNote = { mediaNote = it })
+                        ChatComposer(scopeId, session.draft, busy, compactHeight, onDraftText,
+                            onRemoveAsset, onAddAssets, onSend, onNote = { mediaNote = it })
                     }
                 }
             }
@@ -259,9 +248,9 @@ private fun ChatHeader(
 
 @Composable
 private fun AndroidSessionSidebar(
-    modifier: Modifier, sessions: List<MobileSession>, active: String,
+    modifier: Modifier, sessions: List<MobileSession>, active: String, activeBound: Boolean,
     onSelect: (String) -> Unit, onCreate: () -> Unit, onRename: (String, String) -> Unit,
-    onDelete: (String) -> Unit, onDismiss: (() -> Unit)?,
+    onDelete: (String) -> Unit, onShared: () -> Unit, onDismiss: (() -> Unit)?,
 ) {
     var editId by rememberSaveable { mutableStateOf<String?>(null) }
     var deleteId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -324,6 +313,20 @@ private fun AndroidSessionSidebar(
             dismissButton = { TextButton(onClick = { editId = null }) { Text("取消") } })
     }
     sessions.firstOrNull { it.id == deleteId }?.let { item ->
+        val context = LocalContext.current
+        val paired = if (item.id == active) activeBound else remember(item.sharedBase, item.id) {
+            AndroidSharedStorage(context, item.sharedBase, item.id).hasRecord
+        }
+        if (paired) {
+            AlertDialog(onDismissRequest = { deleteId = null }, title = { Text("此会话仍关联共享服务") },
+                text = { Text("如需删除本机记录，请先打开“${item.title}”的共享会话，在“更多”中选择“退出本机共享”。") },
+                confirmButton = { TextButton(onClick = {
+                    deleteId = null
+                    if (item.id == active) onShared() else onSelect(item.id)
+                }) { Text(if (item.id == active) "打开共享会话" else "前往该会话") } },
+                dismissButton = { TextButton(onClick = { deleteId = null }) { Text("取消") } })
+            return@let
+        }
         AlertDialog(onDismissRequest = { deleteId = null }, title = { Text("删除会话？") },
             text = { Text("将删除本机保存的这段聊天记录“${item.title}”。确定删除吗？此操作无法撤销。") },
             confirmButton = { TextButton(onClick = { onDelete(item.id); deleteId = null }) {
@@ -534,8 +537,8 @@ private fun clipboardImages(context: Context): List<Uri> {
 @Composable
 private fun ChatComposer(
     scopeId: String, draft: MobileDraft, busy: Boolean, short: Boolean,
-    onDraft: (MobileDraft) -> Unit, onSend: () -> Unit, onAdd: (List<MobileAsset>) -> Unit,
-    onNote: (String) -> Unit,
+    onDraftText: (String) -> Unit, onRemoveAsset: (MobileAsset) -> Unit,
+    onAddAssets: (List<MobileAsset>) -> Unit, onSend: () -> Unit, onNote: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -552,8 +555,9 @@ private fun ChatComposer(
     val displayed = if (field.text == draft.text) field else field.copy(text = draft.text, composition = null)
     SideEffect { if (field != displayed) field = displayed }
     fun edit(value: TextFieldValue) {
+        val textChanged = value.text != field.text
         field = value
-        if (draft.text != value.text) onDraft(draft.copy(text = value.text))
+        if (textChanged) onDraftText(value.text)
     }
     fun pasteImages(): Boolean {
         val uris = runCatching { clipboardImages(context) }.getOrDefault(emptyList())
@@ -561,7 +565,7 @@ private fun ChatComposer(
         scope.launch {
             try {
                 val added = withContext(Dispatchers.IO) { importMobileImages(context, uris) }
-                onAdd(added)
+                onAddAssets(added)
                 onNote(if (added.size < uris.distinct().size) "部分图片无法读取，请重新选择。" else "")
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (e: Exception) { onNote(e.message ?: "无法读取剪贴板图片，请重新选择。") }
@@ -573,14 +577,12 @@ private fun ChatComposer(
             if (draft.attachments.isNotEmpty()) {
                 Box(Modifier.fillMaxWidth().heightIn(max = if (short) 52.dp else 110.dp)
                     .verticalScroll(rememberScrollState())) {
-                    AndroidAssetList(draft.attachments, onRemove = { item ->
-                        onDraft(draft.copy(attachments = draft.attachments.toMutableList().apply { remove(item) }))
-                    })
+                    AndroidAssetList(draft.attachments, onRemove = onRemoveAsset)
                 }
             }
             Layout(modifier = Modifier.fillMaxWidth(), content = {
                 Box {
-                    AndroidMediaActions(scopeId = scopeId, enabled = !busy, onAdd = onAdd, onNote = onNote,
+                    AndroidMediaActions(scopeId = scopeId, enabled = !busy, onAdd = onAddAssets, onNote = onNote,
                         onRecordingChanged = { recording = it })
                 }
                 OutlinedTextField(value = displayed, onValueChange = ::edit,

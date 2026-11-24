@@ -201,13 +201,31 @@ class MainActivity : ComponentActivity() {
             when (page) {
                 ChatPage.CHAT -> screens.SaveableStateProvider("chat") {
                     AndroidChatScreen(history, connections, session, history.sessions(base), busy,
-                        storage.hasRecord, app.note(base, session.id), jumpTurn,
+                        storage.hasRecord || app.pairingInProgress(session), app.note(base, session.id), jumpTurn,
                         onJumpHandled = { jumpTurn = null },
                         onSelect = { jumpTurn = null; history.select(base, it) },
                         onCreate = { jumpTurn = null; history.create(base) },
                         onRename = { id, name -> history.rename(base, id, name) },
-                        onDelete = { id -> history.delete(base, id); app.showNote(base, id, "") },
-                        onDraft = { history.draft(base, session.id, it) },
+                        onDelete = { id ->
+                            val target = history.sessions(base).firstOrNull { it.id == id }
+                            if (target != null) {
+                                val reason = when {
+                                    app.storage(target).hasState() -> "请先在共享会话「更多」中退出本机共享"
+                                    app.pairingInProgress(target) -> "共享绑定正在保存，请稍后再删除。"
+                                    else -> null
+                                }
+                                if (reason != null) {
+                                    app.showNote(base, id, reason)
+                                    if (id != session.id) message(reason)
+                                } else {
+                                    history.delete(base, id)
+                                    app.showNote(base, id, "")
+                                }
+                            }
+                        },
+                        onDraftText = { history.draftText(base, session.id, it) },
+                        onRemoveAsset = { history.removeAsset(base, session.id, it) },
+                        onAddAssets = { history.addAssets(base, session.id, it) },
                         onSend = { send() },
                         onRetry = { turn -> send(MobileDraft(turn.question, turn.sent)) },
                         onRetryMedia = { turn, asset -> app.retryMedia(base, session.id, turn, asset) },
@@ -231,7 +249,12 @@ class MainActivity : ComponentActivity() {
                 ChatPage.SHARED -> Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
                     if (storage.hasRecord) TextButton(onClick = closePage) { Text("返回本地历史与档案") }
                     val seed = remember(storage) { androidSharedSeed(base, history.user, session) }
-                    ForegroundPanel(seed, storage, closePage)
+                    val room = remember(storage) { app.sharedSession(session, storage) }
+                    DisposableEffect(room) {
+                        app.attachShared(session, room, heart.live)
+                        onDispose { app.detachShared(session, room) }
+                    }
+                    ForegroundPanel(seed, room, closePage)
                 }
             }
         }
@@ -244,7 +267,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    @Composable private fun ForegroundPanel(seed: SharedSeed, storage: AndroidSharedStorage, onClose: () -> Unit) {
+    @Composable private fun ForegroundPanel(seed: SharedSeed, room: AndroidSharedSession, onClose: () -> Unit) {
+        val storage = room.storage
         val view = remember(storage) { ComposeView(this) }
         val close by rememberUpdatedState(onClose)
         val bound = storage.hasRecord
@@ -252,7 +276,8 @@ class MainActivity : ComponentActivity() {
             fun display() {
                 if (!bound || lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
                     view.setContent { AndroidChatTheme(app.dark) {
-                        SharedChatPanel(seed, storage, false, decorateQuestion = heart.live::appendTo, onClose = close)
+                        SharedChatPanel(seed, storage, false, retainedState = room.state,
+                            pairingScope = app.pairingScope, onClose = close)
                     } }
                 } else {
                     view.setContent { }
@@ -266,7 +291,7 @@ class MainActivity : ComponentActivity() {
             lifecycle.addObserver(observer)
             onDispose { lifecycle.removeObserver(observer) }
         }
-        AndroidView(factory = { view }, modifier = Modifier.fillMaxSize())
+        key(view) { AndroidView(factory = { view }, modifier = Modifier.fillMaxSize()) }
     }
 }
 

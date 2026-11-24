@@ -29,7 +29,11 @@ private const val PREF_NOTIFICATIONS = "local_reply_notifications"
 private const val STORAGE_FAILURE = "无法保存本地回复，请核对会话后再决定是否重新发送。"
 
 /** Owned by the process. UI entry points run on the main thread. */
-internal class AndroidChatDelivery(context: Context, private val history: AndroidHistory) {
+internal class AndroidChatDelivery(
+    context: Context,
+    private val history: AndroidHistory,
+    private val isProfileAvailable: (String) -> Boolean = { true },
+) {
     private val app = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
     private val prefs = app.getSharedPreferences("personal_chat", Context.MODE_PRIVATE)
@@ -56,7 +60,7 @@ internal class AndroidChatDelivery(context: Context, private val history: Androi
     fun busy(base: String, session: String): Boolean = active[AndroidHistory.normalizeBase(base) to session] == true
 
     fun send(base: String, session: String, token: String, user: String, draft: MobileDraft,
-             heart: LiveHeartRate?, onNote: (String) -> Unit) {
+             heart: LiveHeartRate?, consumeDraft: Boolean = true, onNote: (String) -> Unit) {
         val address = AndroidHistory.normalizeBase(base)
         val key = address to session
         if (active[key] == true) return
@@ -70,7 +74,7 @@ internal class AndroidChatDelivery(context: Context, private val history: Androi
         }
         val initial = MobileTurn(UUID.randomUUID().toString(), question, sent = assets)
         try {
-            history.begin(address, session, initial)
+            history.begin(address, session, initial, consumeDraft)
         } catch (_: Exception) {
             onNote("无法保存本地会话，消息未发送。")
             return
@@ -93,11 +97,7 @@ internal class AndroidChatDelivery(context: Context, private val history: Androi
                     }
                     null
                 } catch (e: Exception) { e }
-                reply.finish(failure, captureNotification = {
-                    gate.capture(::systemNotificationsAllowed)?.let { epoch ->
-                        { gate.show(epoch, ::systemNotificationsAllowed) { postReply(address, session, initial.id) } }
-                    }
-                }, download = { kind, id ->
+                reply.finish(failure, captureNotification = { captureNotification(address, session, initial.id) }, download = { kind, id ->
                     downloadAsset(address, secret, kind, id)
                 })
             } catch (_: Exception) { STORAGE_FAILURE }
@@ -149,6 +149,18 @@ internal class AndroidChatDelivery(context: Context, private val history: Androi
         (Build.VERSION.SDK_INT < 33 || app.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED) && manager.areNotificationsEnabled() &&
             manager.getNotificationChannel(REPLY_CHANNEL)?.importance != NotificationManager.IMPORTANCE_NONE
+
+    private fun captureNotification(base: String, session: String, turn: String): (() -> Unit)? {
+        val epoch = gate.capture(::systemNotificationsAllowed) ?: return null
+        return {
+            // Profile removal and the final eligibility check share the UI thread.
+            main.post {
+                gate.show(epoch, { isProfileAvailable(base) && systemNotificationsAllowed() }) {
+                    postReply(base, session, turn)
+                }
+            }
+        }
+    }
 
     private fun postReply(base: String, session: String, turn: String) {
         if (findTurn(base, session, turn)?.status != "已完成") return
