@@ -27,7 +27,10 @@
 | Android | 23 项测试全部通过。API 26 上的历史迁移与 PC 档案历史两项 instrumentation 均通过。 |
 | Windows | 183 项中 167 项通过、16 项跳过。跳过项为 14 项需专用桌面 UI 环境的验收、1 项前台窗口焦点测试和 1 项需音频输出设备的 WAV 播放测试。桌面冒烟测试和 MSI 打包通过。档案面板测试验证了在原 PC 恢复主人授权。 |
 | 共享服务 | 30 项 Python 测试通过，包含场景 C 的长历史、故障恢复和并发检查。 |
-| Windows 安装方式 | 三版客户端先后使用同一隔离用户目录，两版 MSI 的 ProductCode 不同、UpgradeCode 相同，0.1.18 的 Upgrade 表覆盖 0.1.17 且 RemoveExistingProducts 位于 InstallInitialize 之后，系统安装器的覆盖事务仍待在隔离 Windows 环境实测。 |
+| Windows Installer 升级 | 托管 Windows 从 `42fd93b`、`48c4d66` 两个固定源码提交重建 MSI，在同一目录先装 0.1.17，再覆盖升级至 0.1.18。两次 `msiexec` 退出码均为 0，升级后只登记 0.1.18，两次已安装 EXE 的冒烟检查也均以 0 退出。[安装事务记录](https://github.com/Polarzen/chatbox/actions/runs/45437033541) |
+| 持续集成 | Windows 和 Android 两项常规 CI 作业均通过。[CI 运行记录](https://github.com/Polarzen/chatbox/actions/runs/45435551842) |
+
+旧版 DesktopStore 写入一轮问答和未发送草稿，新版从原会话读回。安装前、升级刚结束及新版读回后，历史文件均为 567 字节，SHA-256 均为 `ae3ae7817c6c85386c5783a6f32ca7e246ce8128be5e9053fd30a83b85a4e0e5`，会话编号一致。托管升级使用同源码重建的 MSI，Polarzen 的 Windows 界面实机验收使用本地交付 MSI。
 
 旧附件在共享历史中显示已保存的类型或提示，原图与音频文件保留在原设备。PC 只剩标题，或旧正文已删除、从未保存时，手机只能看到实际发布的记录，AstrBot 会话列表无法补回缺失正文。
 
