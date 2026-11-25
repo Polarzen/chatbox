@@ -17,10 +17,8 @@ import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.layout.layout
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -28,49 +26,10 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.offset
 
-// The surrounding screen already consumes system bars. Measure for the larger viewport once,
-// then let RenderNode translate the existing content with the platform's actual IME progress.
-// Compose advances the source to the target when the platform finishes (including cancellation).
-internal class AndroidChatIme(
-    val layoutBottom: State<Int>,
-    private val currentBottom: () -> Int,
-) {
-    fun translation() = (layoutBottom.value - currentBottom()).toFloat()
-
-    // Top-aligned short transcripts have space below their last row. Move them only when
-    // that space has been consumed by the keyboard.
-    fun historyTranslation(bottomGap: Int) = minOf(0f, translation() + bottomGap.coerceAtLeast(0))
-}
-
-@OptIn(ExperimentalLayoutApi::class)
+/** Keep older messages at their top-relative position when the available height changes. */
 @Composable
-internal fun rememberChatIme(): AndroidChatIme {
-    val density = LocalDensity.current
-    val source = WindowInsets.imeAnimationSource
-    val target = WindowInsets.imeAnimationTarget
-    val current = WindowInsets.ime
-    val bars = WindowInsets.systemBars
-    return remember(density, source, target, current, bars) {
-        fun bottom(insets: WindowInsets) = (insets.getBottom(density) - bars.getBottom(density)).coerceAtLeast(0)
-        AndroidChatIme(derivedStateOf { minOf(bottom(source), bottom(target)) }, { bottom(current) })
-    }
-}
-
-internal fun Modifier.chatImeHeight(ime: AndroidChatIme) = layout { measurable, constraints ->
-    val bottom = ime.layoutBottom.value.coerceAtMost(constraints.maxHeight)
-    val child = measurable.measure(constraints.offset(vertical = -bottom))
-    layout(child.width, child.height + bottom) { child.place(0, 0) }
-}
-
-internal fun Modifier.moveWithChatIme(ime: AndroidChatIme) =
-    graphicsLayer { translationY = ime.translation() }
-
-/** Keep older messages at their top-relative position when the available height changes.
- * The parent resizes for IME endpoints; notices and attachment previews can resize later. */
-@Composable
-internal fun Modifier.chatImeReverseHistory(ime: AndroidChatIme, list: LazyListState, restoredHeight: Int = -1): Modifier {
+internal fun Modifier.anchorReverseHistory(list: LazyListState, restoredHeight: Int = -1): Modifier {
     val previous = remember(list) {
         object {
             var height = restoredHeight
@@ -91,11 +50,6 @@ internal fun Modifier.chatImeReverseHistory(ime: AndroidChatIme, list: LazyListS
         previous.height = height
         val child = measurable.measure(constraints)
         layout(child.width, child.height) { child.place(0, 0) }
-    }.graphicsLayer {
-        translationY = if (list.canScrollBackward) 0f else {
-            val end = list.layoutInfo.visibleItemsInfo.firstOrNull()
-            ime.historyTranslation(end?.offset ?: 0)
-        }
     }
 }
 

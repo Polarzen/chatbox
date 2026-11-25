@@ -33,7 +33,6 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -112,7 +111,6 @@ internal fun AndroidChatScreen(
     ) {
         LaunchedEffect(Unit) { screenFocus.requestFocus() }
         val wide = maxWidth >= 720.dp
-        val ime = rememberChatIme()
         val compactHeight = maxHeight < 480.dp
         var sidebarVisible by rememberSaveable { mutableStateOf(onRecent == null) }
         val openLocalHistory = {
@@ -135,7 +133,7 @@ internal fun AndroidChatScreen(
                 onDismiss = if (overlay) ::closeDrawer else null)
         }
         ModalNavigationDrawer(
-            modifier = Modifier.chatImeHeight(ime),
+            modifier = Modifier.imePadding(),
             drawerState = drawer,
             gesturesEnabled = !wide && (onRecent == null || drawer.isOpen),
             drawerContent = {
@@ -162,14 +160,14 @@ internal fun AndroidChatScreen(
                         HorizontalDivider()
                         Box(Modifier.weight(1f)) {
                             readings.SaveableStateProvider(scopeId) {
-                                ChatTimeline(session, busy, readOnly, hit, jumpTurn, onJumpHandled, ime,
+                                ChatTimeline(session, busy, readOnly, hit, jumpTurn, onJumpHandled,
                                     onHitShown = { selectedHit = null }, onCreate = onCreate,
                                     onRetry = { retry = it.id }, onRetryMedia = onRetryMedia)
                             }
                         }
                         val notice = listOf(note, mediaNote).filter(String::isNotBlank).distinct().joinToString("\n")
                         if (notice.isNotBlank()) {
-                            Box(Modifier.fillMaxWidth().moveWithChatIme(ime).background(MaterialTheme.colorScheme.background)
+                            Box(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)
                                 .heightIn(max = if (compactHeight) 38.dp else 84.dp)
                                 .verticalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
                                 Text(notice, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -177,7 +175,7 @@ internal fun AndroidChatScreen(
                             }
                         }
                         if (session.draft.attachments.isNotEmpty()) {
-                            Box(Modifier.fillMaxWidth().moveWithChatIme(ime).background(MaterialTheme.colorScheme.background)
+                            Box(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)
                                 .heightIn(max = if (compactHeight) 52.dp else 110.dp)
                                 .verticalScroll(rememberScrollState()).padding(horizontal = 8.dp)) {
                                 AndroidAssetList(session.draft.attachments, onRemove = onRemoveAsset)
@@ -185,14 +183,14 @@ internal fun AndroidChatScreen(
                         }
                     }
                     if (readOnly) {
-                        Row(Modifier.fillMaxWidth().moveWithChatIme(ime).padding(horizontal = 12.dp),
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp),
                             verticalAlignment = Alignment.CenterVertically) {
                             Text("旧版共享记录暂不可发送。草稿保存在本机。", Modifier.weight(1f),
                                 style = MaterialTheme.typography.bodySmall)
                             TextButton(onClick = onCreate) { Text("新建会话") }
                         }
                     }
-                    Surface(Modifier.moveWithChatIme(ime), tonalElevation = 1.dp) {
+                    Surface(tonalElevation = 1.dp) {
                         AndroidChatComposer(sessionKey = scopeId,
                             readDraft = readDraft ?: { history.sessions(base).firstOrNull { it.id == session.id }?.draft?.text.orEmpty() },
                             draftEvent = Triple(draftEvent, session.turns.lastOrNull()?.id, session.draft.text.isEmpty()),
@@ -392,12 +390,12 @@ private fun chatReadingSaver(turns: List<MobileTurn>) = listSaver<ChatReading, A
 @Composable
 private fun ChatTimeline(
     session: MobileSession, busy: Boolean, readOnly: Boolean, hit: MobileHistoryHit?,
-    jumpTurn: String?, onJumpHandled: () -> Unit, ime: AndroidChatIme, onHitShown: () -> Unit,
+    jumpTurn: String?, onJumpHandled: () -> Unit, onHitShown: () -> Unit,
     onCreate: () -> Unit, onRetry: (MobileTurn) -> Unit, onRetryMedia: (MobileTurn, MobileAsset) -> Unit,
 ) {
     if (session.turns.isEmpty()) {
         Box(Modifier.fillMaxSize().clipToBounds(), contentAlignment = Alignment.Center) {
-            Column(Modifier.graphicsLayer { translationY = ime.translation() / 2f }, horizontalAlignment = Alignment.CenterHorizontally) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("开始一段对话", style = MaterialTheme.typography.titleMedium)
                 Text("在下方输入消息。", style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -460,7 +458,7 @@ private fun ChatTimeline(
         val hitGeometry = if (bodyHit == null) Modifier else Modifier.nestedScroll(observer).onGloballyPositioned {
             center = it.positionInRoot().y + it.size.height / 2f
         }
-        LazyColumn(Modifier.fillMaxSize().clipToBounds().chatImeReverseHistory(ime, list, reading.restoredHeight)
+        LazyColumn(Modifier.fillMaxSize().clipToBounds().anchorReverseHistory(list, reading.restoredHeight)
             .then(hitGeometry).testTag("message-region"), state = list, reverseLayout = true,
             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -481,7 +479,7 @@ private fun ChatTimeline(
         }
         if (list.canScrollBackward) {
             OutlinedButton(onClick = { finished(); scope.launch { list.scrollToItem(0) } },
-                modifier = Modifier.align(Alignment.BottomEnd).moveWithChatIme(ime).padding(8.dp),
+                modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
                 colors = ButtonDefaults.outlinedButtonColors(containerColor = MaterialTheme.colorScheme.surface)) {
                 Text("回到最新")
             }

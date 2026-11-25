@@ -1,26 +1,11 @@
 package dev.polarzen.chatbox
 
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class AndroidComposerEditorTest {
-    @Test fun shortHistoryMovesOnlyWhenKeyboardReachesTheLastRow() {
-        var current = 0
-        val measured = mutableIntStateOf(0)
-        val ime = AndroidChatIme(measured) { current }
-        current = 100
-        assertEquals(-100f, ime.translation(), 0f)
-        assertEquals(0f, ime.historyTranslation(150), 0f)
-        current = 220
-        assertEquals(-70f, ime.historyTranslation(150), 0f)
-        assertEquals(-220f, ime.historyTranslation(0), 0f)
-        measured.intValue = 220
-        assertEquals(0f, ime.translation(), 0f)
-    }
-
     @Test fun cursorAndCompositionDoNotWriteTheDraft() {
         val editor = AndroidComposerEditor("拼音")
         val composing = TextFieldValue("拼音", selection = TextRange(1), composition = TextRange(0, 2))
