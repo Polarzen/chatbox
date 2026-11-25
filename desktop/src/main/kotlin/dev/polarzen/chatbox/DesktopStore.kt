@@ -20,6 +20,7 @@ internal data class Entry(
     val attachmentDisplayName: String? = null,
     val replyAttachments: List<ReplyAttachment> = emptyList(),
     val attachmentReferences: List<String> = attachmentReference?.let(::listOf) ?: emptyList(),
+    val sentAt: Long? = null,
 )
 
 internal data class Chat(val session: String, val entries: List<Entry> = emptyList())
@@ -124,7 +125,7 @@ internal class DesktopStore(private val file: Path) {
                 row.getString("id") == current,
                 manualName ?: sessionTitle(row),
                 manualName,
-                sessionTimestamp(row, "lastActivityAt") ?: sessionTimestamp(row, "lastUsedAt") ?: sessionTimestamp(row, "createdAt") ?: 0L,
+                timestamp(row, "lastActivityAt") ?: timestamp(row, "lastUsedAt") ?: timestamp(row, "createdAt") ?: 0L,
             )
         }
     }
@@ -519,6 +520,7 @@ internal class DesktopStore(private val file: Path) {
                         check(projection.answer == row.answer && projection.status == row.status) { "媒体回执与本机结果不同。" }
                         entryToJson(native.copy(status = status))
                     } else JSONObject().put("question", row.question).put("answer", row.answer).put("status", status)
+                    operation?.let { timestamp(it, "sentAt") }?.let { result.put("sentAt", it) }
                     entries.put(result.put("profileTurnId", row.id).put("profileTurnSeq", row.seq))
                     if (activity > session.optLong("lastActivityAt")) session.put("lastActivityAt", activity)
                     changed = true
@@ -734,7 +736,7 @@ internal class DesktopStore(private val file: Path) {
             check(revision != appliedDraftRevisions[key] || row.has("draft")) { "此草稿已提交。" }
             check(revision != appliedDraftRevisions[key] || entry != null || readDraft(key).attachments.isEmpty())
             val queue = row.optJSONArray("deviceQueue") ?: JSONArray().also { row.put("deviceQueue", it) }
-            val op = JSONObject().put("id", id).put("question", question)
+            val op = JSONObject().put("id", id).put("question", question).put("sentAt", System.currentTimeMillis())
             val authored = entry?.question ?: question
             val attachments = entry?.attachmentReferences.orEmpty().map { ref ->
                 if (ref.startsWith("file:", true)) Path.of(URI(ref)).toString() else ref
@@ -1078,6 +1080,7 @@ internal class DesktopStore(private val file: Path) {
             val references = entry.attachmentReferences.ifEmpty { listOfNotNull(entry.attachmentReference) }
             (entry.attachmentReference ?: references.firstOrNull())?.let { row.put("attachmentReference", it) }
             entry.attachmentDisplayName?.let { row.put("attachmentDisplayName", it) }
+            entry.sentAt?.let { row.put("sentAt", it) }
             row.put("attachmentReferences", JSONArray(references))
             row.put("replyImages", replyAttachmentsToJson(entry.replyAttachments, entry.answer))
         }
@@ -1103,7 +1106,7 @@ internal class DesktopStore(private val file: Path) {
             val orderedIndices = (0 until rows.length()).sortedWith(
                 compareByDescending<Int> { index ->
                     val row = rows.getJSONObject(index)
-                    sessionTimestamp(row, "lastUsedAt") ?: sessionTimestamp(row, "createdAt")
+                    timestamp(row, "lastUsedAt") ?: timestamp(row, "createdAt")
                 }.thenByDescending { it }
             )
             if (orderedIndices.withIndex().any { (newIndex, oldIndex) -> newIndex != oldIndex }) {
@@ -1114,8 +1117,8 @@ internal class DesktopStore(private val file: Path) {
         }
     }
 
-    private fun sessionTimestamp(session: JSONObject, key: String): Long? {
-        val raw = session.opt(key) as? Number ?: return null
+    private fun timestamp(row: JSONObject, key: String): Long? {
+        val raw = row.opt(key) as? Number ?: return null
         val numeric = raw.toDouble()
         return numeric.takeIf { it.isFinite() && it % 1.0 == 0.0 && it >= Long.MIN_VALUE.toDouble() && it <= Long.MAX_VALUE.toDouble() }
             ?.toLong()
@@ -1353,7 +1356,7 @@ internal class DesktopStore(private val file: Path) {
             ?: reference?.let(::attachmentNameFromReference)
         val answer = row.getString("answer")
         return Entry(row.getString("question"), answer, status, reference, displayName,
-            replyAttachmentsFrom(row, answer), references)
+            replyAttachmentsFrom(row, answer), references, timestamp(row, "sentAt")?.takeIf { it > 0 })
     }
 
     private fun attachmentReferencesFrom(row: JSONObject): List<String> {

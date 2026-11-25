@@ -64,7 +64,9 @@ class DesktopDeviceSyncTest {
         val source = Entry("图片", "", "发送中", attachmentReference = original.toString())
         val question = desktopSharedSeedTurn(source).question
         initial.saveDraft(key, 1, ComposerDraft(source.question, listOf(original)))
+        val before = System.currentTimeMillis()
         val id = initial.queueDeviceSend(key, question, 1, source)
+        val after = System.currentTimeMillis()
         initial.saveDraft(key, 2, ComposerDraft("下一条"))
         initial.saveDraft(key, 1, ComposerDraft("旧草稿"))
         initial.cleanupUnreferencedManagedMedia()
@@ -83,7 +85,12 @@ class DesktopDeviceSyncTest {
         assertTrue(store.mergeProfilePage(key, remote.profile, listOf(terminal), 100))
         assertNull(store.nextDeviceSend(key))
         val entry = DesktopStore(path).sessionContent(key.profileId, key.sessionId).entries.single()
-        assertEquals(result, entry.copy(attachmentDisplayName = null))
+        assertTrue(checkNotNull(entry.sentAt) in before..after)
+        assertEquals(result.copy(sentAt = entry.sentAt), entry.copy(attachmentDisplayName = null))
+        val foreign = SharedTurn(2, UUID.randomUUID().toString(), "来自手机", "远端回复", "complete")
+        assertTrue(store.mergeProfilePage(key, remote.profile, listOf(foreign), System.currentTimeMillis()))
+        val refreshed = DesktopStore(path).sessionContent(key.profileId, key.sessionId)
+        assertEquals(listOf(entry.sentAt, null), refreshed.entries.map { it.sentAt })
         assertFalse(question.contains(original.toString()))
         assertEquals("下一条", store.readDraft(key).text)
     }

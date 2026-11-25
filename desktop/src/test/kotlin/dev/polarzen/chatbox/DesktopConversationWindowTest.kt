@@ -20,6 +20,40 @@ class DesktopConversationWindowTest {
     @get:Rule val ui = createComposeRule()
     @get:Rule val files = TemporaryFolder()
 
+    @Test fun newTurnsKeepTheirTimeAcrossReloadAndOldTurnsKeepTheirRoundLocator() {
+        val path = files.root.toPath().resolve("history.json")
+        val store = DesktopStore(path)
+        val profile = store.createProfile("https://example.invalid")
+        val noon = java.time.LocalDateTime.of(2026, 8, 24, 12, 0).atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val turns = listOf(
+            Entry("旧问", "旧答", "已完成"),
+            Entry("中午", "好", "已完成", sentAt = noon),
+            Entry("继续", "好", "已完成", sentAt = noon + 60_000),
+            Entry("稍后", "好", "已完成", sentAt = noon + 21 * 60_000),
+        )
+        store.saveSessionContent(profile.id, Chat(profile.currentSession, turns))
+        val chat = DesktopStore(path).sessionContent(profile.id, profile.currentSession)
+        assertEquals(turns, chat.entries)
+        val located = mutableIntStateOf(-1)
+        ui.setContent {
+            Box(Modifier.requiredSize(820.dp, 840.dp)) {
+                DesktopChatLayout(sessions = emptyList(), chat = chat, onSelectSession = {}, onNewSession = {},
+                    canCreate = false, topActions = {}, draft = TextFieldValue(), onDraft = {}, selectedImage = null,
+                    onChooseImage = {}, onRemoveImage = {}, onSend = {}, canSend = false, notice = null,
+                    onRetry = {}, canRetry = false, assistantContent = { androidx.compose.material.Text(it.answer) },
+                    replyNavigation = located.intValue.takeIf { it >= 0 }?.let { ReplyTurnNavigation(it.toLong(), it) })
+            }
+        }
+        ui.onNodeWithTag("turn-location-0").assertDoesNotExist()
+        ui.onNodeWithTag("turn-location-1").assertTextEquals("2026-08-24 12:00")
+        ui.onNodeWithTag("turn-location-2").assertDoesNotExist()
+        ui.onNodeWithTag("turn-location-3").assertTextEquals("12:21")
+        ui.runOnIdle { located.intValue = 2 }
+        ui.onNodeWithTag("turn-location-2").assertTextEquals("第 3 轮 · 2026-08-24 12:01")
+        ui.runOnIdle { located.intValue = 0 }
+        ui.onNodeWithTag("turn-location-0").assertTextEquals("第 1 轮")
+    }
+
     @Test fun rejectedDeviceDraftReturnsToOpenEditorAndPreservesNewTyping() = runBlocking {
         val store = DesktopStore(files.root.toPath().resolve("history.json"))
         val profile = store.createProfile("https://example.invalid")

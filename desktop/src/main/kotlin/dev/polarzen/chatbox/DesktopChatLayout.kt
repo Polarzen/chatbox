@@ -105,6 +105,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.io.IOException
 import java.nio.file.InvalidPathException
 import java.nio.file.Path
@@ -728,8 +731,13 @@ private fun ConversationPane(
                     val sameSide = previous != null && previous.hasReply() == !entry.hasQuestion()
                     Column(Modifier.fillMaxWidth().padding(top = if (index == 0 || sameSide) 0.dp else 10.dp)
                         .testTag("message-entry-$index"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (navigation?.entryIndex == index || replyNavigation?.entryIndex == index) {
-                            Text("第 ${index + 1} 轮", Modifier.align(Alignment.CenterHorizontally),
+                        val located = navigation?.entryIndex == index || replyNavigation?.entryIndex == index
+                        val time = remember(entry.sentAt, previous?.sentAt, located) {
+                            groupTimeLabel(entry.sentAt, previous?.sentAt, located)
+                        }
+                        if (located || time != null) {
+                            val label = listOfNotNull("第 ${index + 1} 轮".takeIf { located }, time).joinToString(" · ")
+                            Text(label, Modifier.align(Alignment.CenterHorizontally).testTag("turn-location-$index"),
                                 color = desktopPalette.muted, fontSize = 11.sp)
                         }
                         fun toggleContext(role: String, body: String): (() -> Unit)? =
@@ -899,6 +907,22 @@ private fun ConversationPane(
               }
           }
       }
+    }
+}
+
+private val groupDateTime = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+private val groupTime = DateTimeFormatter.ofPattern("HH:mm")
+
+private fun groupTimeLabel(sentAt: Long?, previous: Long?, located: Boolean): String? {
+    if (sentAt == null) return null
+    val zone = ZoneId.systemDefault()
+    val date = Instant.ofEpochMilli(sentAt).atZone(zone)
+    if (located || previous == null) return date.format(groupDateTime)
+    val prior = Instant.ofEpochMilli(previous).atZone(zone)
+    return when {
+        prior.toLocalDate() != date.toLocalDate() -> date.format(groupDateTime)
+        sentAt - previous >= 15 * 60_000L || sentAt < previous -> date.format(groupTime)
+        else -> null
     }
 }
 

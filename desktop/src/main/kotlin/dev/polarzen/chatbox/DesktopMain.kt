@@ -841,7 +841,7 @@ internal fun DesktopScreen(
                 }
                 val references = paths.map(Path::toString)
                 val entry = Entry(
-                    question = query, answer = "", status = "发送中",
+                    question = query, answer = "", status = "发送中", sentAt = System.currentTimeMillis(),
                     attachmentReference = references.firstOrNull(),
                     attachmentDisplayName = paths.firstOrNull()?.fileName?.toString(),
                     attachmentReferences = references,
