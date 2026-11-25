@@ -1,30 +1,35 @@
-name: Prepare 0.1.19 release draft
+name: Publish and verify Chatbox 0.1.19
 on:
   push:
     branches: [qa/v0.1.15-to-v0.1.19]
 permissions:
   contents: write
-  actions: read
 jobs:
-  draft:
+  publish:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: Polarzen/chatbox
     steps:
-      - name: Stage verified Windows installer and release notes
+      - name: Verify both accepted installers, publish the existing draft, verify downloads
         shell: bash
         run: |
           set -euo pipefail
-          gh run download 45525891484 --name Chatbox-Windows-MSI --dir incoming
-          msi=$(find incoming -name Chatbox-0.1.19.msi -type f)
-          cp "$msi" Chatbox-0.1.19.msi
-          printf '%s  %s\n' c915f64ef4246bedec780758ba97ae41afe710df35e1b1d0c80e4d3aef7cdc32 Chatbox-0.1.19.msi | sha256sum -c -
-          cat > notes.md <<'EOF'
-          Windows 与 Android 可一次配对，在「最近对话」查看已同步的历史、从任一端新建会话并继续聊天。Android 改善了打开键盘时的动画流畅度。首次使用可选「仅在本机使用」。
-          
-          Windows 安装 MSI，Android 覆盖安装同签名 APK。升级前退出 Windows Chatbox 并备份历史。只存在于旧远端缓存中的重要正文请提前另存。Windows 共享服务需要 Python 3.10 或更高版本，可复用 AstrBot Launcher 的环境。
-          
-          [安装、升级和首次扫码](https://github.com/Polarzen/chatbox/blob/v0.1.19/docs/DEVICE_SYNC_GUIDE.md) · [实机验收记录](https://github.com/Polarzen/chatbox/blob/v0.1.19/docs/DEVICE_SYNC_ACCEPTANCE.md) · [Windows 0.1.15 直接覆盖升级验证](https://github.com/Polarzen/chatbox/actions/runs/45557860752)
-          EOF
-          gh release create v0.1.19 --draft --target 5a671cfc1ac15cc12c4d5afcc6e952cb1a734cd5 --title 'Chatbox 0.1.19 · Windows 与 Android 设备同步' --notes-file notes.md Chatbox-0.1.19.msi
+          tag=v0.1.19
+          gh release view "$tag" --json isDraft,targetCommitish | jq -e '.isDraft and .targetCommitish == "5a671cfc1ac15cc12c4d5afcc6e952cb1a734cd5"'
+          gh api repos/Polarzen/chatbox/git/blobs/3f97df92e704d9adf5a95d6a3bf2f5897be5d556 --jq .content | base64 -d > Chatbox-0.1.19.apk
+          printf '%s  %s\n' 39bdba134e2e580c3a8c23d829a7566bb20ecbc0e4f784781e3b4ef4a2e3b252 Chatbox-0.1.19.apk c915f64ef4246bedec780758ba97ae41afe710df35e1b1d0c80e4d3aef7cdc32 Chatbox-0.1.19.msi > SHA256SUMS.txt
+          gh release download "$tag" --pattern Chatbox-0.1.19.msi
+          sha256sum -c SHA256SUMS.txt
+          gh release upload "$tag" Chatbox-0.1.19.apk SHA256SUMS.txt
+          verify_assets() {
+            local directory="$1"
+            mkdir "$directory"
+            gh release download "$tag" --dir "$directory" --pattern 'Chatbox-0.1.19.*' --pattern SHA256SUMS.txt
+            cmp SHA256SUMS.txt "$directory/SHA256SUMS.txt"
+            (cd "$directory" && sha256sum -c SHA256SUMS.txt)
+          }
+          verify_assets staged
+          gh release edit "$tag" --draft=false --latest
+          verify_assets published
+          gh api repos/Polarzen/chatbox/releases/latest --jq .tag_name | grep -Fx v0.1.19
