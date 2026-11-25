@@ -1,47 +1,30 @@
-name: Verify released MSI upgrade 0.1.15 to 0.1.19
+name: Prepare 0.1.19 release draft
 on:
   push:
     branches: [qa/v0.1.15-to-v0.1.19]
 permissions:
-  contents: read
+  contents: write
   actions: read
 jobs:
-  upgrade:
-    runs-on: windows-2022
-    timeout-minutes: 15
+  draft:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: Polarzen/chatbox
     steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - name: Download the distributed installers and check digests
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Stage verified Windows installer and release notes
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Stop'
-          $folder = 'desktop/build/compose/binaries/main/msi'
-          $old = "v18/$folder"
-          $new = "v19/$folder"
-          New-Item -ItemType Directory -Force $old,$new | Out-Null
-          gh release download v0.1.15 --pattern '*.msi' --pattern SHA256SUMS.txt --dir $old
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          gh run download 45525891484 --name Chatbox-Windows-MSI --dir artifact
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          $candidate = @(Get-ChildItem artifact -Recurse -Filter Chatbox-0.1.19.msi)
-          if ($candidate.Count -ne 1) { throw 'Expected one distribution MSI' }
-          Copy-Item $candidate[0].FullName $new
-          $actual = (Get-FileHash "$old/Chatbox-0.1.15.msi").Hash
-          if (-not (Select-String -Path "$old/SHA256SUMS.txt" -Pattern "^$actual\s+\*?Chatbox-0\.1\.15\.msi\s*$")) { throw 'Old MSI checksum mismatch' }
-          if ((Get-FileHash "$new/Chatbox-0.1.19.msi").Hash -ne 'c915f64ef4246bedec780758ba97ae41afe710df35e1b1d0c80e4d3aef7cdc32') { throw 'New MSI checksum mismatch' }
-          (Get-Content .github/workflows/verify-msi-upgrade.py -Raw).Replace('0.1.18','0.1.15') | Set-Content verify.py -Encoding utf8
-          python -B verify.py
-          exit $LASTEXITCODE
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: upgrade-evidence
-          path: ${{ runner.temp }}/chatbox-msi-transaction/evidence/
+          set -euo pipefail
+          gh run download 45525891484 --name Chatbox-Windows-MSI --dir incoming
+          msi=$(find incoming -name Chatbox-0.1.19.msi -type f)
+          cp "$msi" Chatbox-0.1.19.msi
+          printf '%s  %s\n' c915f64ef4246bedec780758ba97ae41afe710df35e1b1d0c80e4d3aef7cdc32 Chatbox-0.1.19.msi | sha256sum -c -
+          cat > notes.md <<'EOF'
+          Windows 与 Android 可一次配对，在「最近对话」查看已同步的历史、从任一端新建会话并继续聊天。Android 改善了打开键盘时的动画流畅度。首次使用可选「仅在本机使用」。
+          
+          Windows 安装 MSI，Android 覆盖安装同签名 APK。升级前退出 Windows Chatbox 并备份历史。只存在于旧远端缓存中的重要正文请提前另存。Windows 共享服务需要 Python 3.10 或更高版本，可复用 AstrBot Launcher 的环境。
+          
+          [安装、升级和首次扫码](https://github.com/Polarzen/chatbox/blob/v0.1.19/docs/DEVICE_SYNC_GUIDE.md) · [实机验收记录](https://github.com/Polarzen/chatbox/blob/v0.1.19/docs/DEVICE_SYNC_ACCEPTANCE.md) · [Windows 0.1.15 直接覆盖升级验证](https://github.com/Polarzen/chatbox/actions/runs/45557860752)
+          EOF
+          gh release create v0.1.19 --draft --target 5a671cfc1ac15cc12c4d5afcc6e952cb1a734cd5 --title 'Chatbox 0.1.19 · Windows 与 Android 设备同步' --notes-file notes.md Chatbox-0.1.19.msi
