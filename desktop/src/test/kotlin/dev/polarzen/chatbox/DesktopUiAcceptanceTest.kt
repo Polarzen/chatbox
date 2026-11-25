@@ -899,7 +899,7 @@ class DesktopUiAcceptanceTest {
             assertReadingLine()
             releaseStream(stream, "image")
             awaitUi("reply image decoded and laid out") {
-                rule.onAllNodes(SemanticsMatcher.expectValue(SemanticsProperties.ContentDescription, listOf("助手回复图片")),
+                rule.onAllNodes(SemanticsMatcher.expectValue(SemanticsProperties.ContentDescription, listOf("助手的回复图片")),
                     useUnmergedTree = true).fetchSemanticsNodes().any { it.size.height > 0 }
             }
             assertReadingLine()
@@ -924,10 +924,16 @@ class DesktopUiAcceptanceTest {
             val nextQuestion = "延迟的下一条问题"
             val previousCount = saved.sessionContent(profileA, session).entries.size
             rule.onNodeWithTag("composer-field").performTextClearance()
+            val oldLine = nearestVisibleParagraph(108, "Paragraph")
+            val oldTop = paragraphBox(oldLine).top
             sendText(nextQuestion)
-            awaitUi("sending from older text reveals the new turn") {
+            awaitUi("a new reply keeps the manually scrolled line") {
+                store.sessionContent(profileA, session).entries.size == previousCount + 1 &&
+                    isDisplayed("return-to-latest") && kotlin.math.abs(paragraphBox(oldLine).top - oldTop) < 2f
+            }
+            clickSemanticsTag("return-to-latest")
+            awaitUi("return to latest reveals the new turn") {
                 rule.onNodeWithText(nextQuestion).assertIsDisplayed()
-                rule.onNodeWithText("本地服务已收到，正在继续", substring = true).assertIsDisplayed()
                 rule.onNodeWithTag("return-to-latest").assertDoesNotExist()
                 true
             }
@@ -1075,8 +1081,7 @@ class DesktopUiAcceptanceTest {
             assertSelected()
             saveName(duplicate, "重复手动名称")
             assertRow(historic, "重复手动名称")
-            rule.onNode(hasText("重复手动名称") and !hasAnyAncestor(sessionRowMatcher()),
-                useUnmergedTree = true).assertIsDisplayed()
+            rule.onNodeWithTag("partner-name").assertTextContains("助手")
             clickSemanticsTag("session-menu-$duplicate", useUnmergedTree = true)
             advanceUiAnimations()
             clickSemanticsTag("delete-session-$duplicate", useUnmergedTree = true)
@@ -1193,7 +1198,7 @@ class DesktopUiAcceptanceTest {
     private fun visibleParagraph(number: Int) = bounds("message-region").contains(paragraphBox(number).center)
 
     private fun atImageTail(): Boolean {
-        val image = rule.onNode(SemanticsMatcher.expectValue(SemanticsProperties.ContentDescription, listOf("助手回复图片")),
+        val image = rule.onNode(SemanticsMatcher.expectValue(SemanticsProperties.ContentDescription, listOf("助手的回复图片")),
             useUnmergedTree = true).fetchSemanticsNode()
         val end = image.positionInRoot.y + image.size.height
         val viewport = bounds("message-region")
@@ -1388,6 +1393,7 @@ class DesktopUiAcceptanceTest {
         advanceUiAnimations()
         radio.assertIsSelected()
         closeDialog()
+        if (isDisplayed("close-settings")) { clickSemanticsTag("close-settings"); advanceUiAnimations() }
         waitUntil("profile selection", 10_000) { DesktopStore(historyFile).activeProfileId == expectedProfile }
     }
 
@@ -1408,6 +1414,7 @@ class DesktopUiAcceptanceTest {
     private fun sessionRow(sessionId: String): SemanticsNodeInteraction {
         val key = SessionKey(profileA, sessionId)
         val row = desktopRecentRows(store, key, emptyList()).single { it.key == key }
+        if (!isDisplayed("new-session-button")) openRecentPinned()
         val matcher = sessionRowMatcher() and hasAnyDescendant(hasTestTag("session-menu-${row.tagId}"))
         if (rule.onAllNodes(matcher).fetchSemanticsNodes().isEmpty()) {
             rule.onNode(hasScrollToIndexAction() and hasAnyDescendant(sessionRowMatcher())).performScrollToKey(row.info.id)
