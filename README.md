@@ -1,16 +1,14 @@
-# chatbox
+# Chatbox
 
-0.1.19 可将 Windows 和 Android 配成一组，在两端的「最近对话」打开已有会话或接着聊。首次使用也可选择「仅在本机使用」。[0.1.19 安装、配对与恢复指南](docs/DEVICE_SYNC_GUIDE.md)
+Chatbox 是连接 AstrBot 的 Windows 与 Android 聊天客户端。两端配对一次，即可从「最近对话」查看历史、新建会话并继续聊天，也可选择仅在本机使用。
 
-Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 OneBot。默认聊天记录保存在本机。[Windows 安装与升级说明](desktop/README.md)
+## 下载 0.1.19
 
-以下指南记录已退役的跨端功能。[0.1.18 电脑档案连接](docs/PC_HISTORY_GUIDE.md) · [0.1.16 单会话共享](docs/SHARED_CHAT_GUIDE.md)
+[Windows 安装包（MSI）](https://github.com/Polarzen/chatbox/releases/download/v0.1.19/Chatbox-0.1.19.msi) · [Android 安装包（APK）](https://github.com/Polarzen/chatbox/releases/download/v0.1.19/Chatbox-0.1.19.apk) · [SHA-256 校验文件](https://github.com/Polarzen/chatbox/releases/download/v0.1.19/SHA256SUMS.txt) · [发布说明](https://github.com/Polarzen/chatbox/releases/tag/v0.1.19)
 
-## Windows 下载
+首次连接时，在电脑端验证 AstrBot，选择手机连接方式，再用手机扫码配对。共享服务需要 Python 3.10 或更高版本，可复用 AstrBot Launcher 的环境。[安装、首次连接与恢复指南](docs/DEVICE_SYNC_GUIDE.md)
 
-Windows 0.1.15 安装包为 `Chatbox-0.1.15.msi`。[下载 MSI](https://github.com/Polarzen/chatbox/releases/download/v0.1.15/Chatbox-0.1.15.msi) · [下载 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.15/SHA256SUMS.txt) · [v0.1.15 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.15)
-
-将 MSI 和 `SHA256SUMS.txt` 下载到同一目录。在该目录打开 PowerShell，运行 `Get-FileHash .\Chatbox-0.1.15.msi -Algorithm SHA256`，确认输出的哈希值与 `SHA256SUMS.txt` 中该 MSI 对应的值一致。从 0.1.5 至 0.1.14 升级时先退出 Chatbox，再运行 MSI 并沿用原安装目录。0.1.1 用户先阅读[旧卸载器升级说明](desktop/README.md#从-011-升级)。
+升级前退出 Windows Chatbox 并备份历史，随后沿用原目录安装。Android 使用同签名 APK 覆盖安装。只保存在旧版远端缓存中的重要正文，请在升级前另存。Windows 0.1.1 用户请先阅读[旧卸载器升级说明](desktop/README.md#从-011-升级)。[Windows 安装说明](desktop/README.md) · [实机验收记录](docs/DEVICE_SYNC_ACCEPTANCE.md)
 
 ## Windows 0.1.15
 
