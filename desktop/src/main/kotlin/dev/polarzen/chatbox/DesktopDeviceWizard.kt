@@ -1,13 +1,17 @@
 package dev.polarzen.chatbox
 
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -20,18 +24,10 @@ import org.json.JSONObject
 
 private enum class DeviceStep { SOURCE, ENDPOINT, PAIR }
 
-private data class HostStatus(val local: String, val gateway: String, val phone: String, val mode: String, val error: String)
-private suspend fun checkedHostStatus(): HostStatus = withContext(Dispatchers.IO) {
-    val status = DesktopDeviceRuntime.call(JSONObject().put("action", "status"))
-    val error = if (status.optBoolean("ok")) "" else status.optString("error", "service_offline")
-    val local = if (error.startsWith("gateway_")) DesktopDeviceRuntime.call(JSONObject().put("action", "local")) else status
-    HostStatus(local.optString("localUrl"), local.optString("gatewayUrl"), local.optString("phoneUrl"), local.optString("mode"), error)
-}
-
 internal fun hostGuidance(code: String): String = when (code) {
-    "ngrok_auth_required" -> "ngrok 需要账号授权。请先登录自己的 ngrok 账号，或在连接方式中输入该账号的 authtoken。"
+    "ngrok_auth_required" -> "ngrok 授权失败。请在 ngrok 账号控制台复制「Your Authtoken」，填入 ngrok authtoken 后重试。AstrBot API Key 仅用于连接 AstrBot。"
     "ngrok_api_unavailable" -> "无法读取 ngrok 的本机接口。若要复用已有隧道，请检查 127.0.0.1:4040 上的 ngrok 接口。若由 Chatbox 启动 ngrok，请检查 ngrok 配置后重试。"
-    "ngrok_missing" -> "找不到 ngrok。请在连接方式中填写已安装的 ngrok.exe 完整路径。"
+    "ngrok_missing" -> "找不到 ngrok.exe。请先在电脑上安装 ngrok，再填写 ngrok.exe 的完整路径并重试。"
     "ngrok_target_mismatch", "ngrok_target_ambiguous", "ngrok_inspection_enabled" ->
         "已有隧道未能通过网关检查。请将所选域名转发到本机受限网关，并关闭请求检查。"
     "gateway_unreachable", "gateway_identity_mismatch" ->
@@ -52,15 +48,18 @@ internal fun DesktopDeviceWizard(store: DesktopStore, connection: DesktopConnect
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
     var host by remember { mutableStateOf<HostStatus?>(null) }
-    var mode by remember { mutableStateOf("ngrok") }
-    var phone by remember { mutableStateOf(sync.phoneUrl) }
+    val saved = remember { sync.configuredSettings() }
+    var mode by remember { mutableStateOf(saved.mode) }
+    var phone by remember { mutableStateOf(saved.phoneUrl) }
     var token by remember { mutableStateOf("") }
-    var program by remember { mutableStateOf("") }
-    var database by remember { mutableStateOf("") }
-    var port by remember { mutableStateOf(DesktopDeviceRuntime.configuredGatewayPort().toString()) }
+    var program by remember { mutableStateOf(saved.ngrokPath) }
+    var selectedDatabase by remember { mutableStateOf(saved.dbPath.takeIf(String::isNotBlank)) }
+    var port by remember { mutableStateOf(saved.gatewayPort.toString()) }
     var advanced by remember { mutableStateOf(false) }
+    var ngrokProblem by remember { mutableStateOf<String?>(null) }
+    var issueAfterConfigure by remember { mutableStateOf(!sync.enabled) }
     var accepted by remember { mutableStateOf(sync.enabled) }
-    var login by remember { mutableStateOf(if (sync.enabled) sync.autoStart else true) }
+    var login by remember { mutableStateOf(saved.autostart ?: if (sync.enabled) sync.autoStart else true) }
     var pair by remember { mutableStateOf<DevicePairCode?>(null) }
     var expiresAt by remember { mutableLongStateOf(0L) }
     var baseline by remember { mutableStateOf(emptySet<String>()) }
@@ -72,21 +71,17 @@ internal fun DesktopDeviceWizard(store: DesktopStore, connection: DesktopConnect
         setupSources = withContext(Dispatchers.IO) { discoverDesktopSources(connection.instances) }
     }
 
-    LaunchedEffect(step, setupSources?.database, connection.profileId) {
-        if (!sync.enabled && step == DeviceStep.ENDPOINT && database.isEmpty()) {
-            val discovery = setupSources
-            val deployed = discovery?.deployment
-            if (deployed != null && (deployed.id == connection.profileId ||
-                    !deployed.id.startsWith("launcher:") && deployed.address == connection.address)) {
-                database = discovery.database.orEmpty()
-            }
-        }
-    }
+    val database = selectedDatabase ?: setupSources?.takeIf { discovery ->
+        val deployed = discovery.deployment
+        !sync.enabled && deployed != null && (deployed.id == connection.profileId ||
+            !deployed.id.startsWith("launcher:") && deployed.address == connection.address)
+    }?.database.orEmpty()
 
     fun runAction(action: suspend () -> Unit) {
         if (busy) return
         busy = true
         message = ""
+        ngrokProblem = null
         scope.launch {
             try { action() }
             catch (e: CancellationException) { throw e }
@@ -94,18 +89,31 @@ internal fun DesktopDeviceWizard(store: DesktopStore, connection: DesktopConnect
             finally { busy = false }
         }
     }
-    suspend fun checkHost() {
-        val state = checkedHostStatus()
+    fun showFailure(code: String?, description: String) {
+        message = description
+        if (code == "ngrok_missing" || code == "ngrok_auth_required") {
+            advanced = true
+            ngrokProblem = code
+            step = DeviceStep.ENDPOINT
+        }
+    }
+    suspend fun checkHost(): HostStatus {
+        val state = sync.checkedHostStatus()
         host = state
         if (state.error.isNotEmpty()) {
             pair = null
             message = hostGuidance(state.error)
         }
+        return state
     }
     suspend fun invitePhone() {
         pair = null
         baseline = sync.devices.map { it.id }.toSet()
-        sync.createInvite()
+        val failure = sync.createInvite()
+        if (failure != null) {
+            showFailure(failure.hostCode, failure.message)
+            return
+        }
         val issued = sync.invite
         if (issued != null) {
             pair = DevicePairCode(sync.phoneUrl, issued.code)
@@ -114,13 +122,7 @@ internal fun DesktopDeviceWizard(store: DesktopStore, connection: DesktopConnect
         } else message = sync.notice
     }
     LaunchedEffect(Unit) {
-        if (sync.enabled) {
-            checkHost()
-            host?.let { state ->
-                if (state.mode.isNotBlank()) mode = state.mode
-                if (state.phone.isNotBlank()) phone = state.phone
-            }
-        }
+        if (sync.enabled) checkHost()
     }
     LaunchedEffect(pair, expiresAt) {
         if (pair != null) {
@@ -147,7 +149,8 @@ internal fun DesktopDeviceWizard(store: DesktopStore, connection: DesktopConnect
         text = {
             Column(Modifier.widthIn(min = 280.dp, max = 510.dp).heightIn(max = 560.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                val scroll = key(step) { rememberScrollState() }
+                // A movable key group here breaks node removal when navigating back with an error on Compose 1.7.3.
+                val scroll = rememberSaveable(step, saver = ScrollState.Saver) { ScrollState(0) }
                 Column(Modifier.weight(1f, fill = false).verticalScroll(scroll),
                     verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     when (step) {
@@ -163,13 +166,22 @@ internal fun DesktopDeviceWizard(store: DesktopStore, connection: DesktopConnect
                             TextButton(enabled = !busy, onClick = { advanced = !advanced }) { Text(if (advanced) "收起部署配置" else "部署配置与 ngrok 授权") }
                             if (advanced) {
                                 if (mode == "ngrok") {
-                                    OutlinedTextField(program, { program = it }, label = { Text("ngrok.exe 完整路径（可选）") }, enabled = !busy, singleLine = true)
+                                    val programFocus = remember { FocusRequester() }
+                                    val tokenFocus = remember { FocusRequester() }
+                                    OutlinedTextField(program, { program = it }, label = { Text("ngrok.exe 完整路径（可选）") },
+                                        modifier = Modifier.focusRequester(programFocus), enabled = !busy, singleLine = true)
                                     OutlinedTextField(token, { token = it }, label = { Text("ngrok authtoken（已授权可留空）") },
-                                        enabled = !busy, singleLine = true, visualTransformation = PasswordVisualTransformation())
+                                        modifier = Modifier.focusRequester(tokenFocus), enabled = !busy, singleLine = true, visualTransformation = PasswordVisualTransformation())
+                                    LaunchedEffect(ngrokProblem) {
+                                        when (ngrokProblem) {
+                                            "ngrok_missing" -> programFocus.requestFocus()
+                                            "ngrok_auth_required" -> tokenFocus.requestFocus()
+                                        }
+                                    }
                                 }
                                 OutlinedTextField(port, { port = it }, label = { Text("本机受限网关端口") }, enabled = !busy, singleLine = true)
-                                OutlinedTextField(database, { database = it }, label = { Text("原共享 SQLite 数据库路径（可选）") }, enabled = !busy, singleLine = true)
-                                setupSources?.database?.let { path -> TextButton(onClick = { database = path }, enabled = !busy) { Text("使用找到的旧部署数据库") } }
+                                OutlinedTextField(database, { selectedDatabase = it }, label = { Text("原共享 SQLite 数据库路径（可选）") }, enabled = !busy, singleLine = true)
+                                setupSources?.database?.let { path -> TextButton(onClick = { selectedDatabase = path }, enabled = !busy) { Text("使用找到的旧部署数据库") } }
                             }
                             if (database.isNotBlank()) Text("将沿用共享数据库 · " + database, style = MaterialTheme.typography.caption)
                             Divider()
@@ -232,7 +244,7 @@ internal fun DesktopDeviceWizard(store: DesktopStore, connection: DesktopConnect
                                 TextButton(enabled = !busy, onClick = { runAction { sync.stopHost(); pair = null; checkHost() } }) { Text("停止共享") }
                                 TextButton(enabled = !busy, onClick = { runAction { checkHost() } }) { Text("检查入口") }
                             }
-                            TextButton(enabled = !busy, onClick = { pair = null; message = ""; step = DeviceStep.SOURCE }) { Text("更改 AstrBot 或手机入口") }
+                            TextButton(enabled = !busy, onClick = { pair = null; message = ""; issueAfterConfigure = false; step = DeviceStep.SOURCE }) { Text("更改 AstrBot 或手机入口") }
                         }
                     }
                 }
@@ -251,28 +263,35 @@ internal fun DesktopDeviceWizard(store: DesktopStore, connection: DesktopConnect
                     (mode == "ngrok" || phone.isNotBlank()) && (port.toIntOrNull() ?: 0) in 1..65535,
                     onClick = configure@{
                         val target = connection.snapshot() ?: return@configure
-                        val previouslyEnabled = sync.enabled
+                        selectedDatabase = database
                         val args = JSONObject().put("mode", mode).put("phoneUrl", phone.trim()).put("autostart", login)
                             .put("gatewayPort", port.toInt())
                         if (database.isNotBlank()) args.put("dbPath", database.trim())
                         if (mode == "ngrok" && program.isNotBlank()) args.put("ngrokPath", program.trim())
                         if (mode == "ngrok" && token.isNotBlank()) args.put("ngrokToken", token.trim())
                         runAction {
-                            sync.authorize(args, target)
-                            message = sync.notice
-                            token = ""
-                            if (sync.enabled) {
-                                checkHost()
-                                val ready = host?.takeIf { it.error.isEmpty() && it.mode == mode &&
-                                    (phone.isBlank() || it.phone.trimEnd('/') == phone.trim().trimEnd('/')) }
-                                if (ready != null) {
-                                    step = DeviceStep.PAIR
-                                    if (!previouslyEnabled) invitePhone()
-                                }
+                            val failure = sync.authorize(args, target)
+                            if (failure != null) {
+                                showFailure(failure.hostCode, failure.message)
+                                return@runAction
+                            }
+                            val state = checkHost()
+                            if (state.error.isNotEmpty()) {
+                                showFailure(state.error, hostGuidance(state.error))
+                            } else if (state.mode == mode && (phone.isBlank() || state.phone.trimEnd('/') == phone.trim().trimEnd('/'))) {
+                                step = DeviceStep.PAIR
+                                if (issueAfterConfigure) invitePhone()
+                                if (step == DeviceStep.PAIR) token = ""
+                            } else {
+                                message = "检查返回的手机入口与本次设置不一致。请核对连接方式和手机地址后重试。"
                             }
                         }
-                    }) { Text(if (sync.enabled) "应用并检查入口" else "开启共享并生成配对码") }
-                DeviceStep.PAIR -> Button(enabled = !busy && sync.enabled, onClick = { runAction { checkHost(); if (host?.error == "") invitePhone() } }) {
+                    }) { Text(if (issueAfterConfigure) "开启共享并生成配对码" else "应用并检查入口") }
+                DeviceStep.PAIR -> Button(enabled = !busy && sync.enabled, onClick = { runAction {
+                    issueAfterConfigure = true
+                    val state = checkHost()
+                    if (state.error.isEmpty()) invitePhone() else showFailure(state.error, hostGuidance(state.error))
+                } }) {
                     Text(if (pair == null) "生成配对码" else "重新生成配对码")
                 }
             }

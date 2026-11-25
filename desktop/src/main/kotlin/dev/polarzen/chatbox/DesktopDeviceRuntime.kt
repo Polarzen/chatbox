@@ -10,6 +10,15 @@ import java.security.MessageDigest
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
+internal data class DesktopDeviceSetupConfig(
+    val mode: String = "ngrok",
+    val phoneUrl: String = "",
+    val ngrokPath: String = "",
+    val gatewayPort: Int = 18766,
+    val autostart: Boolean? = null,
+    val dbPath: String = "",
+)
+
 /** Blocking local pipe interface. The successful response may contain the Windows owner's bearer. */
 internal object DesktopDeviceRuntime {
     private val moduleName = Regex("[A-Za-z_][A-Za-z_0-9]*[.]py")
@@ -20,13 +29,19 @@ internal object DesktopDeviceRuntime {
     private fun runtimeRoot(): Path? =
         System.getenv("LOCALAPPDATA")?.let { Path.of(it, "Polarzen", "Chatbox", "device-runtime") }
 
-    fun configuredGatewayPort(root: Path? = runtimeRoot()): Int {
-        val config = root?.resolve("config.json")
-        if (config != null && Files.isRegularFile(config)) {
-            val port = runCatching { JSONObject(Files.readString(config)).optInt("gatewayPort") }.getOrNull()
-            if (port != null && port in 1..65535) return port
-        }
-        return 18766
+    fun configuredSettings(root: Path? = runtimeRoot()): DesktopDeviceSetupConfig {
+        val defaults = DesktopDeviceSetupConfig()
+        val file = root?.resolve("config.json") ?: return defaults
+        if (!Files.isRegularFile(file)) return defaults
+        val config = runCatching { JSONObject(Files.readString(file)) }.getOrNull() ?: return defaults
+        return DesktopDeviceSetupConfig(
+            mode = if (config.optString("mode") == "trusted") "trusted" else "ngrok",
+            phoneUrl = config.optString("phoneUrl"),
+            ngrokPath = config.optString("ngrokPath"),
+            gatewayPort = config.optInt("gatewayPort").takeIf { it in 1..65535 } ?: defaults.gatewayPort,
+            autostart = config.opt("autostart") as? Boolean,
+            dbPath = config.optString("dbPath"),
+        )
     }
 
     fun call(request: JSONObject): JSONObject {

@@ -9,11 +9,11 @@ import org.junit.rules.TemporaryFolder
 class DesktopDeviceRuntimeTest {
     @get:Rule val folder = TemporaryFolder()
 
-    @Test fun gatewayPortDefaultsOnFirstSetupAndReadsTheSavedPortWhileStopped() {
+    @Test fun setupConfigDefaultsOnFirstSetupAndReadsOlderSavedFieldsWhileStopped() {
         val root = folder.root.toPath()
-        assertEquals(18766, DesktopDeviceRuntime.configuredGatewayPort(root))
+        assertEquals(DesktopDeviceSetupConfig(), DesktopDeviceRuntime.configuredSettings(root))
 
         Files.writeString(root.resolve("config.json"), """{"mode":"trusted","gatewayPort":18768}""")
-        assertEquals(18768, DesktopDeviceRuntime.configuredGatewayPort(root))
+        assertEquals(DesktopDeviceSetupConfig(mode = "trusted", gatewayPort = 18768), DesktopDeviceRuntime.configuredSettings(root))
     }
 }

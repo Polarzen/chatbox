@@ -27,6 +27,8 @@ internal class DesktopDeviceMediaTarget(val address: String, val token: String, 
     val sid: String, val allowLoopbackHttp: Boolean)
 
 private class DeviceHostFailure(val code: String) : Exception()
+internal data class DeviceActionFailure(val message: String, val hostCode: String?)
+internal data class HostStatus(val local: String, val gateway: String, val phone: String, val mode: String, val error: String)
 private data class VerifiedRoute(val base: String, val keyId: String, val availableKeys: KeyList, val upstream: String)
 
 /** Owner of device sharing for one Windows history. The host owns the secret; history stores
@@ -34,6 +36,7 @@ private data class VerifiedRoute(val base: String, val keyId: String, val availa
 internal class DesktopDeviceSync(
     private val store: DesktopStore,
     private val keys: NamedKeys,
+    val configuredSettings: () -> DesktopDeviceSetupConfig = { DesktopDeviceRuntime.configuredSettings() },
     private val runtime: (JSONObject) -> JSONObject = DesktopDeviceRuntime::call,
 ) {
     private val api = SharedDeviceTransport(allowLoopback = true)
@@ -166,6 +169,13 @@ internal class DesktopDeviceSync(
         rows.filter { it.key in keep }
     }
 
+    suspend fun checkedHostStatus(): HostStatus = withContext(Dispatchers.IO) {
+        val status = runtime(JSONObject().put("action", "status"))
+        val error = if (status.optBoolean("ok")) "" else status.optString("error", "service_offline")
+        val local = if (error.startsWith("gateway_")) runtime(JSONObject().put("action", "local")) else status
+        HostStatus(local.optString("localUrl"), local.optString("gatewayUrl"), local.optString("phoneUrl"), local.optString("mode"), error)
+    }
+
     private fun host(action: String, args: JSONObject = JSONObject()): JSONObject {
         val result = runtime(args.put("action", action))
         if (!result.optBoolean("ok")) throw DeviceHostFailure(result.optString("error", "service_offline"))
@@ -186,15 +196,17 @@ internal class DesktopDeviceSync(
         return b
     }
 
-    private suspend fun action(block: suspend () -> Unit) = withContext(Dispatchers.IO) {
+    private suspend fun action(block: suspend () -> Unit): DeviceActionFailure? = withContext(Dispatchers.IO) {
         store.profileRequests.withLock {
             try {
                 block()
+                null
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 if (e is DeviceHostFailure || e is SharedHttpFailure && e.status == 401) invite = null
                 notice = explain(e)
+                DeviceActionFailure(notice, (e as? DeviceHostFailure)?.code)
             } finally {
                 revision++
             }
@@ -771,8 +783,7 @@ internal class DesktopDeviceSync(
         is DeviceHostFailure -> when (e.code) {
             "service_offline", "not_configured" -> "共享服务离线，待发内容已保存在电脑。"
             "gateway_unreachable", "gateway_identity_mismatch" -> "无法验证手机访问地址，请检查 HTTPS 地址与网关。"
-            "ngrok_api_unavailable" -> hostGuidance(e.code)
-            "ngrok_auth_required", "ngrok_missing" -> "请检查 ngrok 程序及其授权。"
+            "ngrok_api_unavailable", "ngrok_auth_required", "ngrok_missing" -> hostGuidance(e.code)
             "db_in_use" -> "原共享数据库正在使用，请先停止占用它的服务。"
             "gateway_port_in_use" -> "手机网关端口已被占用。"
             else -> "设备服务操作失败（${e.code}）。"

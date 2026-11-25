@@ -187,7 +187,7 @@ class DesktopDeviceHomeUiTest {
         val profile = store.createProfile("https://astrbot.example")
         val keys = NamedKeys(dir, DesktopCredentials(dir.resolve("keys")))
         val finish = CountDownLatch(1)
-        val sync = DesktopDeviceSync(store, keys) { request ->
+        val sync = DesktopDeviceSync(store, keys, configuredSettings = { DesktopDeviceRuntime.configuredSettings(dir) }) { request ->
             check(request.getString("action") == "configure")
             check(finish.await(20, TimeUnit.SECONDS))
             JSONObject().put("ok", false).put("error", "ngrok_api_unavailable")
@@ -226,7 +226,9 @@ class DesktopDeviceHomeUiTest {
         val store = DesktopStore(dir.resolve("history.json"))
         val keys = NamedKeys(dir, DesktopCredentials(dir.resolve("keys")))
         val images = ReplyImageCache(dir.resolve("images"))
-        val sync = DesktopDeviceSync(store, keys) { error("A local-only setup should not start or configure the host") }
+        val sync = DesktopDeviceSync(store, keys, configuredSettings = { DesktopDeviceRuntime.configuredSettings(dir) }) {
+            error("A local-only setup should not start or configure the host")
+        }
         var skipped = false
         ui.mainClock.autoAdvance = false
         ui.setContent {
