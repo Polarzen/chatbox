@@ -20,7 +20,7 @@ internal fun ScanDevicePairButton(onScanned: (DevicePairCode) -> Unit, onError: 
             val pair = try {
                 decodeDevicePairCode(contents)
             } catch (_: IllegalArgumentException) {
-                onError("请扫描电脑显示的 Chatbox 设备配对二维码。")
+                onError("请扫描电脑显示的 Chat Box 设备配对二维码。")
                 return@rememberLauncherForActivityResult
             }
             onScanned(pair)
@@ -35,7 +35,7 @@ internal fun ScanDevicePairButton(onScanned: (DevicePairCode) -> Unit, onError: 
             onError("此设备没有可用相机，请手动输入地址和配对码。")
         } else {
             val options = ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                .setPrompt("扫描电脑上的 Chatbox 设备配对二维码")
+                .setPrompt("扫描电脑上的 Chat Box 设备配对二维码")
                 .setBeepEnabled(false)
                 .addExtra(Intents.Scan.SHOW_MISSING_CAMERA_PERMISSION_DIALOG, false)
             try {

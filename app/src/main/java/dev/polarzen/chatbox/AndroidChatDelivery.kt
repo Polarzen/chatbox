@@ -167,7 +167,7 @@ internal class AndroidChatDelivery(
         val ready = AndroidChatTransferService.request(app)
         onNote("")
         thread(name = name, isDaemon = true) {
-            if (!ready.join()) main.post { onNote("系统未允许后台传输，请保持 Chatbox 在前台。") }
+            if (!ready.join()) main.post { onNote("系统未允许后台传输，请保持 Chat Box 在前台。") }
             val note = try { work() } catch (_: Exception) { STORAGE_FAILURE }
             main.post {
                 active.remove(key)
@@ -212,7 +212,7 @@ internal class AndroidChatDelivery(
             .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val open = PendingIntent.getActivity(app, 0, intent, PendingIntent.FLAG_IMMUTABLE)
         val notification = Notification.Builder(app, REPLY_CHANNEL)
-            .setSmallIcon(android.R.drawable.stat_notify_chat).setContentTitle("Chatbox · 小鲸鱼")
+            .setSmallIcon(android.R.drawable.stat_notify_chat).setContentTitle(app.getString(R.string.app_name))
             .setContentText("收到新回复").setAutoCancel(true).setContentIntent(open)
             .setVisibility(Notification.VISIBILITY_PRIVATE).build()
         manager.notify(target.toString(), 1, notification)

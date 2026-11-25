@@ -49,7 +49,7 @@ if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
         from(toastDll) { into("win32-x86-64") }
     }
 }
-val windowsPackageVersion = "0.1.22"
+val windowsPackageVersion = "0.1.23"
 compose.desktop {
     application {
         mainClass = "dev.polarzen.chatbox.DesktopMainKt"
@@ -60,6 +60,7 @@ compose.desktop {
             modules("java.prefs", "java.logging", "jdk.crypto.ec")
             windows {
                 upgradeUuid = "204b3f78-64ec-4071-9a66-a535773540eb"
+                iconFile.set(project.file("icons/chat-box.ico"))
                 menu = true
             }
         }

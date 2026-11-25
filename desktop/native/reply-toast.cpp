@@ -9,7 +9,7 @@ using namespace winrt::Windows::UI::Notifications;
 
 static HRESULT showReplyToast(const wchar_t* uri) {
     XmlDocument xml;
-    xml.LoadXml(LR"(<toast activationType="protocol"><visual><binding template="ToastGeneric"><text>Chatbox · 回复已完成</text><text>点击查看回复</text></binding></visual></toast>)");
+    xml.LoadXml(LR"(<toast activationType="protocol"><visual><binding template="ToastGeneric"><text>Chat Box · 回复已完成</text><text>点击查看回复</text></binding></visual></toast>)");
     xml.DocumentElement().SetAttribute(L"launch", uri);
     auto notifier = ToastNotificationManager::CreateToastNotifier(L"Polarzen.Chatbox");
     // Windows applies notification preferences on Show. Setting() can fail before the first delivery.

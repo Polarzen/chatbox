@@ -33,6 +33,6 @@ internal fun decodeDevicePairCode(raw: String): DevicePairCode {
         return DevicePairCode(requireNotNull(fields["url"]), requireNotNull(fields["code"]))
     } catch (_: Exception) {
         // URI parser exceptions can include the entire input, including the one-time code.
-        throw IllegalArgumentException("二维码不是有效的 Chatbox 设备配对码。")
+        throw IllegalArgumentException("二维码不是有效的 Chat Box 设备配对码。")
     }
 }

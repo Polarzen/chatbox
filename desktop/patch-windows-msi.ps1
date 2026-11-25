@@ -164,10 +164,15 @@ function Add-ReplyToastRegistration($Database) {
     $menuDirs = @('ProgramMenuFolder') + @(Get-MsiRows $Database 'Directory' @('Directory','Directory_Parent') |
         Where-Object { $_.Directory_Parent -eq 'ProgramMenuFolder' } | ForEach-Object { $_.Directory })
     $shortcuts = @(Get-MsiRows $Database 'Shortcut' @('Shortcut','Directory_','Name','Target','Arguments') | Where-Object {
-        ($_.Name -split '\|')[-1] -eq 'Chatbox' -and $_.Target -ceq $target -and
+        (($_.Name -split '\|')[-1] -in @('Chatbox', 'Chat Box')) -and $_.Target -ceq $target -and
         -not $_.Arguments -and $menuDirs -contains $_.Directory_
     })
     if ($shortcuts.Count -ne 1) { throw 'Expected one Start menu shortcut targeting Chatbox.exe.' }
+
+    # Retain the launcher, upgrade identity and shortcut row ID used for notifications.
+    Set-MsiProperty $Database 'ProductName' 'Chat Box'
+    $shortcutId = ConvertTo-MsiSqlLiteral $shortcuts[0].Shortcut
+    Invoke-MsiSql $Database "UPDATE ``Shortcut`` SET ``Name``='Chatbox|Chat Box' WHERE ``Shortcut``=$shortcutId"
 
     if (-not (Test-MsiTable $Database 'MsiShortcutProperty')) {
         Invoke-MsiSql $Database 'CREATE TABLE `MsiShortcutProperty` (`MsiShortcutProperty` CHAR(72) NOT NULL, `Shortcut_` CHAR(72) NOT NULL, `PropertyKey` CHAR(0) NOT NULL, `PropVariantValue` CHAR(0) NOT NULL PRIMARY KEY `MsiShortcutProperty`)'
@@ -188,7 +193,7 @@ function Add-ReplyToastRegistration($Database) {
 
     $protocol = 'Software\Classes\polarzen-chatbox'
     foreach ($entry in @(
-        @('ChatboxProtocolDescription', $protocol, $null, 'URL:Chatbox'),
+        @('ChatboxProtocolDescription', $protocol, $null, 'URL:Chat Box'),
         @('ChatboxProtocolMarker', $protocol, 'URL Protocol', $null),
         @('ChatboxProtocolCommand', ($protocol + '\shell\open\command'), $null, ('"' + $target + '" --open-toast "%1"'))
     )) {

@@ -562,7 +562,7 @@ private fun OwnerPermissionsDialog(connection: DesktopConnection, item: NamedKey
             Column {
                 Text("已验证能力")
                 if (verifiedForItem) {
-                    Text("此密钥已通过聊天 API 验证：Chatbox 对话身份的 AstrBot 会话列表可读取。")
+                    Text("此密钥已通过聊天 API 验证：Chat Box 对话身份的 AstrBot 会话列表可读取。")
                 } else {
                     Text("此密钥尚未在当前连接中通过验证；聊天 API 能力未知。")
                 }

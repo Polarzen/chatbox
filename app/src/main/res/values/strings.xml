@@ -1,3 +1,5 @@
 <resources>
+    <string name="app_name" translatable="false">Chat Box</string>
+    <color name="launcher_background">#390F40</color>
     <string name="open_chat">打开聊天</string>
 </resources>

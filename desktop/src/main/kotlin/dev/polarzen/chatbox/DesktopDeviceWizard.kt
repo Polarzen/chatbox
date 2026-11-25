@@ -26,7 +26,7 @@ private enum class DeviceStep { SOURCE, ENDPOINT, PAIR }
 
 internal fun hostGuidance(code: String): String = when (code) {
     "ngrok_auth_required" -> "ngrok 授权失败。请在 ngrok 账号控制台复制「Your Authtoken」，填入 ngrok authtoken 后重试。AstrBot API Key 仅用于连接 AstrBot。"
-    "ngrok_api_unavailable" -> "无法读取 ngrok 的本机接口。若要复用已有隧道，请检查 127.0.0.1:4040 上的 ngrok 接口。若由 Chatbox 启动 ngrok，请检查 ngrok 配置后重试。"
+    "ngrok_api_unavailable" -> "无法读取 ngrok 的本机接口。若要复用已有隧道，请检查 127.0.0.1:4040 上的 ngrok 接口。若由 Chat Box 启动 ngrok，请检查 ngrok 配置后重试。"
     "ngrok_missing" -> "找不到 ngrok.exe。请先在电脑上安装 ngrok，再填写 ngrok.exe 的完整路径并重试。"
     "ngrok_target_mismatch", "ngrok_target_ambiguous", "ngrok_inspection_enabled" ->
         "已有隧道未能通过网关检查。请将所选域名转发到本机受限网关，并关闭请求检查。"
