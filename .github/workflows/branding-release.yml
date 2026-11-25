@@ -1,0 +1,21 @@
+name: Chat Box release packaging
+on:
+  push:
+    branches: ['release/chat-box-0.1.23']
+    paths: ['.github/workflows/branding-release.yml']
+permissions:
+  contents: read
+jobs:
+  signing-tool:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Retrieve the signer used by the Android SDK on this runner
+        run: |
+          jar="$ANDROID_HOME/build-tools/35.0.0/lib/apksigner.jar"
+          cp "$jar" apksigner.jar
+          sha256sum apksigner.jar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Android-SDK-35-apksigner
+          path: apksigner.jar
+          retention-days: 1
