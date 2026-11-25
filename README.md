@@ -4,6 +4,8 @@ Chatbox 是连接 AstrBot 的 Windows 与 Android 聊天客户端。两端配对
 
 ## 下载 v0.1.22 正式版
 
+[中文安装指南（首次安装、覆盖升级与连接）](docs/Chatbox-Install-Guide.zh-CN.md)
+
 [Windows 0.1.22 安装包（MSI）](https://github.com/Polarzen/chatbox/releases/download/v0.1.22/Chatbox-0.1.22.msi) · [Android 0.1.21 安装包（APK）](https://github.com/Polarzen/chatbox/releases/download/v0.1.22/Chatbox-0.1.21.apk) · [SHA-256 校验文件](https://github.com/Polarzen/chatbox/releases/download/v0.1.22/SHA256SUMS.txt) · [发布说明](https://github.com/Polarzen/chatbox/releases/tag/v0.1.22)
 
 Windows 配对向导遇到 ngrok 路径或授权错误时，会保留已填选项并定位到需要修改的字段。修正后即可重试，成功后再显示配对码。「最近对话」同时显示对方名称和会话主题，Windows 聊天记录和搜索结果也会显示已知的消息发送时间。
