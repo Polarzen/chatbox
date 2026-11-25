@@ -26,7 +26,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.MeasurePolicy
-import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -52,22 +52,9 @@ private class ChatImeAnimation(private val current: MutableState<Any?>) :
     }
 }
 
-// The drawer measures its body before the timeline. Their height difference is the space
-// used by the header, composer, notices and attachments, independent of IME padding.
-internal class ChatBodyGeometry {
-    var height = 0
-        private set
-
-    fun measureBody(modifier: Modifier): Modifier = modifier.layout { measurable, constraints ->
-        height = constraints.maxHeight
-        val body = measurable.measure(constraints)
-        layout(body.width, body.height) { body.place(0, 0) }
-    }
-}
-
 @Composable
 internal fun ChatHistoryViewport(
-    modifier: Modifier, reading: ChatReading, body: ChatBodyGeometry, content: @Composable () -> Unit,
+    modifier: Modifier, reading: ChatReading, content: @Composable () -> Unit,
 ) {
     val view = LocalView.current
     val currentAnimation = remember(view) { mutableStateOf<Any?>(null) }
@@ -78,15 +65,13 @@ internal fun ChatHistoryViewport(
         host?.setWindowInsetsAnimationCallback(ChatImeAnimation(currentAnimation))
         onDispose { host?.setWindowInsetsAnimationCallback(null) }
     }
-    val measure = remember(reading, body, currentAnimation) {
+    val measure = remember(reading, LocalConfiguration.current, currentAnimation) {
         var previousAnimation: Any? = null
         var measuredWidth = -1
-        var surroundingHeight = -1
         var frozenHeight = -1
         MeasurePolicy { children, constraints ->
             val width = constraints.maxWidth
             val height = constraints.maxHeight
-            val surrounding = body.height - height
             val animation = currentAnimation.value
             val wasTranslated = frozenHeight > reading.viewportHeight
             if (animation !== previousAnimation) {
@@ -96,12 +81,11 @@ internal fun ChatHistoryViewport(
             }
             val list = reading.list
             if (frozenHeight >= 0) {
-                val sameGeometry = width == measuredWidth && surrounding == surroundingHeight && height <= frozenHeight
+                val sameGeometry = width == measuredWidth && height <= frozenHeight
                 val pinned = !list.isScrollInProgress && !list.canScrollBackward && list.canScrollForward
                 if (!sameGeometry || !pinned) frozenHeight = -1
             }
             measuredWidth = width
-            surroundingHeight = surrounding
             // A translated child's bottom already coincides with the visible bottom on thaw.
             reading.anchorReverseHistory(height, keepAnchor = frozenHeight < 0 && !wasTranslated)
             val childHeight = if (frozenHeight >= 0) frozenHeight else height

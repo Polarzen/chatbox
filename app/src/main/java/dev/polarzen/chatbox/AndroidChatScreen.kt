@@ -43,7 +43,6 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -114,9 +113,7 @@ internal fun AndroidChatScreen(
         LaunchedEffect(Unit) { screenFocus.requestFocus() }
         val wide = maxWidth >= 720.dp
         val compactHeight = maxHeight < 480.dp
-        val chatBody = remember(maxWidth, maxHeight, LocalDensity.current, LocalLayoutDirection.current) {
-            ChatBodyGeometry()
-        }
+        val imeBottom = WindowInsets.ime.only(WindowInsetsSides.Bottom)
         var sidebarVisible by rememberSaveable { mutableStateOf(onRecent == null) }
         val openLocalHistory = {
             if (wide) sidebarVisible = !sidebarVisible else {
@@ -138,34 +135,42 @@ internal fun AndroidChatScreen(
                 onDismiss = if (overlay) ::closeDrawer else null)
         }
         ModalNavigationDrawer(
-            modifier = Modifier.imePadding(),
+            modifier = Modifier.windowInsetsPadding(WindowInsets.ime.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top)),
             drawerState = drawer,
             gesturesEnabled = !wide && (onRecent == null || drawer.isOpen),
             drawerContent = {
-                if (!wide) ModalDrawerSheet(modifier = Modifier.width(drawerWidth),
-                    windowInsets = WindowInsets(0, 0, 0, 0)) {
-                    sidebar(Modifier.fillMaxSize(), true)
+                if (!wide && (onRecent == null || deviceStatus == null || drawer.isOpen)) {
+                    val closedOffset = with(LocalDensity.current) { -drawerWidth.roundToPx() }
+                    val visible by remember(drawer, closedOffset) {
+                        derivedStateOf { drawer.isOpen || drawer.currentOffset > closedOffset }
+                    }
+                    ModalDrawerSheet(modifier = Modifier.width(drawerWidth),
+                        windowInsets = if (visible) imeBottom else WindowInsets(0, 0, 0, 0)) {
+                        sidebar(Modifier.fillMaxSize(), true)
+                    }
                 }
             },
         ) {
-            Row(chatBody.measureBody(Modifier.fillMaxSize())) {
+            Row(Modifier.fillMaxSize()) {
                 if (wide && sidebarVisible) {
-                    sidebar(Modifier.width(240.dp).fillMaxHeight(), false)
+                    sidebar(Modifier.width(240.dp).fillMaxHeight().windowInsetsPadding(imeBottom), false)
                     VerticalDivider()
                 }
                 Column(Modifier.weight(1f).fillMaxHeight()) {
                     Column(Modifier.weight(1f)) {
-                        ChatHeader(connections, session.title, hit?.takeIf { it.side == MobileHistorySide.TITLE },
-                            compactHeight, onRecent == null && wide && sidebarVisible,
-                            onSidebar = onRecent ?: openLocalHistory,
-                            onSearch = ::openSearch, onSettings = onSettings, onAppearance = onAppearance,
-                            onHeart = onHeart, onDeviceSettings = onDeviceSettings,
-                            onLocalHistory = openLocalHistory.takeIf { onRecent != null && deviceStatus == null },
-                            deviceStatus = deviceStatus)
+                        Box(Modifier.fillMaxWidth().clipToBounds().wrapContentHeight(Alignment.Top, unbounded = true)) {
+                            ChatHeader(connections, session.title, hit?.takeIf { it.side == MobileHistorySide.TITLE },
+                                compactHeight, onRecent == null && wide && sidebarVisible,
+                                onSidebar = onRecent ?: openLocalHistory,
+                                onSearch = ::openSearch, onSettings = onSettings, onAppearance = onAppearance,
+                                onHeart = onHeart, onDeviceSettings = onDeviceSettings,
+                                onLocalHistory = openLocalHistory.takeIf { onRecent != null && deviceStatus == null },
+                                deviceStatus = deviceStatus)
+                        }
                         HorizontalDivider()
                         Box(Modifier.weight(1f)) {
                             readings.SaveableStateProvider(scopeId) {
-                                ChatTimeline(session, busy, readOnly, chatBody, hit, jumpTurn, onJumpHandled,
+                                ChatTimeline(session, busy, readOnly, hit, jumpTurn, onJumpHandled,
                                     onHitShown = { selectedHit = null }, onCreate = onCreate,
                                     onRetry = { retry = it.id }, onRetryMedia = onRetryMedia)
                             }
@@ -187,25 +192,27 @@ internal fun AndroidChatScreen(
                             }
                         }
                     }
-                    if (readOnly) {
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            Text("旧版共享记录暂不可发送。草稿保存在本机。", Modifier.weight(1f),
-                                style = MaterialTheme.typography.bodySmall)
-                            TextButton(onClick = onCreate) { Text("新建会话") }
+                    Column(Modifier.windowInsetsPadding(imeBottom)) {
+                        if (readOnly) {
+                            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                Text("旧版共享记录暂不可发送。草稿保存在本机。", Modifier.weight(1f),
+                                    style = MaterialTheme.typography.bodySmall)
+                                TextButton(onClick = onCreate) { Text("新建会话") }
+                            }
                         }
-                    }
-                    Surface(tonalElevation = 1.dp) {
-                        AndroidChatComposer(sessionKey = scopeId,
-                            readDraft = readDraft ?: { history.sessions(base).firstOrNull { it.id == session.id }?.draft?.text.orEmpty() },
-                            draftEvent = Triple(draftEvent, session.turns.lastOrNull()?.id, session.draft.text.isEmpty()),
-                            onDraftText = onDraftText, onSend = onSend, sendEnabled = !busy && !readOnly && !recording,
-                            hasAttachments = session.draft.attachments.isNotEmpty(), compact = compactHeight,
-                            onPasteImages = { mediaAvailable && !busy && pasteMobileImages(context, onAddAssets) { mediaNote = it } },
-                            actions = {
-                                if (mediaAvailable) AndroidMediaActions(scopeId, enabled = !busy, onAdd = onAddAssets,
-                                    onNote = { mediaNote = it }, onRecordingChanged = { recording = it })
-                            })
+                        Surface(tonalElevation = 1.dp) {
+                            AndroidChatComposer(sessionKey = scopeId,
+                                readDraft = readDraft ?: { history.sessions(base).firstOrNull { it.id == session.id }?.draft?.text.orEmpty() },
+                                draftEvent = Triple(draftEvent, session.turns.lastOrNull()?.id, session.draft.text.isEmpty()),
+                                onDraftText = onDraftText, onSend = onSend, sendEnabled = !busy && !readOnly && !recording,
+                                hasAttachments = session.draft.attachments.isNotEmpty(), compact = compactHeight,
+                                onPasteImages = { mediaAvailable && !busy && pasteMobileImages(context, onAddAssets) { mediaNote = it } },
+                                actions = {
+                                    if (mediaAvailable) AndroidMediaActions(scopeId, enabled = !busy, onAdd = onAddAssets,
+                                        onNote = { mediaNote = it }, onRecordingChanged = { recording = it })
+                                })
+                        }
                     }
                 }
             }
@@ -390,7 +397,7 @@ private fun chatReadingSaver(turns: List<MobileTurn>) = listSaver<ChatReading, A
 
 @Composable
 private fun ChatTimeline(
-    session: MobileSession, busy: Boolean, readOnly: Boolean, body: ChatBodyGeometry, hit: MobileHistoryHit?,
+    session: MobileSession, busy: Boolean, readOnly: Boolean, hit: MobileHistoryHit?,
     jumpTurn: String?, onJumpHandled: () -> Unit, onHitShown: () -> Unit,
     onCreate: () -> Unit, onRetry: (MobileTurn) -> Unit, onRetryMedia: (MobileTurn, MobileAsset) -> Unit,
 ) {
@@ -459,7 +466,7 @@ private fun ChatTimeline(
         val hitGeometry = if (bodyHit == null) Modifier else Modifier.nestedScroll(observer).onGloballyPositioned {
             center = it.positionInRoot().y + it.size.height / 2f
         }
-        ChatHistoryViewport(Modifier.fillMaxSize().then(hitGeometry), reading, body) {
+        ChatHistoryViewport(Modifier.fillMaxSize().then(hitGeometry), reading) {
             LazyColumn(Modifier.fillMaxSize().testTag("message-region"), state = list, reverseLayout = true,
                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
