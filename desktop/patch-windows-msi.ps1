@@ -213,11 +213,15 @@ function Add-FullUninstallShortcut($Database) {
     $components = @(Get-MsiRows $Database 'Component' @('Component', 'Directory_'))
     $tracked = @{}
     foreach ($name in @('Chatbox.exe', 'uninstall.cmd', 'Uninstall-ChatBox.ps1', 'Uninstall-ChatBoxData.ps1')) {
-        $matches = @($files | Where-Object { ($_.FileName -split '\|')[-1] -ceq $name })
-        if ($matches.Count -ne 1) { throw "Expected one tracked $name for complete uninstall." }
-        $component = @($components | Where-Object { $_.Component -ceq $matches[0].Component_ })
+        $fileMatches = @($files | Where-Object { ($_.FileName -split '\|')[-1] -ceq $name })
+        if ($fileMatches.Count -ne 1) {
+            $payloadFiles = @($files | Where-Object { $_.FileName -match '(?i)uninstall|\.ps1|\.cmd' } |
+                ForEach-Object { $_.FileName + ' [component=' + $_.Component_ + ']' })
+            throw "Expected one tracked $name for complete uninstall; found $($fileMatches.Count). MSI script files: $($payloadFiles -join '; ')"
+        }
+        $component = @($components | Where-Object { $_.Component -ceq $fileMatches[0].Component_ })
         if ($component.Count -ne 1) { throw "Expected one component for $name." }
-        $tracked[$name] = [pscustomobject]@{ File = $matches[0]; Directory = $component[0].Directory_ }
+        $tracked[$name] = [pscustomobject]@{ File = $fileMatches[0]; Directory = $component[0].Directory_ }
     }
     $uninstallDirectory = $tracked['uninstall.cmd'].Directory
     foreach ($name in @('Uninstall-ChatBox.ps1', 'Uninstall-ChatBoxData.ps1')) {
@@ -228,9 +232,13 @@ function Add-FullUninstallShortcut($Database) {
     $directories = @(Get-MsiRows $Database 'Directory' @('Directory', 'Directory_Parent', 'DefaultDir'))
     $scriptDirectory = @($directories | Where-Object { $_.Directory -ceq $uninstallDirectory })
     if ($scriptDirectory.Count -ne 1 -or (($scriptDirectory[0].DefaultDir -split ':')[0] -split '\|')[-1] -ine 'uninstall') {
-        throw 'Expected the uninstall scripts in the app/uninstall payload directory.'
+        throw 'Expected the uninstall scripts in the app/resources/uninstall payload directory.'
     }
-    $appDirectory = @($directories | Where-Object { $_.Directory -ceq $scriptDirectory[0].Directory_Parent })
+    $resourcesDirectory = @($directories | Where-Object { $_.Directory -ceq $scriptDirectory[0].Directory_Parent })
+    if ($resourcesDirectory.Count -ne 1 -or (($resourcesDirectory[0].DefaultDir -split ':')[0] -split '\|')[-1] -ine 'resources') {
+        throw 'Expected the uninstall payload under the packaged Compose resources directory.'
+    }
+    $appDirectory = @($directories | Where-Object { $_.Directory -ceq $resourcesDirectory[0].Directory_Parent })
     if ($appDirectory.Count -ne 1 -or (($appDirectory[0].DefaultDir -split ':')[0] -split '\|')[-1] -ine 'app' -or
         $appDirectory[0].Directory_Parent -cne $tracked['Chatbox.exe'].Directory) {
         throw 'The uninstall script directory is not under the installed Chat Box app payload.'

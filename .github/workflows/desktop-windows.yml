@@ -115,7 +115,7 @@ jobs:
           name: Chatbox-Windows-MSI
           path: ${{ runner.temp }}/chatbox-uninstall-package
       - name: Install and completely uninstall the packaged Windows app
-        shell: pwsh
+        shell: powershell
         run: |
           $packages = @(Get-ChildItem "${{ runner.temp }}\chatbox-uninstall-package\*.msi" -File)
           if ($packages.Count -ne 1) { throw 'Expected exactly one verified MSI package.' }

@@ -20,7 +20,7 @@
 
 ### Windows 完整卸载
 
-在开始菜单打开 **Uninstall Chat Box**，或运行安装目录的 `app\uninstall\uninstall.cmd`。确认后会停止共享服务及登录自启动，卸载程序并永久删除当前 Windows 账户的本机历史、草稿、附件副本、已保存密钥和设备绑定。外置共享数据库会单独询问是否删除。
+在开始菜单打开 **Uninstall Chat Box**，或运行安装目录的 `app\resources\uninstall\uninstall.cmd`。确认后会停止共享服务及登录自启动，卸载程序并永久删除当前 Windows 账户的本机历史、草稿、附件副本、已保存密钥和设备绑定。外置共享数据库会单独询问是否删除。
 
 已有旧版或程序已经卸载时，也可完整解压独立卸载 ZIP 后运行其中的 `uninstall.cmd`。普通 MSI 覆盖升级仍会保留用户数据。[清理范围和操作说明](https://github.com/Polarzen/chatbox/blob/v0.1.24/docs/WINDOWS_FULL_UNINSTALL.md)
 

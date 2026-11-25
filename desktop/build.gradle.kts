@@ -50,6 +50,27 @@ if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
     }
 }
 val windowsPackageVersion = "0.1.24"
+val uninstallSources = layout.projectDirectory.dir("uninstall")
+val uninstallFileNames = listOf("uninstall.cmd", "Uninstall-ChatBox.ps1", "Uninstall-ChatBoxData.ps1")
+val uninstallResourcesRoot = layout.buildDirectory.dir("generated/uninstall-resources")
+val verifyUninstallPayload: (java.io.File) -> Unit = { directory ->
+    uninstallFileNames.forEach { name ->
+        val source = uninstallSources.file(name).asFile
+        val packaged = directory.resolve(name)
+        check(source.isFile && packaged.isFile && source.readBytes().contentEquals(packaged.readBytes())) {
+            "Missing or changed uninstall payload: ${packaged.absolutePath}"
+        }
+    }
+    logger.lifecycle("Verified ${uninstallFileNames.size} Windows uninstall files: ${directory.absolutePath}")
+}
+val prepareUninstallResources by tasks.registering(Sync::class) {
+    from(uninstallSources) {
+        include(*uninstallFileNames.toTypedArray())
+        into("windows/uninstall")
+    }
+    into(uninstallResourcesRoot)
+    doLast { verifyUninstallPayload(destinationDir.resolve("windows/uninstall")) }
+}
 compose.desktop {
     application {
         mainClass = "dev.polarzen.chatbox.DesktopMainKt"
@@ -57,6 +78,7 @@ compose.desktop {
             targetFormats(TargetFormat.Msi)
             packageName = "Chatbox"
             packageVersion = windowsPackageVersion
+            appResourcesRootDir.set(uninstallResourcesRoot)
             modules("java.prefs", "java.logging", "jdk.crypto.ec")
             windows {
                 upgradeUuid = "204b3f78-64ec-4071-9a66-a535773540eb"
@@ -74,26 +96,23 @@ val desktopSmoke by tasks.registering(JavaExec::class) {
 }
 
 val packagedMsi = layout.buildDirectory.file("compose/binaries/main/msi/Chatbox-${windowsPackageVersion}.msi")
-val uninstallSources = layout.projectDirectory.dir("uninstall")
 tasks.configureEach {
-    if (name == "createDistributable" && System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
-        inputs.files(
-            uninstallSources.file("uninstall.cmd"),
-            uninstallSources.file("Uninstall-ChatBox.ps1"),
-            uninstallSources.file("Uninstall-ChatBoxData.ps1")
-        )
-        doLast {
-            // jpackage harvests the app payload; custom files at the image root are ignored.
-            val appImage = layout.buildDirectory.dir("compose/binaries/main/app/Chatbox").get().asFile
-            if (!appImage.resolve("Chatbox.exe").isFile) error("Expected Windows app image at ${appImage.absolutePath}")
-            project.copy {
-                from(uninstallSources) { include("uninstall.cmd", "Uninstall-ChatBox.ps1", "Uninstall-ChatBoxData.ps1") }
-                into(appImage.resolve("app/uninstall"))
+    if (name == "prepareAppResources") {
+        dependsOn(prepareUninstallResources)
+        if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
+            val resourceTask = this as Sync
+            doLast {
+                // Both Windows packageMsi and createDistributable consume these resources.
+                verifyUninstallPayload(resourceTask.destinationDir.resolve("uninstall"))
             }
         }
     }
     if (name == "packageMsi") {
         inputs.file(layout.projectDirectory.file("patch-windows-msi.ps1"))
+        doFirst {
+            val resourceTask = tasks.named("prepareAppResources").get() as Sync
+            verifyUninstallPayload(resourceTask.destinationDir.resolve("uninstall"))
+        }
         doLast {
             val msiFile = packagedMsi.get().asFile
             if (!msiFile.isFile) error("Expected packageMsi output at ${msiFile.absolutePath}")

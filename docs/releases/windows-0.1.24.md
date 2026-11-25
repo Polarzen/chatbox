@@ -4,7 +4,7 @@ Windows 版新增 **Uninstall Chat Box**，用于卸载程序并永久清除当�
 
 ## 使用方法
 
-- 安装本版后，从开始菜单打开 **Uninstall Chat Box**，或运行安装目录中的 `app\uninstall\uninstall.cmd`。
+- 安装本版后，从开始菜单打开 **Uninstall Chat Box**，或运行安装目录中的 `app\resources\uninstall\uninstall.cmd`。
 - 也可以下载 **Chatbox-Uninstall-0.1.24.zip**，完整解压后运行 `uninstall.cmd`。独立卸载包会核对当前 Chat Box MSI 的产品身份，不需要先安装一个新的 Chat Box。
 - 执行前会明确提示删除范围。会话历史和已保存的密钥删除后无法恢复，需要保留的内容请先另存。
 

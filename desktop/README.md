@@ -10,7 +10,7 @@ Windows 0.1.24 安装包为 `Chatbox-0.1.24.msi`。[下载 MSI](https://github.c
 
 ## 完整卸载
 
-在开始菜单打开 **Uninstall Chat Box**，或运行安装目录中的 `app\uninstall\uninstall.cmd`。确认后会停止本机共享服务和登录自启动，卸载程序及其 MSI 注册表登记，并永久删除当前 Windows 用户的本机会话、草稿、附件副本、密钥、设备绑定和共享运行时。外置共享数据库会显示实际路径并单独询问是否删除。
+在开始菜单打开 **Uninstall Chat Box**，或运行安装目录中的 `app\resources\uninstall\uninstall.cmd`。确认后会停止本机共享服务和登录自启动，卸载程序及其 MSI 注册表登记，并永久删除当前 Windows 用户的本机会话、草稿、附件副本、密钥、设备绑定和共享运行时。外置共享数据库会显示实际路径并单独询问是否删除。
 
 普通 Windows 设置中的 MSI 卸载及覆盖升级不会自动执行这项数据清理。只需要清除旧版或已卸载程序的本机残留时，可解压运行[独立卸载工具](https://github.com/Polarzen/chatbox/releases/download/v0.1.24/Chatbox-Uninstall-0.1.24.zip)。[清理范围、操作步骤和失败处理](../docs/WINDOWS_FULL_UNINSTALL.md)
 

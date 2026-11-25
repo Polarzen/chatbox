@@ -6,7 +6,7 @@ Windows 0.1.24 增加独立的 **Uninstall Chat Box** 入口。它会卸载这�
 
 ### 已安装 Windows 0.1.24
 
-1. 在开始菜单搜索并打开 **Uninstall Chat Box**，也可双击安装目录里的 `app\uninstall\uninstall.cmd`。
+1. 在开始菜单搜索并打开 **Uninstall Chat Box**，也可双击安装目录里的 `app\resources\uninstall\uninstall.cmd`。
 2. 阅读清理说明，确认永久删除本机数据。取消确认不会启动卸载或清理。
 3. 若曾选择外置共享数据库，工具会显示它的完整路径，再单独询问是否一并删除。其他独立服务仍需要这个数据库时，请选择保留。
 4. 按 Windows Installer 的提示授权卸载，等待完成结果。工具会先停止共享服务及登录自启动，再卸载程序并清除数据。
@@ -51,7 +51,7 @@ Windows 0.1.24 增加独立的 **Uninstall Chat Box** 入口。它会卸载这�
 
 ## 命令行检查和自动化
 
-在独立 ZIP 解压后的文件夹，或安装目录的 `app\uninstall` 文件夹中，可先仅显示待处理范围：
+在独立 ZIP 解压后的文件夹，或安装目录的 `app\resources\uninstall` 文件夹中，可先仅显示待处理范围：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Uninstall-ChatBox.ps1 -WhatIf

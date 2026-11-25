@@ -217,7 +217,7 @@ try {
     Assert-That ($registered.Count -eq 1 -and $registered[0] -ieq $productCode) 'The expected MSI was not the sole installed Chat Box product.'
 
     $installedExe = Join-Path $installDir 'Chatbox.exe'
-    $installedUninstallDir = Join-Path $installDir 'app\uninstall'
+    $installedUninstallDir = Join-Path $installDir 'app\resources\uninstall'
     $uninstallCmd = Join-Path $installedUninstallDir 'uninstall.cmd'
     $uninstallScript = Join-Path $installedUninstallDir 'Uninstall-ChatBox.ps1'
     $uninstallData = Join-Path $installedUninstallDir 'Uninstall-ChatBoxData.ps1'
