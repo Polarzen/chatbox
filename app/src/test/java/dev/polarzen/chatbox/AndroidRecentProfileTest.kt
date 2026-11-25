@@ -34,4 +34,21 @@ class AndroidRecentProfileTest {
         assertEquals("empty-draft", initialChatRow(rows, "local", "", "empty-draft", true, "", "empty-draft")?.sid)
         assertNull(initialChatRow(emptyList(), "local", "gone", "deleted", false, "", "new"))
     }
+
+    @Test fun recentNameFollowsTheHeaderWhileKeepingTheConversationTopic() {
+        val profile = ConversationPreferences(profileName = "林舟")
+        assertEquals(AndroidRecentText("林舟", "周末散步计划"), AndroidRecentText.from(profile, "周末散步计划"))
+        assertEquals(AndroidRecentText("小林", "周末散步计划"),
+            AndroidRecentText.from(profile.copy(peerName = "小林"), "周末散步计划"))
+        assertEquals(AndroidRecentText("林舟", null), AndroidRecentText.from(profile, "林舟"))
+        assertEquals(AndroidRecentText("助手", "草稿 · 附件"), AndroidRecentText.from(ConversationPreferences(), "草稿 · 附件"))
+    }
+
+    @Test fun recentRowsFollowTheSameOwnerRouteWhenOpeningFromTheDirectory() {
+        val native = AndroidDeviceRow("local:server", "same-id", "主题", 0, "本机", "", "server", "")
+        assertEquals("server", native.localChatBase(false))
+        assertNull(native.localChatBase(true))
+        assertEquals("", native.copy(profile = "phone-only:", nativeBase = "").localChatBase(true))
+        assertNull(native.copy(profile = "pc", nativeBase = null).localChatBase(true))
+    }
 }

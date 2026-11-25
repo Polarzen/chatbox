@@ -976,6 +976,7 @@ internal fun DesktopScreen(
             profileId = profileId,
             sessions = recent.map { it.info },
             recentDetails = recentById,
+            recentPartnerName = { key -> preferenceOwner.preferences(key).value.effectiveName },
             deletionScope = { id -> recentById[id]?.key?.takeIf { deviceSync?.manages(it.profileId) == true }?.let {
                 "删除本机记录，并在下次同步时从两台设备的共享目录移除。"
             } },

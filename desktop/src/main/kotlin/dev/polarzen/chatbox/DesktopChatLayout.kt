@@ -168,6 +168,7 @@ internal fun DesktopChatLayout(
     replyNavigation: ReplyTurnNavigation? = null,
     profileTextOnly: Boolean = false,
     recentDetails: Map<String, DesktopRecentRow> = emptyMap(),
+    recentPartnerName: (SessionKey) -> String = { "助手" },
     deletionScope: (String) -> String? = { null },
     partnerName: String = "助手", initialSidebarPinned: Boolean = false, onSidebarPinned: (Boolean) -> Unit = {},
     settingsLabel: String = "设置",
@@ -215,7 +216,7 @@ internal fun DesktopChatLayout(
             if (embeddedSidebar) {
                 SessionSidebar(
                     sessions = sessions,
-                    recentDetails = recentDetails, deletionScope = deletionScope,
+                    recentDetails = recentDetails, recentPartnerName = recentPartnerName, deletionScope = deletionScope,
                     canCreate = canCreate,
                     onNewSession = onNewSession,
                     onSelectSession = onSelectSession,
@@ -276,7 +277,7 @@ internal fun DesktopChatLayout(
             )
             SessionSidebar(
                 sessions = sessions,
-                recentDetails = recentDetails, deletionScope = deletionScope,
+                recentDetails = recentDetails, recentPartnerName = recentPartnerName, deletionScope = deletionScope,
                 canCreate = canCreate,
                 onNewSession = onNewSession,
                 onSelectSession = onSelectSession,
@@ -299,6 +300,7 @@ internal fun DesktopChatLayout(
 private fun SessionSidebar(
     sessions: List<SessionInfo>,
     recentDetails: Map<String, DesktopRecentRow>,
+    recentPartnerName: (SessionKey) -> String,
     deletionScope: (String) -> String?,
     canCreate: Boolean,
     onNewSession: () -> Unit,
@@ -353,7 +355,10 @@ private fun SessionSidebar(
                         verticalArrangement = Arrangement.spacedBy(5.dp),
                     ) {
                         itemsIndexed(sessions, key = { _, session -> session.id }) { index, session ->
-                            val tagId = recentDetails[session.id]?.tagId ?: session.id
+                            val detail = recentDetails[session.id]
+                            val tagId = detail?.tagId ?: session.id
+                            val name = detail?.let { recentPartnerName(it.key) } ?: "助手"
+                            val topic = session.title.ifBlank { "新会话" }
                             val selected = session.selected
                             var menuExpanded by remember(session.id) { mutableStateOf(false) }
                             Row(
@@ -367,13 +372,17 @@ private fun SessionSidebar(
                             ) {
                                 Column(Modifier.weight(1f).padding(vertical = 4.dp)) {
                                     Text(
-                                        session.title.ifBlank { "新会话" },
+                                        name, modifier = Modifier.testTag("recent-partner-$tagId"),
                                         color = if (selected) desktopPalette.accent else desktopPalette.ink,
                                         fontSize = 13.sp,
                                         maxLines = 2,
                                         overflow = TextOverflow.Ellipsis,
                                     )
-                                    recentDetails[session.id]?.label?.let { Text(it, color = desktopPalette.muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                                    if (topic != name) {
+                                        Text(topic, modifier = Modifier.testTag("recent-topic-$tagId"),
+                                            color = desktopPalette.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                    detail?.label?.let { Text(it, color = desktopPalette.muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                                     if (session.activity > 0L) {
                                         Text(remember(session.activity) {
                                             java.time.format.DateTimeFormatter.ofPattern("M月d日 HH:mm")

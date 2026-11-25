@@ -301,8 +301,8 @@ class MainActivity : ComponentActivity() {
 
     private fun openDevice(row: AndroidDeviceRow) {
         val d = app.device
-        val native = row.nativeBase
-        if ((!d.bound || row.profile.startsWith("phone-only:")) && native != null) {
+        val native = row.localChatBase(d.bound)
+        if (native != null) {
             if (!app.connections.selectOffline(native)) return
             app.history.select(native, row.sid)
             d.closeChat()

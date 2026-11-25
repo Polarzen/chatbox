@@ -30,6 +30,19 @@ internal fun defaultDeviceProfile(available: List<DeviceProfile>, lastProfile: S
         ?: available.singleOrNull()
 }
 
+/** The same route decides which preference owner supplies the chat header and its list row. */
+internal fun AndroidDeviceRow.localChatBase(bound: Boolean): String? =
+    nativeBase?.takeIf { !bound || profile.startsWith("phone-only:") }
+
+internal data class AndroidRecentText(val peerName: String, val topic: String?) {
+    companion object {
+        fun from(preferences: ConversationPreferences, title: String): AndroidRecentText {
+            val peer = preferences.effectiveName
+            return AndroidRecentText(peer, title.takeIf { it.isNotBlank() && it != peer })
+        }
+    }
+}
+
 internal fun initialChatRow(rows: List<AndroidDeviceRow>, kind: String?, owner: String?, sid: String?,
                             localAvailable: Boolean, currentBase: String, currentSid: String): AndroidDeviceRow? {
     if (kind == "local" && localAvailable && owner != null && sid != null)
@@ -89,12 +102,27 @@ internal fun AndroidRecentScreen(app: AndroidAppState, onOpen: (AndroidDeviceRow
             items(rows.orEmpty(), key = { "${it.profile.length}:${it.profile}:${it.sid}" }) { row ->
                 var menu by remember { mutableStateOf(false) }
                 val isCurrent = active(row)
+                val base = row.localChatBase(device.bound)
+                // Only visible rows observe their owner. Preference edits and sync publish revisions,
+                // while SQLite reads run off the UI thread and never open a connection to the server.
+                val label by key(device, row.profile, row.sid, base, row.nativeBase) {
+                    val title by rememberUpdatedState(row.title)
+                    produceState<AndroidRecentText?>(null) {
+                        snapshotFlow {
+                            val handle = if (base != null) device.preferences(base, row.sid) else device.preferences(row)
+                            AndroidRecentText.from(handle.value, title)
+                        }.flowOn(Dispatchers.IO).collect { value = it }
+                    }
+                }
                 Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
                     .background(if (isCurrent) MaterialTheme.colorScheme.primaryContainer else androidx.compose.ui.graphics.Color.Transparent)
                     .semantics { selected = isCurrent }, verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f).clickable(role = Role.Button) { onOpen(row) }
                         .padding(horizontal = 4.dp, vertical = 12.dp)) {
-                        Text(row.title, style = MaterialTheme.typography.titleMedium,
+                        Text(label?.peerName.orEmpty(), style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        val topic = if (label == null) row.title else label?.topic
+                        if (!topic.isNullOrBlank()) Text(topic, style = MaterialTheme.typography.bodyMedium,
                             maxLines = 2, overflow = TextOverflow.Ellipsis)
                         Text(listOf(row.source, row.username).filter { it.isNotBlank() }.joinToString(" · "),
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -102,7 +130,8 @@ internal fun AndroidRecentScreen(app: AndroidAppState, onOpen: (AndroidDeviceRow
                     }
                     if (device.bound && !row.profile.startsWith("phone-only:")) Box {
                         IconButton(onClick = { menu = true }) {
-                            Icon(painterResource(R.drawable.chat_more), "会话 ${row.title} 菜单")
+                            val name = label?.let { listOfNotNull(it.peerName, it.topic).joinToString(" · ") } ?: row.title
+                            Icon(painterResource(R.drawable.chat_more), "会话 $name 菜单")
                         }
                         DropdownMenu(menu, { menu = false }) {
                             DropdownMenuItem(text = { Text("在本机隐藏") }, onClick = { menu = false; hide = row })

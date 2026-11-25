@@ -138,21 +138,28 @@ class DesktopConversationWindowTest {
         ui.mainClock.autoAdvance = false
         ui.setContent {
             key(epoch.intValue) {
-                Box(Modifier.requiredSize(900.dp, 660.dp)) { MaterialTheme { DesktopScreen(store, creds, cache) } }
+                Box(Modifier.requiredSize(900.dp, 660.dp)) { MaterialTheme { DesktopScreen(store, creds, cache, initialSidebarPinned = true) } }
             }
         }
         fun frame() { ui.mainClock.advanceTimeBy(450); ui.waitForIdle() }
         fun click(tag: String) { ui.onNodeWithTag(tag).performClick(); frame() }
+        fun recentName(id: String) = ui.onNodeWithTag("recent-partner-$id", useUnmergedTree = true)
+        fun recentTopic(id: String) = ui.onNodeWithTag("recent-topic-$id", useUnmergedTree = true)
         frame()
+        recentName(original.session).assertTextEquals("助手")
+        recentTopic(original.session).assertTextEquals("独立的主题")
         ui.onNodeWithTag("composer-field").performTextInput("原草稿")
         frame()
         click("conversation-menu")
         click("rename-peer")
+        ui.onNodeWithTag("profile-name-field").performTextInput("档案默认")
         ui.onNodeWithTag("peer-name-field").performTextInput("蓝舟")
         frame()
         ui.onNodeWithTag("peer-name-preview").assertTextEquals("蓝舟")
         click("save-peer-name")
         ui.onNodeWithTag("partner-name").assertTextEquals("蓝舟")
+        recentName(original.session).assertTextEquals("蓝舟")
+        recentTopic(original.session).assertTextEquals("独立的主题")
         click("message-menu-assistant-0")
         click("toggle-context-assistant-0")
         ui.onNodeWithTag("context-recent-count").performTextReplacement("0")
@@ -173,7 +180,25 @@ class DesktopConversationWindowTest {
         frame()
         click("confirm-new-conversation")
         assertEquals(2, store.sessions(p.id).size)
-        click("sidebar-toggle")
+        val newId = store.profile(p.id)!!.currentSession
+        recentName(original.session).assertTextEquals("蓝舟")
+        recentName(newId).assertTextEquals("档案默认")
+        recentTopic(newId).assertTextEquals("新会话")
+        ui.onNodeWithTag("partner-name").assertTextEquals("档案默认")
+        click("conversation-menu")
+        click("rename-peer")
+        ui.onNodeWithTag("peer-name-field").performTextInput("新会话")
+        click("save-peer-name")
+        recentName(newId).assertTextEquals("新会话")
+        recentTopic(newId).assertDoesNotExist()
+        click("conversation-menu")
+        click("rename-peer")
+        ui.onNodeWithText("此会话恢复默认").performClick()
+        ui.onNodeWithText("档案恢复默认").performClick()
+        click("save-peer-name")
+        ui.onNodeWithTag("partner-name").assertTextEquals("助手")
+        recentName(newId).assertTextEquals("助手")
+        recentName(original.session).assertTextEquals("蓝舟")
         ui.onNodeWithText("独立的主题").performClick()
         frame()
         ui.onNodeWithTag("composer-field").assertTextContains("原草稿")
