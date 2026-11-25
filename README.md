@@ -2,17 +2,19 @@
 
 Chatbox 是连接 AstrBot 的 Windows 与 Android 聊天客户端。两端配对一次，即可从「最近对话」查看历史、新建会话并继续聊天，也可选择仅在本机使用。
 
-## 0.1.20 手环历史数据候选版
-
-手机可授权一个个人 AstrBot 档案查询小米运动健康写入 Health Connect 的记录，并单独开启运动总结或晨间摘要。Redmi Turbo 3 和小米手环 9 的实际可读字段须在设备上核对。[安装、首次授权与实机复验](docs/WEARABLE_GUIDE.md) · [本轮验证记录](docs/WEARABLE_ACCEPTANCE.md)
-
-## 下载 0.1.19
+## 下载稳定版 0.1.19
 
 [Windows 安装包（MSI）](https://github.com/Polarzen/chatbox/releases/download/v0.1.19/Chatbox-0.1.19.msi) · [Android 安装包（APK）](https://github.com/Polarzen/chatbox/releases/download/v0.1.19/Chatbox-0.1.19.apk) · [SHA-256 校验文件](https://github.com/Polarzen/chatbox/releases/download/v0.1.19/SHA256SUMS.txt) · [发布说明](https://github.com/Polarzen/chatbox/releases/tag/v0.1.19)
 
 首次连接时，在电脑端验证 AstrBot，选择手机连接方式，再用手机扫码配对。共享服务需要 Python 3.10 或更高版本，可复用 AstrBot Launcher 的环境。[安装、首次连接与恢复指南](docs/DEVICE_SYNC_GUIDE.md)
 
 升级前退出 Windows Chatbox 并备份历史，随后沿用原目录安装。Android 使用同签名 APK 覆盖安装。只保存在旧版远端缓存中的重要正文，请在升级前另存。Windows 0.1.1 用户请先阅读[旧卸载器升级说明](desktop/README.md#从-011-升级)。[Windows 安装说明](desktop/README.md) · [实机验收记录](docs/DEVICE_SYNC_ACCEPTANCE.md)
+
+## 0.1.20 手环历史数据原型（已暂停）
+
+功能分支保留了 Android 的 Health Connect 读取、电脑共享服务和 AstrBot 查询接口，以及可分别开关的运动总结和晨间摘要。真实手环记录的全自动链路尚未通过验收，0.1.20 暂缓正式发布。
+
+恢复开发的前提是验证系统数据源能自动提供真实手环记录，或获得官方接入批准。后续优先核对睡眠，其次是步数和全天历史心率。现有原型的历史心率查询只覆盖运动时段。[原型配置与复验指南](docs/WEARABLE_GUIDE.md) · [验证记录](docs/WEARABLE_ACCEPTANCE.md)
 
 ## Windows 0.1.15
 

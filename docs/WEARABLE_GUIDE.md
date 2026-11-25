@@ -1,13 +1,17 @@
-# 0.1.20 · 让个人 AstrBot 读取手环历史数据
+# 0.1.20 手环历史数据原型配置与复验指南
 
-沿用 v0.1.19 的 Chatbox、电脑配对和小米手环绑定。先在 Redmi 核对一条真实记录，再授权个人档案。日常使用时直接在手机或 Windows 的原会话聊天。运动和晨间查询也可在没有新消息时运行。
+0.1.20 原型已暂停，真实来源全自动验收尚未通过。正式下载沿用 [v0.1.19 稳定版](https://github.com/Polarzen/chatbox/releases/tag/v0.1.19)。以下步骤供复验候选构建时使用。
 
-## 覆盖安装
+恢复开发须先验证系统数据源能自动提供真实记录，或获得官方接入批准。优先核对睡眠，其次是步数和全天历史心率。候选构建沿用原电脑配对和手环绑定。核对来源记录后，可在原会话查询，并分别配置运动总结与晨间摘要的提醒开关。
+
+小米官方云端接口列有睡眠（`200009`）、步数（`200016`）和心率（`200007`），须按接入流程获批后再开发和验证。[云端接口指南](https://dev.mi.com/xiaomihyperos/documentation/detail?pId=2333) · [接入流程](https://dev.mi.com/xiaomihyperos/documentation/detail?pId=2326)
+
+## 候选构建覆盖安装
 
 1. 在同一交付目录运行 `Get-ChildItem -File -Include *.apk,*.msi,*.zip -Path .\* | Get-FileHash -Algorithm SHA256`，逐项比对随包 `SHA256SUMS.txt`。使用同批 APK、MSI 和 Chatbox 手环插件 ZIP。MSI 含配套共享服务。
 2. Windows 如果正在运行托管共享服务，先在原设备设置点「停止共享」，等当前请求结束，再退出 Chatbox 和托盘。记下原自启选项，备份本地历史、原共享数据库及同目录辅助文件。沿用原目录安装 MSI，回设备设置点「启动服务」「检查入口」。原先使用登录自启的，重新勾选「Windows 登录后自动恢复共享服务」。已有配对继续使用。独立部署者先停旧进程，使用同批共享服务文件、原数据库及原受限 HTTPS 代理。[设备连接与恢复](DEVICE_SYNC_GUIDE.md)
 3. Android 在文件管理器点开 APK 覆盖安装。已有 Chatbox 需要相同应用签名。系统报告签名不兼容时保留现有安装和数据，换用匹配签名的包。手机从「最近对话 → 设备设置」检查原电脑连接。
-4. Windows 服务需要 Python 3.10+ 和手机使用的 IANA 时区。可在 PowerShell 把 `$svcPython` 设为共享服务所用的 `python.exe` 完整路径，然后运行下方命令。本机 Launcher 实例的 venv 可解析香港时区。如果出现 `ZoneInfoNotFoundError`，用 `& $svcPython -m pip install tzdata` 安装到该解释器环境，再用同一命令复查并重启服务。服务以 `-E -s` 启动，用户级包目录不会加载。
+4. Windows 服务需要 Python 3.10+ 和手机使用的 IANA 时区。可在 PowerShell 把 `$svcPython` 设为共享服务所用的 `python.exe` 完整路径，然后运行下方命令。如果出现 `ZoneInfoNotFoundError`，用 `& $svcPython -m pip install tzdata` 安装到该解释器环境，再用同一命令复查并重启服务。服务以 `-E -s` 启动，用户级包目录不会加载。
 
    ```powershell
    & $svcPython -E -s -c "from zoneinfo import ZoneInfo; print(ZoneInfo('Asia/Hong_Kong'))"
@@ -33,9 +37,9 @@
 
 v0.1.19 的聊天页「心率」仍走蓝牙心率广播，发送普通消息时可附带最近 10 秒内的有效 BPM 和接收时间。断开或过期后停止附带。历史运动心率只取相应运动时段和来源的 Health Connect 样本。
 
-## Polarzen 单人实机复验
+## 实机复验
 
-**当前现场状态为待验。** 测试时记录 Redmi Turbo 3 的 Android 16 / HyperOS 3 完整版本、小米运动健康版本及包名、手环 9 固件、Chatbox 与 AstrBot 版本、时区、权限和省电设置。下表在本机对照。对外仅记录字段有无、数量、差值、延迟和结论。请勿提交个人原始记录、令牌或带正文的会话日志。
+恢复复验时，在本机记录 Redmi Turbo 3 的 Android 16 / HyperOS 3 完整版本、小米运动健康版本及包名、手环 9 固件、Chatbox 与 AstrBot 版本、时区、权限和省电设置。在本机填写下表。核对数据和复验实测记录留在本地，仓库仅记录软件验证范围。请勿提交个人原始记录、令牌或带正文的会话日志。
 
 | A · 在小米运动健康与 Chatbox 对照同一时段 | 应核对的字段和单位 | 现场结果 |
 | --- | --- | --- |
