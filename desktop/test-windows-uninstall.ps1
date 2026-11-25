@@ -73,7 +73,7 @@ function Get-RelatedProducts {
     return @($installer.RelatedProducts($upgradeCode))
 }
 
-function Test-RegistryValue($Row) {
+function Test-RegistryValue($Row, [switch] $KeyOnly) {
     $hive = switch ([int] $Row.Root) {
         -1 { [Microsoft.Win32.RegistryHive]::LocalMachine }
         0 { [Microsoft.Win32.RegistryHive]::ClassesRoot }
@@ -88,6 +88,7 @@ function Test-RegistryValue($Row) {
     try {
         $key = $base.OpenSubKey($Row.Key, $false)
         if ($null -eq $key) { return $false }
+        if ($KeyOnly) { return $true }
         return @($key.GetValueNames()) -contains $Row.Name
     }
     finally {
@@ -121,6 +122,9 @@ function Invoke-UninstallEntry([string] $Script, [string] $Mode, [string] $Name)
     $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $Script + '" ' + $Mode
     $process = Start-Process -FilePath $powershell -ArgumentList $arguments -WorkingDirectory $testRoot `
         -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru -NoNewWindow
+    # Windows PowerShell 5.1 needs the handle cached before a separate wait in
+    # order to retain ExitCode (https://github.com/PowerShell/PowerShell/issues/5421).
+    $null = $process.Handle
     if (-not $process.WaitForExit(180000)) {
         # Only terminate the exact test process created above, never an image-name match.
         $process.Kill()
@@ -133,6 +137,7 @@ function Invoke-UninstallEntry([string] $Script, [string] $Mode, [string] $Name)
             Get-Content -LiteralPath $path | ForEach-Object { Write-Host $_ }
         }
     }
+    Assert-That ($null -ne $exitCode) "The $Name uninstaller process did not expose its exit code."
     return $exitCode
 }
 
@@ -196,6 +201,10 @@ try {
         }
     )
     Assert-That ($registryRows.Count -gt 0) 'No MSI registry rows were found.'
+    $protocolRootRows = @($registryRows | Where-Object { $_.Key -ieq 'Software\Classes\polarzen-chatbox' -and $_.Name -eq '' })
+    Assert-That ($protocolRootRows.Count -eq 1) 'Expected exactly one notification protocol root description.'
+    $protocolRootRow = $protocolRootRows[0]
+    Assert-That (-not (Test-RegistryValue $protocolRootRow -KeyOnly)) 'The runner already contains the exact Chat Box protocol root key.'
     foreach ($row in $registryRows) {
         Assert-That (-not (Test-RegistryValue $row)) "The runner already contains candidate registry data: $($row.Key) / $($row.Name)"
     }
@@ -233,6 +242,7 @@ try {
     foreach ($row in $registryRows) {
         Assert-That (Test-RegistryValue $row) "The MSI did not install registry value $($row.Id): $($row.Key) / $($row.Name)"
     }
+    Assert-That (Test-RegistryValue $protocolRootRow -KeyOnly) 'The MSI did not install the exact Chat Box protocol root key.'
     $protocolRows = @($registryRows | Where-Object { $_.Key -like 'Software\Classes\polarzen-chatbox*' })
     Assert-That ($protocolRows.Count -eq 3) 'Expected all three notification protocol registry values.'
     $shortcutShell = New-Object -ComObject WScript.Shell
@@ -345,6 +355,7 @@ finally:
         $env:CHATBOX_UNINSTALL_TEST_EVIDENCE = $testRoot
         $serviceArguments = '-E -s "' + $runtimeScript + '" --root "' + $runtimeDir + '" serve ' + $generation
         $managedService = Start-Process -FilePath $pythonCommand.Source -ArgumentList $serviceArguments -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $testRoot 'managed-service.stdout.log') -RedirectStandardError (Join-Path $testRoot 'managed-service.stderr.log')
+        $null = $managedService.Handle
     }
     finally { $env:CHATBOX_UNINSTALL_TEST_EVIDENCE = $oldFixtureEvidence }
     $readyMarker = Join-Path $testRoot 'managed-service-ready.txt'
@@ -372,6 +383,7 @@ finally:
     foreach ($row in $registryRows) {
         Assert-That (-not (Test-RegistryValue $row)) "MSI registry value remains after uninstall: $($row.Key) / $($row.Name)"
     }
+    Assert-That (-not (Test-RegistryValue $protocolRootRow -KeyOnly)) 'The exact Chat Box protocol root key remains after uninstall.'
     foreach ($path in $trackedFiles) { Assert-That (-not (Test-Path -LiteralPath $path)) "A tracked MSI file remains: $path" }
     foreach ($path in ($fixtureRoots + @($startupLink))) {
         Assert-That (-not (Test-Path -LiteralPath $path)) "A managed data directory or startup shortcut remains: $path"
@@ -383,7 +395,7 @@ finally:
         Assert-That ((Test-Path -LiteralPath $path -PathType Leaf) -and
             [IO.File]::ReadAllText($path) -ceq ('retain-' + $fixtureId)) "Complete uninstall removed or modified an unrelated sentinel: $path"
     }
-    Write-Evidence 'Complete uninstall removed the registered MSI, every captured MSI registry value/file/shortcut, all four user-data roots, and login autostart.'
+    Write-Evidence 'Complete uninstall removed the registered MSI, every captured MSI registry value/file/shortcut, the exact Chat Box protocol root key, all four user-data roots, and login autostart.'
     Write-Evidence 'Unrelated files inside the install directory and beside each data/Startup location were preserved.'
     Write-Evidence 'The owned Python service observed stop-generation while its data still existed and released its Windows locks; an unrelated Python process remained running.'
 
@@ -397,6 +409,7 @@ finally:
     Assert-That ($registered.Count -eq 1 -and $registered[0] -ieq $productCode) 'The standalone test did not reinstall the expected sole MSI product.'
     foreach ($path in $trackedFiles) { Assert-That (Test-Path -LiteralPath $path -PathType Leaf) "Reinstall did not restore the tracked file: $path" }
     foreach ($row in $registryRows) { Assert-That (Test-RegistryValue $row) "Reinstall did not restore registry value $($row.Id)." }
+    Assert-That (Test-RegistryValue $protocolRootRow -KeyOnly) 'Reinstall did not restore the exact Chat Box protocol root key.'
     Write-FixtureFile (Join-Path $dataDir 'history.json') '{"fixture":"standalone uninstall history"}'
     $standaloneHistoryHash = (Get-FileHash -LiteralPath (Join-Path $dataDir 'history.json') -Algorithm SHA256).Hash
     $standaloneDirectory = Join-Path $testRoot 'standalone uninstaller'
@@ -430,6 +443,7 @@ finally:
     Assert-That ($standaloneExit -in @(0, 3010)) "Standalone complete uninstall failed with exit code $standaloneExit."
     Assert-That (@(Get-RelatedProducts).Count -eq 0) 'The standalone entry left the MSI product registered.'
     foreach ($row in $registryRows) { Assert-That (-not (Test-RegistryValue $row)) "The standalone entry left MSI registry value $($row.Id)." }
+    Assert-That (-not (Test-RegistryValue $protocolRootRow -KeyOnly)) 'The standalone entry left the exact Chat Box protocol root key.'
     foreach ($path in $trackedFiles) { Assert-That (-not (Test-Path -LiteralPath $path)) "The standalone entry left a tracked MSI file: $path" }
     foreach ($path in ($fixtureRoots + @($startupLink))) { Assert-That (-not (Test-Path -LiteralPath $path)) "The standalone entry left managed current-user data: $path" }
     foreach ($shortcut in $shortcuts) { Assert-That (-not (Test-Path -LiteralPath $shortcut.Path)) "The standalone entry left an installed shortcut: $($shortcut.Path)" }
@@ -438,12 +452,13 @@ finally:
             [IO.File]::ReadAllText($path) -ceq ('retain-' + $fixtureId)) "The standalone entry modified an unrelated sentinel: $path"
     }
     foreach ($path in $standaloneFiles) { Assert-That (Test-Path -LiteralPath $path -PathType Leaf) "The downloaded standalone entry unexpectedly deleted its original source: $path" }
-    Write-Evidence 'The separate uninstall directory completed a second real MSI removal, including registry and local history; installed/shared-directory sentinels and the downloaded uninstall files were preserved.'
+    Write-Evidence 'The separate uninstall directory completed a second real MSI removal, including registry values, the exact Chat Box protocol root key, and local history; installed/shared-directory sentinels and the downloaded uninstall files were preserved.'
 
     @{
         result = 'passed'; productCode = $productCode; version = $properties['ProductVersion']
         msiSha256 = (Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash
         trackedFilesRemoved = $trackedFiles.Count; registryValuesRemoved = $registryRows.Count
+        protocolRootRemoved = $true
         dataRootsRemoved = $fixtureRoots.Count; startMenuShortcutsRemoved = $shortcuts.Count
         neighboringSentinelsPreserved = $sentinels.Count; whatIfUnchanged = $true
         gracefulServiceStop = $true; unrelatedPythonPreserved = $true

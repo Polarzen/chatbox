@@ -104,7 +104,8 @@ function Get-ChatBoxInstalledProduct([string] $ExpectedDirectory) {
                 View = if (([int] $row.Attributes -band 256) -ne 0) { 'Registry64' } else { 'Registry32' }
                 Key = $key
                 Name = $row.Name
-                EntireKey = $row.Name -in @('-', '*')
+                # The app's dedicated protocol key must disappear, including empty subkeys.
+                EntireKey = $row.Name -in @('-', '*') -or $key -ieq 'Software\Classes\polarzen-chatbox'
             }
         }
         return [pscustomobject]@{
