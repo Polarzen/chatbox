@@ -2,11 +2,13 @@
 
 Chat Box 是连接 AstrBot 的 Windows 与 Android 聊天客户端。两端配对一次，即可从「最近对话」查看历史、新建会话并继续聊天，也可选择仅在本机使用。
 
-## 下载 v0.1.23 正式版
+## 下载 Windows 0.1.24 / Android 0.1.23
 
 [中文安装指南（首次安装、覆盖升级与连接）](docs/Chatbox-Install-Guide.zh-CN.md)
 
-[Windows 0.1.23 安装包（MSI）](https://github.com/Polarzen/chatbox/releases/download/v0.1.23/Chatbox-0.1.23.msi) · [Android 0.1.23 安装包（APK）](https://github.com/Polarzen/chatbox/releases/download/v0.1.23/Chatbox-0.1.23.apk) · [SHA-256 校验文件](https://github.com/Polarzen/chatbox/releases/download/v0.1.23/SHA256SUMS.txt) · [发布说明](https://github.com/Polarzen/chatbox/releases/tag/v0.1.23)
+[Windows 0.1.24 安装包（MSI）](https://github.com/Polarzen/chatbox/releases/download/v0.1.24/Chatbox-0.1.24.msi) · [Android 0.1.23 安装包（APK）](https://github.com/Polarzen/chatbox/releases/download/v0.1.23/Chatbox-0.1.23.apk) · [Windows SHA-256 校验文件](https://github.com/Polarzen/chatbox/releases/download/v0.1.24/SHA256SUMS.txt) · [发布说明](https://github.com/Polarzen/chatbox/releases/tag/v0.1.24)
+
+Windows 0.1.24 新增 **Uninstall Chat Box** 完整卸载入口，可一并清除当前 Windows 用户的会话历史、草稿、附件副本、已保存密钥、设备绑定和共享运行时。安装包登记的程序文件、快捷方式和注册表项由 Windows Installer 移除。升级仍保留本机数据。已安装旧版的用户也可下载[独立卸载工具](https://github.com/Polarzen/chatbox/releases/download/v0.1.24/Chatbox-Uninstall-0.1.24.zip)，解压后运行 `uninstall.cmd`。[完整卸载说明](docs/WINDOWS_FULL_UNINSTALL.md)
 
 Windows 和安卓均显示为 **Chat Box**，使用相同的深紫色双气泡图标。
 

@@ -217,15 +217,16 @@ try {
     Assert-That ($registered.Count -eq 1 -and $registered[0] -ieq $productCode) 'The expected MSI was not the sole installed Chat Box product.'
 
     $installedExe = Join-Path $installDir 'Chatbox.exe'
-    $uninstallCmd = Join-Path $installDir 'uninstall.cmd'
-    $uninstallScript = Join-Path $installDir 'Uninstall-ChatBox.ps1'
-    $uninstallData = Join-Path $installDir 'Uninstall-ChatBoxData.ps1'
+    $installedUninstallDir = Join-Path $installDir 'app\uninstall'
+    $uninstallCmd = Join-Path $installedUninstallDir 'uninstall.cmd'
+    $uninstallScript = Join-Path $installedUninstallDir 'Uninstall-ChatBox.ps1'
+    $uninstallData = Join-Path $installedUninstallDir 'Uninstall-ChatBoxData.ps1'
     foreach ($path in @($installedExe, $uninstallCmd, $uninstallScript, $uninstallData)) {
         Assert-That (Test-Path -LiteralPath $path -PathType Leaf) "MSI did not install the expected file: $path"
     }
     foreach ($name in @('uninstall.cmd', 'Uninstall-ChatBox.ps1', 'Uninstall-ChatBoxData.ps1')) {
         $source = Join-Path $PSScriptRoot ('uninstall\' + $name)
-        Assert-That ((Get-FileHash -LiteralPath (Join-Path $installDir $name)).Hash -eq (Get-FileHash -LiteralPath $source).Hash) "Packaged $name differs from the checked-in implementation."
+        Assert-That ((Get-FileHash -LiteralPath (Join-Path $installedUninstallDir $name)).Hash -eq (Get-FileHash -LiteralPath $source).Hash) "Packaged $name differs from the checked-in implementation."
     }
     $trackedFiles = @(Get-ChildItem -LiteralPath $installDir -Recurse -File -Force | ForEach-Object FullName)
     Assert-That ($trackedFiles.Count -gt 20) 'The installed file snapshot unexpectedly lacks the bundled application/runtime.'
@@ -385,6 +386,60 @@ finally:
     Write-Evidence 'Complete uninstall removed the registered MSI, every captured MSI registry value/file/shortcut, all four user-data roots, and login autostart.'
     Write-Evidence 'Unrelated files inside the install directory and beside each data/Startup location were preserved.'
     Write-Evidence 'The owned Python service observed stop-generation while its data still existed and released its Windows locks; an unrelated Python process remained running.'
+
+    # The separate uninstall ZIP is also a supported entry point. Reinstall the
+    # same candidate, then invoke a copy that has no adjacent Chatbox.exe.
+    $reinstallLog = Join-Path $testRoot 'standalone-reinstall.log'
+    $reinstallArguments = '/i "' + $msi + '" /qn /norestart INSTALLDIR="' + $installDir + '" /L*v "' + $reinstallLog + '"'
+    $reinstallation = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -ArgumentList $reinstallArguments -Wait -PassThru -NoNewWindow
+    Assert-That ($reinstallation.ExitCode -in @(0, 3010)) "Standalone-test reinstall failed with exit code $($reinstallation.ExitCode)."
+    $registered = @(Get-RelatedProducts)
+    Assert-That ($registered.Count -eq 1 -and $registered[0] -ieq $productCode) 'The standalone test did not reinstall the expected sole MSI product.'
+    foreach ($path in $trackedFiles) { Assert-That (Test-Path -LiteralPath $path -PathType Leaf) "Reinstall did not restore the tracked file: $path" }
+    foreach ($row in $registryRows) { Assert-That (Test-RegistryValue $row) "Reinstall did not restore registry value $($row.Id)." }
+    Write-FixtureFile (Join-Path $dataDir 'history.json') '{"fixture":"standalone uninstall history"}'
+    $standaloneHistoryHash = (Get-FileHash -LiteralPath (Join-Path $dataDir 'history.json') -Algorithm SHA256).Hash
+    $standaloneDirectory = Join-Path $testRoot 'standalone uninstaller'
+    [void] [IO.Directory]::CreateDirectory($standaloneDirectory)
+    $standaloneFiles = @()
+    foreach ($name in @('uninstall.cmd', 'Uninstall-ChatBox.ps1', 'Uninstall-ChatBoxData.ps1')) {
+        $destination = Join-Path $standaloneDirectory $name
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot ('uninstall\' + $name)) -Destination $destination
+        $standaloneFiles += $destination
+    }
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $standaloneDirectory 'Chatbox.exe'))) 'The standalone fixture must not contain a neighboring application executable.'
+    $standaloneScript = Join-Path $standaloneDirectory 'Uninstall-ChatBox.ps1'
+    $standalonePreview = Invoke-UninstallEntry $standaloneScript '-WhatIf' 'standalone-preview'
+    Assert-That ($standalonePreview -eq 0) "Standalone -WhatIf failed with exit code $standalonePreview."
+    Assert-That ((Get-FileHash -LiteralPath (Join-Path $dataDir 'history.json') -Algorithm SHA256).Hash -ceq $standaloneHistoryHash) 'Standalone -WhatIf modified the test history.'
+    Assert-That ((Get-RelatedProducts) -contains $productCode) 'Standalone -WhatIf unregistered the installed product.'
+    foreach ($row in $registryRows) { Assert-That (Test-RegistryValue $row) "Standalone -WhatIf removed registry value $($row.Id)." }
+
+    # A worker must not apply an earlier approval to a different database plan.
+    # This deliberately stale expectation must fail before stopping or deleting.
+    $staleDatabase = Join-Path $testRoot 'a-previously-selected-database.sqlite3'
+    $staleArguments = '-Yes -Worker -ExpectedProductCode ' + $productCode + ' -ExpectedExternalDatabase "' + $staleDatabase + '"'
+    $staleExit = Invoke-UninstallEntry $standaloneScript $staleArguments 'stale-worker-refusal'
+    Assert-That ($staleExit -ne 0) 'A worker accepted a mismatched external-database approval.'
+    Assert-That ((Get-FileHash -LiteralPath (Join-Path $dataDir 'history.json') -Algorithm SHA256).Hash -ceq $standaloneHistoryHash) 'A stale worker changed local history before refusing.'
+    Assert-That ((Get-RelatedProducts) -contains $productCode) 'A stale worker unregistered the MSI product before refusing.'
+    foreach ($row in $registryRows) { Assert-That (Test-RegistryValue $row) "A stale worker removed registry value $($row.Id) before refusing." }
+    Write-Evidence 'The standalone -WhatIf entry located the registered installation without a neighboring executable; a stale worker database expectation was rejected without deletion.'
+
+    $standaloneExit = Invoke-UninstallEntry $standaloneScript '-Yes' 'standalone-complete-uninstall'
+    Assert-That ($standaloneExit -in @(0, 3010)) "Standalone complete uninstall failed with exit code $standaloneExit."
+    Assert-That (@(Get-RelatedProducts).Count -eq 0) 'The standalone entry left the MSI product registered.'
+    foreach ($row in $registryRows) { Assert-That (-not (Test-RegistryValue $row)) "The standalone entry left MSI registry value $($row.Id)." }
+    foreach ($path in $trackedFiles) { Assert-That (-not (Test-Path -LiteralPath $path)) "The standalone entry left a tracked MSI file: $path" }
+    foreach ($path in ($fixtureRoots + @($startupLink))) { Assert-That (-not (Test-Path -LiteralPath $path)) "The standalone entry left managed current-user data: $path" }
+    foreach ($shortcut in $shortcuts) { Assert-That (-not (Test-Path -LiteralPath $shortcut.Path)) "The standalone entry left an installed shortcut: $($shortcut.Path)" }
+    foreach ($path in $sentinels) {
+        Assert-That ((Test-Path -LiteralPath $path -PathType Leaf) -and
+            [IO.File]::ReadAllText($path) -ceq ('retain-' + $fixtureId)) "The standalone entry modified an unrelated sentinel: $path"
+    }
+    foreach ($path in $standaloneFiles) { Assert-That (Test-Path -LiteralPath $path -PathType Leaf) "The downloaded standalone entry unexpectedly deleted its original source: $path" }
+    Write-Evidence 'The separate uninstall directory completed a second real MSI removal, including registry and local history; installed/shared-directory sentinels and the downloaded uninstall files were preserved.'
+
     @{
         result = 'passed'; productCode = $productCode; version = $properties['ProductVersion']
         msiSha256 = (Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash
@@ -392,6 +447,7 @@ finally:
         dataRootsRemoved = $fixtureRoots.Count; startMenuShortcutsRemoved = $shortcuts.Count
         neighboringSentinelsPreserved = $sentinels.Count; whatIfUnchanged = $true
         gracefulServiceStop = $true; unrelatedPythonPreserved = $true
+        standaloneUninstallPassed = $true; staleWorkerRejected = $true; actualMsiUninstallRounds = 2
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $resultPath -Encoding UTF8
 }
 catch {

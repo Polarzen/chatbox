@@ -219,11 +219,21 @@ function Add-FullUninstallShortcut($Database) {
         if ($component.Count -ne 1) { throw "Expected one component for $name." }
         $tracked[$name] = [pscustomobject]@{ File = $matches[0]; Directory = $component[0].Directory_ }
     }
-    $installDirectory = $tracked['Chatbox.exe'].Directory
-    foreach ($name in @('uninstall.cmd', 'Uninstall-ChatBox.ps1', 'Uninstall-ChatBoxData.ps1')) {
-        if ($tracked[$name].Directory -cne $installDirectory) {
-            throw "$name must be installed beside Chatbox.exe."
+    $uninstallDirectory = $tracked['uninstall.cmd'].Directory
+    foreach ($name in @('Uninstall-ChatBox.ps1', 'Uninstall-ChatBoxData.ps1')) {
+        if ($tracked[$name].Directory -cne $uninstallDirectory) {
+            throw "$name must be installed beside uninstall.cmd."
         }
+    }
+    $directories = @(Get-MsiRows $Database 'Directory' @('Directory', 'Directory_Parent', 'DefaultDir'))
+    $scriptDirectory = @($directories | Where-Object { $_.Directory -ceq $uninstallDirectory })
+    if ($scriptDirectory.Count -ne 1 -or (($scriptDirectory[0].DefaultDir -split ':')[0] -split '\|')[-1] -ine 'uninstall') {
+        throw 'Expected the uninstall scripts in the app/uninstall payload directory.'
+    }
+    $appDirectory = @($directories | Where-Object { $_.Directory -ceq $scriptDirectory[0].Directory_Parent })
+    if ($appDirectory.Count -ne 1 -or (($appDirectory[0].DefaultDir -split ':')[0] -split '\|')[-1] -ine 'app' -or
+        $appDirectory[0].Directory_Parent -cne $tracked['Chatbox.exe'].Directory) {
+        throw 'The uninstall script directory is not under the installed Chat Box app payload.'
     }
     $launcherTarget = '[#' + $tracked['Chatbox.exe'].File.File + ']'
     $mainShortcuts = @(Get-MsiRows $Database 'Shortcut' @('Shortcut', 'Directory_', 'Name', 'Target', 'Arguments') | Where-Object {
@@ -241,7 +251,7 @@ function Add-FullUninstallShortcut($Database) {
         Arguments = $null
         Description = 'Uninstall Chat Box and permanently delete local data for the current Windows user.'
         ShowCmd = 1
-        WkDir = $installDirectory
+        WkDir = $uninstallDirectory
     }) @('Directory_', 'Name')
 }
 

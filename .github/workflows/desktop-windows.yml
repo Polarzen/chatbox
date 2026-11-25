@@ -36,6 +36,19 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+      - name: Parse uninstall scripts with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $scripts = @(Get-ChildItem 'desktop\uninstall\*.ps1' -File) + @(
+            Get-Item 'desktop\test-windows-uninstall.ps1'
+            Get-Item 'desktop\test-uninstall-safety.ps1'
+          )
+          foreach ($script in $scripts) {
+            $tokens = $null
+            $parseErrors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$tokens, [ref]$parseErrors)
+            if ($parseErrors.Count -ne 0) { throw "$($script.Name): $($parseErrors -join [Environment]::NewLine)" }
+          }
       - name: Verify WiX and run tests, smoke checks and MSI packaging
         shell: pwsh
         run: |
@@ -171,3 +184,131 @@ jobs:
           path: app/build/outputs/apk/release/app-release-unsigned.apk
           retention-days: 7
           if-no-files-found: error
+  release-windows:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [windows, windows-uninstall, android-regression]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: chatbox-windows-release-${{ github.repository }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CHATBOX_RELEASE_INPUT: ${{ runner.temp }}/chatbox-release-input
+      CHATBOX_RELEASE_OUTPUT: ${{ runner.temp }}/chatbox-release-output
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Select a new version with release notes
+        id: release
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+
+          source = Path('desktop/build.gradle.kts').read_text(encoding='utf-8')
+          versions = re.findall(r'^val windowsPackageVersion = "([0-9]+\.[0-9]+\.[0-9]+)"$', source, re.MULTILINE)
+          if len(versions) != 1:
+              raise SystemExit('Expected exactly one Windows package version.')
+          version = versions[0]
+          tag = 'v' + version
+          notes = Path('docs/releases') / ('windows-' + version + '.md')
+          publish = notes.is_file()
+          repo = os.environ['GITHUB_REPOSITORY']
+          if not publish:
+              print('No versioned Windows release notes; verification only.')
+          else:
+              result = subprocess.run(['gh', 'release', 'view', tag, '--repo', repo, '--json', 'tagName'], text=True, capture_output=True)
+              if result.returncode == 0:
+                  publish = False
+                  print('Release ' + tag + ' already exists; its files will not be changed.')
+              elif 'release not found' not in result.stderr.lower() and 'http 404' not in result.stderr.lower():
+                  raise SystemExit(result.stderr or 'Could not check whether the release exists.')
+          if publish:
+              result = subprocess.run(['gh', 'api', 'repos/' + repo + '/git/ref/tags/' + tag], text=True, capture_output=True)
+              if result.returncode == 0:
+                  resolved = subprocess.run(['gh', 'api', 'repos/' + repo + '/commits/' + tag], text=True, capture_output=True, check=True)
+                  if json.loads(resolved.stdout)['sha'] != os.environ['GITHUB_SHA']:
+                      raise SystemExit('The existing tag points to a different commit; refusing to publish.')
+              elif 'http 404' not in result.stderr.lower():
+                  raise SystemExit(result.stderr or 'Could not check the release tag.')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('publish=' + str(publish).lower() + '\n')
+              output.write('version=' + version + '\n')
+              output.write('notes=' + notes.as_posix() + '\n')
+          PY
+      - uses: actions/download-artifact@v4
+        if: steps.release.outputs.publish == 'true'
+        with:
+          name: Chatbox-Windows-MSI
+          path: ${{ env.CHATBOX_RELEASE_INPUT }}
+      - name: Package standalone uninstall and checksums
+        if: steps.release.outputs.publish == 'true'
+        shell: bash
+        env:
+          CHATBOX_RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          import shutil
+          import zipfile
+
+          version = os.environ['CHATBOX_RELEASE_VERSION']
+          incoming = Path(os.environ['CHATBOX_RELEASE_INPUT'])
+          output = Path(os.environ['CHATBOX_RELEASE_OUTPUT'])
+          output.mkdir(parents=True, exist_ok=False)
+          installers = list(incoming.glob('*.msi'))
+          expected_name = 'Chatbox-' + version + '.msi'
+          if len(installers) != 1 or installers[0].name != expected_name:
+              raise SystemExit('The verified artifact does not contain the expected Windows MSI.')
+          shutil.copyfile(installers[0], output / expected_name)
+          sources = [
+              Path('desktop/uninstall/uninstall.cmd'),
+              Path('desktop/uninstall/Uninstall-ChatBox.ps1'),
+              Path('desktop/uninstall/Uninstall-ChatBoxData.ps1'),
+              Path('docs/WINDOWS_FULL_UNINSTALL.md'),
+          ]
+          archive = output / ('Chatbox-Uninstall-' + version + '.zip')
+          with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
+              for source in sources:
+                  info = zipfile.ZipInfo(source.name, date_time=(1980, 1, 1, 0, 0, 0))
+                  info.compress_type = zipfile.ZIP_DEFLATED
+                  info.external_attr = 0o100644 << 16
+                  bundle.writestr(info, source.read_bytes())
+          shutil.copyfile('docs/Chatbox-Install-Guide.zh-CN.md', output / 'Chatbox-Install-Guide.zh-CN.md')
+          sums = []
+          for asset in sorted(output.iterdir()):
+              sums.append(hashlib.sha256(asset.read_bytes()).hexdigest() + '  ' + asset.name)
+          (output / 'SHA256SUMS.txt').write_text('\n'.join(sums) + '\n', encoding='utf-8')
+          print('Prepared Windows MSI, standalone uninstall ZIP, guide and SHA256SUMS.txt.')
+          PY
+      - name: Publish the verified Windows release
+        if: steps.release.outputs.publish == 'true'
+        shell: bash
+        env:
+          CHATBOX_RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          CHATBOX_RELEASE_NOTES: ${{ steps.release.outputs.notes }}
+        run: |
+          set -euo pipefail
+          tag="v$CHATBOX_RELEASE_VERSION"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            printf '%s\n' "Release $tag now exists; leaving it unchanged."
+            exit 0
+          fi
+          gh release create "$tag" \
+            "$CHATBOX_RELEASE_OUTPUT/Chatbox-$CHATBOX_RELEASE_VERSION.msi" \
+            "$CHATBOX_RELEASE_OUTPUT/Chatbox-Uninstall-$CHATBOX_RELEASE_VERSION.zip" \
+            "$CHATBOX_RELEASE_OUTPUT/Chatbox-Install-Guide.zh-CN.md" \
+            "$CHATBOX_RELEASE_OUTPUT/SHA256SUMS.txt" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Chat Box $CHATBOX_RELEASE_VERSION (Windows)" \
+            --notes-file "$CHATBOX_RELEASE_NOTES" --latest

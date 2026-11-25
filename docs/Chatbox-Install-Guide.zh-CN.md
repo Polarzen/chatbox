@@ -1,11 +1,12 @@
-# Chat Box v0.1.23 安装指南
+# Chat Box Windows 0.1.24 / Android 0.1.23 安装指南
 
-在要使用 Chat Box 的设备上打开对应链接。本次发布包含 Windows 0.1.23 和 Android 0.1.23。两个安装包也可在 [v0.1.23 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.23) 的 **Assets（附件）** 中找到。
+在要使用 Chat Box 的设备上打开对应链接。Windows 0.1.24 新增完整卸载工具，Android 继续使用 0.1.23。Windows 安装包和独立卸载工具位于 [v0.1.24 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.24) 的 **Assets（附件）**；Android APK 位于 [v0.1.23 发布页](https://github.com/Polarzen/chatbox/releases/tag/v0.1.23)。
 
 | 设备 | 下载安装包 |
 | --- | --- |
-| Windows x64 电脑 | [Chatbox-0.1.23.msi](https://github.com/Polarzen/chatbox/releases/download/v0.1.23/Chatbox-0.1.23.msi) |
+| Windows x64 电脑 | [Chatbox-0.1.24.msi](https://github.com/Polarzen/chatbox/releases/download/v0.1.24/Chatbox-0.1.24.msi) |
 | Android 8.0 及以上手机 | [Chatbox-0.1.23.apk](https://github.com/Polarzen/chatbox/releases/download/v0.1.23/Chatbox-0.1.23.apk) |
+| Windows 独立完整卸载工具 | [Chatbox-Uninstall-0.1.24.zip](https://github.com/Polarzen/chatbox/releases/download/v0.1.24/Chatbox-Uninstall-0.1.24.zip) |
 
 如果下载时看到 **404**，请先在当前浏览器登录有权访问此私有仓库的 GitHub 账号，再打开链接。
 
@@ -14,8 +15,14 @@
 **如果旧版是 0.1.1，请先阅读[旧卸载器升级说明](https://github.com/Polarzen/chatbox/blob/v0.1.23/desktop/README.md#从-011-升级)。** 卸载或覆盖升级都可能触发旧卸载器清理整个安装目录。
 
 1. **升级前备份。** 右键点击任务栏通知区域的应用图标，从托盘菜单退出。在文件资源管理器地址栏输入 `%LOCALAPPDATA%\Chatbox`，把整个文件夹复制到其他位置。使用过独立共享服务的用户也请按[共享数据备份说明](https://github.com/Polarzen/chatbox/blob/v0.1.23/docs/DEVICE_SYNC_GUIDE.md)保存原数据库。首次安装可直接进行下一步。
-2. 双击下载的 `Chatbox-0.1.23.msi`，按安装向导完成安装。首次安装可使用默认目录，覆盖升级时请选择旧版的安装目录。
+2. 双击下载的 `Chatbox-0.1.24.msi`，按安装向导完成安装。首次安装可使用默认目录，覆盖升级时请选择旧版的安装目录。
 3. 打开 Windows **开始菜单**，搜索 **Chat Box** 并启动。
+
+### Windows 完整卸载
+
+在开始菜单打开 **Uninstall Chat Box**，或运行安装目录的 `app\uninstall\uninstall.cmd`。确认后会停止共享服务及登录自启动，卸载程序并永久删除当前 Windows 账户的本机历史、草稿、附件副本、已保存密钥和设备绑定。外置共享数据库会单独询问是否删除。
+
+已有旧版或程序已经卸载时，也可完整解压独立卸载 ZIP 后运行其中的 `uninstall.cmd`。普通 MSI 覆盖升级仍会保留用户数据。[清理范围和操作说明](https://github.com/Polarzen/chatbox/blob/v0.1.24/docs/WINDOWS_FULL_UNINSTALL.md)
 
 ## Android
 
@@ -33,11 +40,12 @@
 
 ## 核对安装包（可选）
 
-在安装前，可用发布页的 [SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.23/SHA256SUMS.txt) 核对下载是否完整。在 Windows 上，打开保存安装包的文件夹，在地址栏输入 `powershell` 并按回车。只运行与你已下载文件对应的命令。
+在安装前，可用 [Windows 0.1.24 的 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.24/SHA256SUMS.txt) 或 [Android 0.1.23 的 SHA256SUMS.txt](https://github.com/Polarzen/chatbox/releases/download/v0.1.23/SHA256SUMS.txt) 核对相应文件。在 Windows 上，打开保存安装包的文件夹，在地址栏输入 `powershell` 并按回车。只运行与你已下载文件对应的命令。
 
 | 已下载到电脑的文件 | PowerShell 命令 |
 | --- | --- |
-| Windows MSI | `Get-FileHash .\Chatbox-0.1.23.msi -Algorithm SHA256` |
+| Windows MSI | `Get-FileHash .\Chatbox-0.1.24.msi -Algorithm SHA256` |
+| Windows 独立卸载工具 | `Get-FileHash .\Chatbox-Uninstall-0.1.24.zip -Algorithm SHA256` |
 | Android APK | `Get-FileHash .\Chatbox-0.1.23.apk -Algorithm SHA256` |
 
 将输出的 `Hash` 与清单中**同名文件**的 SHA-256 值逐字核对，字母大小写可忽略。如果不同，请重新下载并核对一致后再安装。

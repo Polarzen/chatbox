@@ -83,12 +83,12 @@ tasks.configureEach {
             uninstallSources.file("Uninstall-ChatBoxData.ps1")
         )
         doLast {
-            // packageMsi consumes this app image, so the uninstaller becomes tracked MSI files.
+            // jpackage harvests the app payload; custom files at the image root are ignored.
             val appImage = layout.buildDirectory.dir("compose/binaries/main/app/Chatbox").get().asFile
             if (!appImage.resolve("Chatbox.exe").isFile) error("Expected Windows app image at ${appImage.absolutePath}")
             project.copy {
                 from(uninstallSources) { include("uninstall.cmd", "Uninstall-ChatBox.ps1", "Uninstall-ChatBoxData.ps1") }
-                into(appImage)
+                into(appImage.resolve("app/uninstall"))
             }
         }
     }
