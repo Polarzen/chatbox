@@ -51,7 +51,7 @@ internal class AndroidChatTransferService : Service() {
             enableVibration(false)
         })
         return Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setContentTitle("Chatbox · 小鲸鱼").setContentText("正在传输消息或附件")
+            .setContentTitle(getString(R.string.app_name)).setContentText("正在传输消息或附件")
             .setOngoing(true).setOnlyAlertOnce(true).setCategory(Notification.CATEGORY_PROGRESS)
             .setVisibility(Notification.VISIBILITY_PRIVATE).apply {
                 if (Build.VERSION.SDK_INT >= 31) setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_DEFERRED)

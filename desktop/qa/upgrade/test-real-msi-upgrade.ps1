@@ -163,6 +163,7 @@ function Start-InstalledApp([string] $Executable, [bool] $RequireStartMenuShortc
     if ($RequireStartMenuShortcut) {
         $entry = Get-StartMenuShortcut $Executable
         if (-not $entry) { throw 'Candidate MSI did not install a Start Menu shortcut targeting its installed executable.' }
+        if ([IO.Path]::GetFileNameWithoutExtension($entry) -cne 'Chat Box') { throw "Unexpected Start Menu name: $entry" }
     }
     if (@(Get-Process -Name Chatbox -ErrorAction SilentlyContinue).Count -ne 0) { throw 'A Chatbox process is already running on the isolated hosted runner.' }
 

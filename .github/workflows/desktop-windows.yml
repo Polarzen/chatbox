@@ -101,5 +101,47 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
-      - name: Run Android unit tests and debug build
-        run: bash ./gradlew --no-daemon testDebugUnitTest assembleDebug
+      - name: Test Android debug and release variants and assemble both APKs
+        run: bash ./gradlew --no-daemon :app:testDebugUnitTest :app:testReleaseUnitTest :app:assembleDebug :app:assembleRelease
+      - name: Verify release APK identity and launcher resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk=app/build/outputs/apk/release/app-release-unsigned.apk
+          aapt2=$(find "$ANDROID_HOME/build-tools" -name aapt2 -type f | sort -V | tail -1)
+          version_code=$(sed -nE 's/^ *versionCode = ([0-9]+).*$/\1/p' app/build.gradle.kts)
+          version_name=$(sed -nE 's/^ *versionName = "([^"]+)".*$/\1/p' app/build.gradle.kts)
+          "$aapt2" dump badging "$apk" > "$RUNNER_TEMP/chatbox-badging"
+          grep -F "package: name='dev.polarzen.chatbox' versionCode='$version_code' versionName='$version_name'" "$RUNNER_TEMP/chatbox-badging"
+          grep -Fx "application-label:'Chat Box'" "$RUNNER_TEMP/chatbox-badging"
+          "$aapt2" dump resources "$apk" > "$RUNNER_TEMP/chatbox-resources"
+          "$aapt2" dump xmltree "$apk" --file AndroidManifest.xml > "$RUNNER_TEMP/chatbox-manifest"
+
+          # Read compiled paths from the APK table; release optimizations may shorten filenames.
+          awk '/^[[:space:]]*resource 0x/ { show = ($0 ~ /[ :/]mipmap\/ic_launcher([[:space:]]|$)/) } show' \
+            "$RUNNER_TEMP/chatbox-resources" > "$RUNNER_TEMP/chatbox-launcher"
+          icon_id=$(awk '/resource 0x/ {print $2; exit}' "$RUNNER_TEMP/chatbox-launcher")
+          test -n "$icon_id"
+          for attribute in icon roundIcon; do
+            grep -E "android:${attribute}\\([^)]*\\)=@${icon_id}([[:space:]]|$)" "$RUNNER_TEMP/chatbox-manifest"
+          done
+          cat "$RUNNER_TEMP/chatbox-launcher"
+          mapfile -t paths < <(grep -oE '[[:alnum:]_./-]+\.xml' "$RUNNER_TEMP/chatbox-launcher" | sort -u)
+          test "${#paths[@]}" -eq 2
+          monochrome_count=0
+          for path in "${paths[@]}"; do
+            "$aapt2" dump xmltree "$apk" --file "$path" > "$RUNNER_TEMP/chatbox-icon"
+            for element in adaptive-icon background foreground; do
+              grep -E "E: ${element}([[:space:]]|$)" "$RUNNER_TEMP/chatbox-icon"
+            done
+            if grep -E 'E: monochrome([[:space:]]|$)' "$RUNNER_TEMP/chatbox-icon"; then
+              monochrome_count=$((monochrome_count + 1))
+            fi
+          done
+          test "$monochrome_count" -eq 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Chat-Box-Android-Unsigned
+          path: app/build/outputs/apk/release/app-release-unsigned.apk
+          retention-days: 7
+          if-no-files-found: error

@@ -5,20 +5,18 @@ import com.sun.jna.Platform
 import com.sun.jna.Pointer
 import com.sun.jna.win32.StdCallLibrary
 import java.awt.AWTException
-import java.awt.Color
 import java.awt.Dialog
 import java.awt.EventQueue
 import java.awt.Frame
 import java.awt.KeyboardFocusManager
 import java.awt.MenuItem
 import java.awt.PopupMenu
-import java.awt.RenderingHints
 import java.awt.SystemTray
 import java.awt.TrayIcon
 import java.awt.Window
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
-import java.awt.image.BufferedImage
+import javax.imageio.ImageIO
 import java.util.concurrent.FutureTask
 
 internal class DesktopTrayWindow(
@@ -36,10 +34,11 @@ internal class DesktopTrayWindow(
         try {
             if (!SystemTray.isSupported()) return@onTrayEdt false
             val menu = PopupMenu().apply {
-                add(MenuItem("显示 Chatbox").apply { addActionListener { onShow() } })
-                add(MenuItem("退出 Chatbox").apply { addActionListener { onExit() } })
+                add(MenuItem("显示 Chat Box").apply { addActionListener { onShow() } })
+                add(MenuItem("退出 Chat Box").apply { addActionListener { onExit() } })
             }
-            val trayIcon = TrayIcon(frame.iconImages.firstOrNull() ?: speechIcon(), "Chatbox", menu)
+            val trayImage = ImageIO.read(requireNotNull(javaClass.getResource("/chat-box.png")))
+            val trayIcon = TrayIcon(trayImage, "Chat Box", menu)
             trayIcon.isImageAutoSize = true
             trayIcon.addMouseListener(object : MouseAdapter() {
                 override fun mouseClicked(event: MouseEvent) {
@@ -151,21 +150,4 @@ private fun <T> onTrayEdt(action: () -> T): T {
     val task = FutureTask(action)
     EventQueue.invokeAndWait(task)
     return task.get()
-}
-
-private fun speechIcon(): BufferedImage {
-    val image = BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB)
-    val graphics = image.createGraphics()
-    try {
-        graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-        graphics.color = Color(0x285B88)
-        graphics.fillRoundRect(1, 2, 30, 24, 10, 10)
-        graphics.fillPolygon(intArrayOf(6, 6, 16), intArrayOf(21, 31, 24), 3)
-        graphics.color = Color.WHITE
-        graphics.fillRoundRect(7, 9, 18, 3, 3, 3)
-        graphics.fillRoundRect(7, 16, 12, 3, 3, 3)
-    } finally {
-        graphics.dispose()
-    }
-    return image
 }

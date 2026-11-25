@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="424" height="424" viewBox="0 0 424 424">
+  <title>Chat Box</title>
+  <rect id="tile" width="424" height="424" rx="116" fill="#390F40"/>
+  <g id="bubbles">
+    <path id="first" fill="#FEF6EE" d="M118 48 H210 C244 48 271 75 271 109 V137 C271 177 239 210 198 210 H173 Q168 210 165 212 L92 263 Q84 268 84 260 V210 C59 202 45 183 45 162 V117 C45 78 77 48 118 48 Z"/>
+    <path id="reply" fill="#CCB8FD" d="M318 167 C347 149 385 173 385 208 V265 C385 301 359 331 319 336 V386 Q319 398 310 392 L211 326 Q205 322 197 322 L142 318 C126 317 122 299 135 289 Z"/>
+  </g>
+</svg>

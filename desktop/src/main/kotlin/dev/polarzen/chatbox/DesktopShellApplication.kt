@@ -175,7 +175,7 @@ internal class ActivationInbox {
 }
 
 private fun startupMessage(message: String) = application {
-    Window(onCloseRequest = ::exitApplication, title = "Chatbox", state = rememberWindowState(size = DpSize(520.dp, 220.dp))) {
+    Window(onCloseRequest = ::exitApplication, title = "Chat Box", icon = androidx.compose.ui.res.painterResource("chat-box.png"), state = rememberWindowState(size = DpSize(520.dp, 220.dp))) {
         DesktopTheme(false) { Surface(Modifier.fillMaxSize()) { Text(message, Modifier.padding(16.dp)) } }
     }
 }
@@ -198,7 +198,7 @@ internal fun withDesktopInstance(
     val toastLaunch = args.firstOrNull() == "--open-toast"
     val launch = if (toastLaunch && args.size == 2) DesktopInstanceActivation.parseToastUri(args[1]) else null
     if (args.isNotEmpty() && launch == null) {
-        onError("无法打开此 Chatbox 通知，通知链接无效。")
+        onError("无法打开此 Chat Box 通知，通知链接无效。")
         return
     }
     val directoryKey = try {
@@ -234,13 +234,13 @@ internal fun withDesktopInstance(
             }
             val remaining = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())
             if (remaining <= 0 || Thread.currentThread().isInterrupted) {
-                onError(if (local) "Chatbox 已在运行，请使用已打开的窗口。" else "原数据目录中的 Chatbox 未运行，此通知已失效。")
+                onError(if (local) "Chat Box 已在运行，请使用已打开的窗口。" else "原数据目录中的 Chat Box 未运行，此通知已失效。")
                 return
             }
             when (DesktopInstanceActivation.forwardOutcome(ownerKey, action, remaining)) {
                 ForwardOutcome.ACCEPTED -> return
                 ForwardOutcome.UNCERTAIN -> {
-                    onError("唤起请求已发出，但未收到确认。请查看原 Chatbox 窗口。")
+                    onError("唤起请求已发出，但未收到确认。请查看原 Chat Box 窗口。")
                     return
                 }
                 ForwardOutcome.RETRYABLE -> try {
@@ -289,7 +289,8 @@ private fun runPrimaryWindow(
                     exitApplication()
                 } else visibility.windowClose(settings.closeToTray, trayAvailable)
             },
-            title = "chatbox",
+            title = "Chat Box",
+            icon = androidx.compose.ui.res.painterResource("chat-box.png"),
             visible = visibility.visible,
             onPreviewKeyEvent = { event ->
                 if (event.type == KeyEventType.KeyDown && event.key == Key.K && event.isCtrlPressed && store != null) {
