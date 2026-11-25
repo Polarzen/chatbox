@@ -503,6 +503,8 @@ internal class DesktopStore(private val file: Path) {
             val prefix = meta.getInt("prefix")
             val entries = session.getJSONArray("entries")
             val pending = meta.optJSONObject("pending")
+            val related = if (session.has("deviceSid")) deviceRelatedKeys(key).filter { it != key }
+                .map { historySession(copy, it) } else emptyList()
             for (row in terminal) {
                 check(row.seq > prefix && row.seq <= entries.length().toLong() + 1) { "会话 ${key.sessionId} 在第 ${row.seq} 轮前存在缺口。" }
                 if (row.seq <= entries.length()) {
@@ -520,7 +522,17 @@ internal class DesktopStore(private val file: Path) {
                         check(projection.answer == row.answer && projection.status == row.status) { "媒体回执与本机结果不同。" }
                         entryToJson(native.copy(status = status))
                     } else JSONObject().put("question", row.question).put("answer", row.answer).put("status", status)
-                    operation?.let { timestamp(it, "sentAt") }?.let { result.put("sentAt", it) }
+                    // Proven local aliases can receive the same operation before or after its sender.
+                    val sentAt = operation?.let { timestamp(it, "sentAt") } ?: related.firstNotNullOfOrNull { alias ->
+                        val queued = alias.optJSONArray("deviceQueue")?.optJSONObject(0)
+                        val saved = alias.getJSONArray("entries").optJSONObject(row.seq.toInt() - 1)
+                        when {
+                            queued?.optString("id") == row.id -> timestamp(queued, "sentAt")
+                            saved?.optString("profileTurnId") == row.id -> timestamp(saved, "sentAt")
+                            else -> null
+                        }
+                    }
+                    sentAt?.let { result.put("sentAt", it) }
                     entries.put(result.put("profileTurnId", row.id).put("profileTurnSeq", row.seq))
                     if (activity > session.optLong("lastActivityAt")) session.put("lastActivityAt", activity)
                     changed = true

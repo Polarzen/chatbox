@@ -124,6 +124,9 @@ class DesktopProvenRoomTest {
             assertEquals(setOf(a, other), sync.recent().map { it.key }.toSet())
             assertEquals(listOf(durableId), sendIds)
             assertEquals(listOf("权威回答", "唯一回复"), store.sessionContent(b.profileId, b.sessionId).entries.map { it.answer })
+            val times = store.sessionContent(b.profileId, b.sessionId).entries.map { it.sentAt }
+            assertNull(times.first())
+            assertNotNull(times.last())
             assertEquals(store.sessionContent(a.profileId, a.sessionId).entries, store.sessionContent(b.profileId, b.sessionId).entries)
             sync.revoke(phone)
             val reopened = DesktopStore(path)
