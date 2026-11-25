@@ -4,13 +4,8 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
-import java.io.FileOutputStream
 import java.nio.file.Files
 import java.nio.file.NoSuchFileException
-import java.nio.file.StandardCopyOption
 import java.security.KeyStore
 import java.security.MessageDigest
 import javax.crypto.Cipher
@@ -50,52 +45,18 @@ internal class AndroidSharedCipher(private val name: String, private val scope: 
     }
 }
 
-internal class AndroidSharedStorage(context: Context, base: String, session: String) : SharedLocalStorage {
-    private companion object {
-        val lock = Any()
-    }
-
+/** Read-only compatibility for records created before device pairing. */
+internal class AndroidSharedStorage(context: Context, base: String, session: String) {
     private val scope = MessageDigest.getInstance("SHA-256").digest("$base\u0000$session".toByteArray())
     private val name = "shared-" + Base64.encodeToString(scope, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
     private val cipher = AndroidSharedCipher(name, scope)
     private val file = context.noBackupFilesDir.toPath().resolve(name)
 
-    var hasRecord by mutableStateOf(hasState())
-        private set
+    fun hasState(): Boolean = !Files.notExists(file)
 
-    fun hasState(): Boolean = synchronized(lock) { !Files.notExists(file) }
-
-    override fun load(): String? = synchronized(lock) {
-        try {
-            cipher.decrypt(Files.readAllBytes(file))
-        } catch (_: NoSuchFileException) {
-            null
-        }
-    }
-
-    override fun save(value: String?) {
-        synchronized(lock) {
-            if (value == null) {
-                // The panel requests removal only after the user explicitly leaves this device.
-                Files.deleteIfExists(file)
-                hasRecord = false
-                return
-            }
-            // Authenticate the previous record before replacing it.
-            val existing = load()
-            if (existing == value) return
-            val encrypted = cipher.encrypt(value, create = existing == null)
-            val temp = Files.createTempFile(file.parent, name, ".tmp")
-            try {
-                FileOutputStream(temp.toFile()).use {
-                    it.write(encrypted)
-                    it.fd.sync()
-                }
-                Files.move(temp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-                hasRecord = true
-            } finally {
-                Files.deleteIfExists(temp)
-            }
-        }
+    fun load(): String? = try {
+        cipher.decrypt(Files.readAllBytes(file))
+    } catch (_: NoSuchFileException) {
+        null
     }
 }

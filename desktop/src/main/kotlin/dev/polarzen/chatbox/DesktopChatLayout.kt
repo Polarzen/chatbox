@@ -161,7 +161,6 @@ internal fun DesktopChatLayout(
     composerFocusSerial: Long = 0L,
     replyNavigation: ReplyTurnNavigation? = null,
     profileTextOnly: Boolean = false,
-    onRecoverPending: (() -> Unit)? = null,
     recentDetails: Map<String, DesktopRecentRow> = emptyMap(),
     deletionScope: (String) -> String? = { null },
 ) {
@@ -180,7 +179,6 @@ internal fun DesktopChatLayout(
                 SessionSidebar(
                     sessions = sessions,
                     recentDetails = recentDetails, deletionScope = deletionScope,
-                    profileTextOnly = profileTextOnly,
                     canCreate = canCreate,
                     onNewSession = onNewSession,
                     onSelectSession = onSelectSession,
@@ -193,7 +191,6 @@ internal fun DesktopChatLayout(
             ConversationPane(
                 profileId = profileId,
                 profileTextOnly = profileTextOnly,
-                onRecoverPending = onRecoverPending,
                 navigation = searchNavigation,
                 replyNavigation = replyNavigation,
                 composerFocusSerial = composerFocusSerial,
@@ -243,7 +240,6 @@ internal fun DesktopChatLayout(
             SessionSidebar(
                 sessions = sessions,
                 recentDetails = recentDetails, deletionScope = deletionScope,
-                profileTextOnly = profileTextOnly,
                 canCreate = canCreate,
                 onNewSession = onNewSession,
                 onSelectSession = onSelectSession,
@@ -265,7 +261,6 @@ private fun SessionSidebar(
     sessions: List<SessionInfo>,
     recentDetails: Map<String, DesktopRecentRow>,
     deletionScope: (String) -> String?,
-    profileTextOnly: Boolean,
     canCreate: Boolean,
     onNewSession: () -> Unit,
     onSelectSession: (String) -> Unit,
@@ -417,9 +412,8 @@ private fun SessionSidebar(
         AlertDialog(
             onDismissRequest = { pendingDeletion = null },
             title = { Text("删除会话？") },
-            text = { Text(deletionScope(deleting.id)?.let { "“$title”\n$it 此操作无法撤销。" } ?: if (profileTextOnly)
-                "将删除本机保存的“$title”。下次同步会将它从手机目录移除，共享服务按原房间规则保留记录。此操作无法撤销。"
-                else "将删除本机保存的这段聊天记录“$title”。确定删除吗？此操作无法撤销。") },
+            text = { Text(deletionScope(deleting.id)?.let { "“$title”\n$it 此操作无法撤销。" }
+                ?: "将删除本机保存的这段聊天记录“$title”。确定删除吗？此操作无法撤销。") },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -687,7 +681,6 @@ private fun ConversationToolbar(
 private fun ConversationPane(
     profileId: String,
     profileTextOnly: Boolean,
-    onRecoverPending: (() -> Unit)?,
     navigation: SearchHitNavigation?,
     replyNavigation: ReplyTurnNavigation?,
     composerFocusSerial: Long,
@@ -952,8 +945,6 @@ private fun ConversationPane(
         notice?.takeIf { it.isNotBlank() }?.let {
             Text(it, color = MaterialTheme.colors.error, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 22.dp, vertical = 2.dp))
         }
-        if (onRecoverPending != null) TextButton(onClick = onRecoverPending,
-            modifier = Modifier.testTag("profile-share-recover")) { Text("核对并重试原消息") }
         Composer(
             attachmentsEnabled = !profileTextOnly,
             composerFocusSerial = composerFocusSerial,

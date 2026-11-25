@@ -47,7 +47,6 @@ import java.awt.Desktop
 @Composable
 internal fun DesktopConnectionControls(
     connection: DesktopConnection, deviceStatus: String? = null, onDeviceSetup: (() -> Unit)? = null,
-    onShareProfile: (() -> Unit)? = null,
 ) {
     var keyMenuExpanded by remember { mutableStateOf(false) }
     var switchingKeyId by remember { mutableStateOf<String?>(null) }
@@ -249,7 +248,6 @@ internal fun DesktopConnectionControls(
                 permissionTarget = connection.keyList.keys.firstOrNull { it.id == connection.keyList.activeId }
             },
             onDeviceSetup = onDeviceSetup?.let { open -> { settingsExpanded = false; open() } },
-            onShareProfile = onShareProfile?.let { open -> { settingsExpanded = false; open() } },
         )
     }
     permissionTarget?.let { item ->
@@ -429,7 +427,6 @@ private fun ConnectionSettingsDialog(
     deviceStatus: String?,
     onDismiss: () -> Unit,
     onShowPermissions: () -> Unit,
-    onShareProfile: (() -> Unit)?,
     onDeviceSetup: (() -> Unit)?,
 ) {
     var addressDraft by remember(connection.profileId, connection.address) { mutableStateOf(connection.address) }
@@ -528,17 +525,11 @@ private fun ConnectionSettingsDialog(
                 }
                 if (localError) Text("地址无效，请输入完整的 HTTPS 地址或受支持的本机地址。", color = MaterialTheme.colors.error,
                     style = MaterialTheme.typography.caption)
-                if (selectedProfile?.kind == "shared") {
-                    Text("此档案用于共享会话，可在聊天窗口打开共享服务。", style = MaterialTheme.typography.caption)
-                } else if (selectedProfile?.kind == "device") {
+                if (selectedProfile?.kind == "device") {
                     Text("在设备共享设置中可检查该手机来源关联的 AstrBot。", style = MaterialTheme.typography.caption)
                 } else if (selectedProfile?.offlineOnly == true) {
                     Text("当前配置只包含离线历史。选择运行中的服务或应用新的地址以连接。",
                         style = MaterialTheme.typography.caption)
-                }
-                if (selectedProfile != null && !selectedProfile.offlineOnly && selectedProfile.kind != "shared") {
-                    TextButton(enabled = onShareProfile != null, onClick = { onShareProfile?.invoke() },
-                        modifier = Modifier.testTag("connection-profile-share")) { Text("与手机共享此档案的会话") }
                 }
                 Spacer(Modifier.height(8.dp))
                 TextButton(
@@ -606,7 +597,6 @@ private fun OwnerPermissionsDialog(connection: DesktopConnection, item: NamedKey
 }
 
 internal fun profileDisplayName(profile: Profile): String = when {
-    profile.kind == "shared" -> "共享会话"
     profile.kind == "device" -> "手机档案 · " + profile.id.substringAfterLast(':').take(8)
     profile.offlineOnly -> "离线历史"
     profile.kind == "launcher" -> "AstrBot Launcher · ${profile.id.removePrefix("launcher:").take(8)}"

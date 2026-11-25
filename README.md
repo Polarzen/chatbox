@@ -2,9 +2,9 @@
 
 0.1.19 可将 Windows 和 Android 配成一组，在两端的「最近对话」打开已有会话或接着聊。首次使用也可选择「仅在本机使用」。[0.1.19 安装、配对与恢复指南](docs/DEVICE_SYNC_GUIDE.md)
 
-0.1.18 支持为手机一次授权一个 PC 档案，从「最近对话 → 来自电脑」阅读多段旧聊天并双向续聊。[升级、配对与验收步骤](docs/PC_HISTORY_GUIDE.md)
+Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 OneBot。默认聊天记录保存在本机。[Windows 安装与升级说明](desktop/README.md)
 
-Chatbox 是使用 AstrBot 的个人 AI 助手客户端，无需 QQ、NapCat 或 OneBot。默认聊天记录保存在本机。0.1.16 跨端测试版可以把选定的会话接到个人共享服务，让 Windows 和 Android 接续同一段 AstrBot 对话。[跨端测试版安装、配对和验收步骤](docs/SHARED_CHAT_GUIDE.md) · [Windows 安装与升级说明](desktop/README.md)
+以下指南记录已退役的跨端功能。[0.1.18 电脑档案连接](docs/PC_HISTORY_GUIDE.md) · [0.1.16 单会话共享](docs/SHARED_CHAT_GUIDE.md)
 
 ## Windows 下载
 

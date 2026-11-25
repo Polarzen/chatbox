@@ -209,6 +209,66 @@ class DesktopDeviceSyncTest {
         } finally { server.stop(0) }
     }
 
+    @Test fun deviceRefreshChecksOldReceiptsWithoutReplayingOldSendsOrDeletions() = runBlocking {
+        org.junit.Assume.assumeTrue(System.getProperty("os.name").startsWith("Windows"))
+        val path = files.root.toPath().resolve("history.json")
+        val original = DesktopStore(path)
+        val local = original.ensureProfile("native", "https://old.invalid")
+        val key = SessionKey(local.id, local.currentSession)
+        val pending = SharedPending(UUID.randomUUID().toString(), "尚待核对")
+        val deleted = original.createSession(local.id).session
+        val oldOwner = JSONObject().put("instance", instance).put("source", local.address).put("token", "original-owner")
+        val entropy = java.security.MessageDigest.getInstance("SHA-256").digest(
+            JSONArray(listOf("desktop-profile-owner-v1", local.id, original.username)).toString().toByteArray(Charsets.UTF_8))
+        editLegacyFixture(path, key) { profile, session ->
+            profile.put("profileAuthorization", java.util.Base64.getEncoder().encodeToString(
+                WindowsDpapi.transform(entropy, oldOwner.toString().toByteArray(Charsets.UTF_8), true)))
+            session.put("profileHistory", JSONObject().put("profile", "pc").put("prefix", 0)
+                .put("pending", JSONObject().put("id", pending.id).put("question", pending.question)))
+        }
+        val store = DesktopStore(path)
+        store.deleteSession(local.id, deleted)
+        assertTrue(store.deviceRemoved(local.id).isEmpty())
+        assertEquals(setOf(deleted), store.legacyHiddenSessions(local.id))
+        store.saveDeviceOwner(instance, owner)
+        val requests = mutableListOf<String>()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        fun row(sid: String) = JSONObject().put("profile", "pc").put("sid", sid).put("originDevice", owner)
+            .put("title", "原会话").put("activity", 1).put("imported", 0).put("total", 0).put("reason", "")
+        server.createContext("/") { exchange -> exchange.use { ex ->
+            val route = ex.requestURI.path
+            requests += route
+            val answer = when (route) {
+                "/v1/device/profiles" -> JSONObject().put("profiles", JSONArray())
+                "/v1/device/profile" -> JSONObject(ex.requestBody.reader().readText())
+                    .put("profile", "pc").put("originDevice", owner).put("upstream", "test").put("available", true)
+                "/v1/device/sessions" -> JSONObject().put("sessions", JSONArray().put(row(key.sessionId)).put(row(deleted)))
+                    .put("more", false).put("revision", "1")
+                "/v1/device/devices" -> JSONObject().put("devices", JSONArray())
+                else -> null
+            }
+            val bytes = (answer ?: JSONObject()).toString().toByteArray(Charsets.UTF_8)
+            ex.sendResponseHeaders(if (answer == null) 404 else 200, bytes.size.toLong())
+            ex.responseBody.use { it.write(bytes) }
+        } }
+        server.start()
+        try {
+            val keys = NamedKeys(files.root.toPath().resolve("keys"), DesktopCredentials(files.root.toPath().resolve("secrets")))
+            val sync = DesktopDeviceSync(store, keys) {
+                JSONObject().put("ok", true).put("localUrl", "http://127.0.0.1:${server.address.port}")
+                    .put("instance", instance).put("device", owner).put("token", "device-owner")
+            }
+            sync.refresh()
+            assertTrue("/v1/device/turn" in requests)
+            assertTrue(requests.all { it in setOf("/v1/device/profiles", "/v1/device/profile", "/v1/device/sessions",
+                "/v1/device/turn", "/v1/device/devices") })
+            assertEquals(pending, DesktopStore(path).profileHistoryPosition(key, "pc").pending)
+            assertEquals(setOf(deleted), store.legacyHiddenSessions(local.id))
+            assertTrue(store.sessions(local.id).none { it.id == deleted })
+            assertTrue(sync.reason(key).contains("尚未确认"))
+        } finally { server.stop(0) }
+    }
+
     @Test fun confirmedAliasAndMediaUseOnlyTheVerifiedNativeUpstream() = runBlocking {
         org.junit.Assume.assumeTrue(System.getProperty("os.name").startsWith("Windows"))
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)

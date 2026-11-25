@@ -40,6 +40,8 @@ internal data class Profile(
     val currentSession: String,
 )
 
+internal data class DesktopHistoryPosition(val prefix: Int, val after: Long, val pending: SharedPending?)
+
 internal data class SessionInfo(
     val id: String,
     val entryCount: Int,
@@ -189,19 +191,6 @@ internal class DesktopStore(private val file: Path) {
         return ensureProfile("manual:${UUID.randomUUID()}", normalized)
     }
 
-    /** A first-run user can join a room before configuring any native AstrBot endpoint. */
-    @Synchronized
-    fun selectStandaloneSharedProfile(): Profile {
-        val id = "shared"
-        persist { copy ->
-            if (findProfile(copy, id) == null) {
-                createProfileInState(copy, "", id).put("kind", "shared").put("offlineOnly", true)
-            }
-            copy.put("activeProfileId", id)
-        }
-        return checkNotNull(profile(id))
-    }
-
     @Synchronized
     fun ensureProfile(profileId: String, address: String): Profile {
         require(profileId.isNotBlank()) { "Profile identity is required" }
@@ -302,8 +291,10 @@ internal class DesktopStore(private val file: Path) {
             val deletedIndex = indexOfSession(profile, sessionId)
             val wasCurrent = profile.optString("currentSession") == sessionId
             require(deletedIndex >= 0) { "Unknown session" }
-            if (profile.has("deviceProfile")) {
-                val row = sessions.getJSONObject(deletedIndex)
+            val row = sessions.getJSONObject(deletedIndex)
+            val unverifiedRoom = hasLegacyRoomField(row) && !row.has("deviceAuthority") &&
+                (!row.has("deviceSid") || row.optString("deviceReason").isNotEmpty())
+            if (profile.has("deviceProfile") && !unverifiedRoom) {
                 val sid = row.optString("deviceSid", sessionId)
                 if (row.has("deviceSid") || row.optJSONArray("deviceQueue")?.length()?.let { it > 0 } == true ||
                     row.getJSONArray("entries").length() > 0) {
@@ -316,12 +307,10 @@ internal class DesktopStore(private val file: Path) {
                     val removed = owner.optJSONObject("deviceRemoved") ?: JSONObject().also { owner.put("deviceRemoved", it) }
                     removed.put(sid, true)
                 }
-            }
-            if (profile.has("profileAuthorization")) {
-                val removed = profile.optJSONObject("profileRemoved") ?: JSONObject().also { profile.put("profileRemoved", it) }
-                // A proven alias has a separate canonical device tombstone above. Its old
-                // per-profile permission still needs the original SID removed on the legacy API.
-                removed.put(sessionId, !sessions.getJSONObject(deletedIndex).has("deviceAuthority"))
+            } else if (profile.has("profileAuthorization") || hasLegacyRoomField(row)) {
+                // Keep a local deletion hidden if this database is later paired through the device wizard.
+                val hidden = profile.optJSONObject("profileRemoved") ?: JSONObject().also { profile.put("profileRemoved", it) }
+                hidden.put(sessionId, true)
             }
             sessions.remove(deletedIndex)
 
@@ -371,15 +360,6 @@ internal class DesktopStore(private val file: Path) {
     }
 
     @Synchronized
-    fun saveSharedRecord(key: SessionKey, scope: String, previous: String?, protected: String?) {
-        persist(requireAtomic = true) { copy ->
-            val session = checkNotNull(findSession(requireProfile(copy, key.profileId), key.sessionId))
-            check(sharedRecord(key, scope) == previous) { "共享绑定已变化，请重新打开会话。" }
-            if (protected == null) session.remove(scope) else session.put(scope, protected)
-        }
-    }
-
-    @Synchronized
     fun profileAuthorization(profileId: String): String? =
         requireProfile(state, profileId).optString("profileAuthorization").takeIf(String::isNotEmpty)
 
@@ -392,36 +372,6 @@ internal class DesktopStore(private val file: Path) {
         } + listOfNotNull(profile.optString("remoteProfileId").takeIf(String::isNotEmpty))).distinct()
         check(scopes.size <= 1) { "本机保存的历史来自不同档案，无法更换主人凭据。" }
         return scopes.singleOrNull()
-    }
-
-    @Synchronized
-    fun saveProfileAuthorization(profileId: String, previous: String?, protected: String?, remoteProfileId: String? = null) {
-        check(profileAuthorization(profileId) == previous) { "档案授权已变更，请重新打开此档案。" }
-        persist(requireAtomic = true) { copy ->
-            val profile = requireProfile(copy, profileId)
-            if (protected == null) profile.remove("profileAuthorization") else profile.put("profileAuthorization", protected)
-            if (remoteProfileId != null) profile.put("remoteProfileId", remoteProfileId)
-        }
-    }
-
-    /** Capture the native prefix once, before accepting any cloud turns. Both the cursor
-     * and cloud rows live in the same atomic history document as this immutable boundary. */
-    @Synchronized
-    fun prepareProfileHistory(profileId: String, remoteProfile: String) {
-        val sessions = requireProfile(state, profileId).getJSONArray("sessions")
-        if ((0 until sessions.length()).all { sessions.getJSONObject(it).has("profileHistory") }) return
-        persist(requireAtomic = true) { copy ->
-            val rows = requireProfile(copy, profileId).getJSONArray("sessions")
-            for (index in 0 until rows.length()) {
-                val row = rows.getJSONObject(index)
-                if (row.has("profileHistory")) continue
-                val entries = row.getJSONArray("entries")
-                check((0 until entries.length()).none { entries.getJSONObject(it).getString("status") == "发送中" }) {
-                    "会话 ${row.getString("id")} 正在发送，请在回复结束后同步。"
-                }
-                row.put("profileHistory", JSONObject().put("profile", remoteProfile).put("prefix", entries.length()))
-            }
-        }
     }
 
     private fun historySession(source: JSONObject, key: SessionKey) =
@@ -469,22 +419,6 @@ internal class DesktopStore(private val file: Path) {
                 add(ProfileImportTurn(id, turn.question, turn.answer, turn.status))
             }
         }
-    }
-
-    @Synchronized
-    fun beginProfileSend(key: SessionKey, remoteProfile: String, revision: Long, pending: SharedPending) {
-        check(revision >= (appliedDraftRevisions[key] ?: Long.MIN_VALUE)) { "草稿已更新，请重新发送。" }
-        persist(requireAtomic = true) { copy ->
-            val session = historySession(copy, key)
-            val meta = profileMetadata(session, remoteProfile)
-            check(!meta.has("pending")) { "上一轮发送仍在核对。" }
-            if (revision == appliedDraftRevisions[key]) {
-                check(readDraft(key).attachments.isEmpty()) { "共享文字发送前，请移除草稿中的附件。" }
-            }
-            meta.put("pending", JSONObject().put("id", pending.id).put("question", pending.question))
-            session.remove("draft")
-        }
-        appliedDraftRevisions[key] = revision
     }
 
     /** Append final authoritative rows in order. Never reconstruct a native entry from its
@@ -541,24 +475,18 @@ internal class DesktopStore(private val file: Path) {
     }
 
     @Synchronized
-    fun profileRemoved(profileId: String): List<String> =
-        requireProfile(state, profileId).optJSONObject("profileRemoved")?.keySet()?.toList().orEmpty()
+    fun legacyHiddenSessions(profileId: String): Set<String> =
+        requireProfile(state, profileId).optJSONObject("profileRemoved")?.keySet()?.toSet().orEmpty()
 
     @Synchronized
-    fun legacyDeviceRemovals(profileId: String): Set<String> =
-        requireProfile(state, profileId).optJSONObject("profileRemoved")?.let { rows ->
-            rows.keySet().filterTo(mutableSetOf()) { rows.optBoolean(it, true) }
-        }.orEmpty()
+    fun hasSyncedHistory(key: SessionKey): Boolean =
+        findProfile(state, key.profileId)?.let { findSession(it, key.sessionId) }?.let(::hasSyncedHistory) == true
+    private fun hasSyncedHistory(row: JSONObject) = row.has("profileHistory") || hasLegacyRoomField(row)
 
     @Synchronized
-    fun acknowledgeProfileRemoval(profileId: String, sid: String) {
-        persist(requireAtomic = true) { copy ->
-            requireProfile(copy, profileId).optJSONObject("profileRemoved")?.remove(sid)
-        }
-    }
+    fun hasLegacySharedRecord(key: SessionKey): Boolean = hasLegacyRoomField(historySession(state, key))
 
-    @Synchronized
-    fun hasLegacySharedRecord(key: SessionKey): Boolean = historySession(state, key).keySet().any { it.startsWith("shared-") }
+    private fun hasLegacyRoomField(row: JSONObject) = row.keySet().any { it.startsWith("shared-") }
 
     @Synchronized
     fun deviceOwner(): Pair<String, String>? = state.optJSONObject("deviceOwner")?.let {
@@ -1018,7 +946,7 @@ internal class DesktopStore(private val file: Path) {
     }
 
     private fun writeSessionContent(session: JSONObject, chat: Chat) {
-        check(!session.has("profileHistory")) { "档案已授权，请通过原会话的档案共享入口发送。" }
+        check(!hasSyncedHistory(session)) { "此会话保留了已同步的历史。请新建本机会话，或在设备共享设置中连接原数据库。" }
         val entries = JSONArray()
         chat.entries.forEach { entries.put(entryToJson(it)) }
         if (!entries.similar(session.optJSONArray("entries"))) session.put("lastActivityAt", System.currentTimeMillis())

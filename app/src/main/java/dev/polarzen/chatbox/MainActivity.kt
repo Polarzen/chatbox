@@ -25,20 +25,15 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.lifecycleScope
-import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private enum class ChatPage { WELCOME, PAIR, RECENT, CHAT, DEVICE_CHAT, DEVICE_SETTINGS, CONNECTIONS, APPEARANCE, SHARED, COMPUTER_HISTORY }
+private enum class ChatPage { WELCOME, PAIR, RECENT, CHAT, DEVICE_CHAT, DEVICE_SETTINGS, CONNECTIONS, APPEARANCE }
 
 class MainActivity : ComponentActivity() {
     private lateinit var app: AndroidAppState
@@ -67,10 +62,11 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         heart = lastCustomNonConfigurationInstance as? AndroidHeartRate
             ?: AndroidHeartRate(this, LiveHeartRate(monotonicNanos = SystemClock::elapsedRealtimeNanos))
-        val savedPage = savedInstanceState?.getString("page")?.let(ChatPage::valueOf)
+        fun restoredPage(name: String) = ChatPage.entries.find { it.name == name }
+        val savedPage = savedInstanceState?.getString("page")?.let { restoredPage(it) ?: ChatPage.RECENT }
         if (savedInstanceState != null && savedPage != null) {
             page = savedPage
-            navigation.addAll(savedInstanceState.getStringArrayList("navigation").orEmpty().map(ChatPage::valueOf))
+            navigation.addAll(savedInstanceState.getStringArrayList("navigation").orEmpty().mapNotNull(::restoredPage))
             heartOpen = savedInstanceState.getBoolean("heart")
             images = savedInstanceState.getStringArrayList("images").orEmpty().map(Uri::parse)
             jumpTurn = savedInstanceState.getString("jumpTurn")
@@ -90,11 +86,10 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 val state = AndroidAppState.get(applicationContext)
-                val local = state.history.selected(state.connections.base)
                 val established = state.device.bound
                 val initial = when (mode) {
                     "welcome" -> if (established) ChatPage.RECENT else ChatPage.WELCOME
-                    "upgrade" -> if (state.storage(local).hasState()) ChatPage.SHARED else ChatPage.CHAT
+                    "upgrade" -> ChatPage.CHAT
                     else -> ChatPage.RECENT
                 }
                 state to initial
@@ -304,7 +299,7 @@ class MainActivity : ComponentActivity() {
         if (!app.connections.selectOffline(base)) return
         val history = app.history
         val selected = history.selected(base)
-        if (selected.turns.isNotEmpty() || selected.draft != MobileDraft() || app.storage(selected).hasState()) {
+        if (selected.turns.isNotEmpty() || selected.draft != MobileDraft() || app.legacyStorage(selected).hasState()) {
             history.create(base)
         }
         jumpTurn = null
@@ -345,8 +340,7 @@ class MainActivity : ComponentActivity() {
                     AndroidRecentScreen(app, ::openDevice, ::newChat) { go(ChatPage.DEVICE_SETTINGS) }
                 }
                 ChatPage.DEVICE_SETTINGS -> AndroidDeviceSettings(device, app.pairingScope,
-                    { go(ChatPage.PAIR) }, { go(ChatPage.CONNECTIONS) }, { go(ChatPage.COMPUTER_HISTORY) },
-                    { go(ChatPage.SHARED) }, { go(ChatPage.APPEARANCE) }, closePage)
+                    { go(ChatPage.PAIR) }, { go(ChatPage.CONNECTIONS) }, { go(ChatPage.APPEARANCE) }, closePage)
                 ChatPage.CHAT -> screens.SaveableStateProvider("chat") { NativeChat() }
                 ChatPage.DEVICE_CHAT -> {
                     val row = device.current
@@ -364,15 +358,6 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                ChatPage.COMPUTER_HISTORY -> {
-                    val legacy = app.computerHistory
-                    LaunchedEffect(legacy.bound, legacy.selected?.sid) {
-                        if (legacy.bound) lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                            while (legacy.bound) { legacy.refresh(); delay(5000L) }
-                        }
-                    }
-                    AndroidComputerHistoryPanel(legacy, app.pairingScope, closePage)
-                }
                 ChatPage.CONNECTIONS -> AndroidConnectionSettings(connections, closePage)
                 ChatPage.APPEARANCE -> Box(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
                     AndroidAppearanceScreen(app.dark, app::useDark, app.delivery.notificationsEnabled, { wanted ->
@@ -382,21 +367,6 @@ class MainActivity : ComponentActivity() {
                         startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
                             .putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
                     }, closePage)
-                }
-                ChatPage.SHARED -> {
-                    val base = connections.base
-                    val session = history.selected(base)
-                    val storage = remember(base, session.id) { app.storage(session) }
-                    Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
-                        if (storage.hasRecord) TextButton(onClick = closePage) { Text("返回本地历史与档案") }
-                        val seed = remember(storage) { androidSharedSeed(base, history.user, session) }
-                        val room = remember(storage) { app.sharedSession(session, storage) }
-                        DisposableEffect(room) {
-                            app.attachShared(session, room, heart.live)
-                            onDispose { app.detachShared(session, room) }
-                        }
-                        ForegroundPanel(seed, room, closePage)
-                    }
                 }
             }
         }
@@ -427,7 +397,7 @@ class MainActivity : ComponentActivity() {
         val connections = app.connections
         val base = connections.base
         val session = history.selected(base)
-        val storage = remember(base, session.id) { app.storage(session) }
+        val hasLegacyRoom = remember(base, session.id) { app.legacyStorage(session).hasState() }
         val device = app.device
         val busy = app.delivery.busy(base, session.id) || device.nativeBusy(base, session.id)
         LaunchedEffect(base, session.id, device.bound) {
@@ -438,7 +408,7 @@ class MainActivity : ComponentActivity() {
             if (app.send(base, session, draft, heart.live)) requestNotifications(onFirstSend = true)
         }
         AndroidChatScreen(history, connections, shown, history.sessions(base), busy,
-            (storage.hasRecord && !device.managesLegacyNative(base, session.id)) || app.pairingInProgress(session),
+            hasLegacyRoom && !device.managesLegacyNative(base, session.id),
             listOfNotNull(app.note(base, session.id), device.notice.takeIf { device.bound })
                 .filter(String::isNotBlank).joinToString("\n"), jumpTurn,
             onJumpHandled = { jumpTurn = null },
@@ -446,21 +416,8 @@ class MainActivity : ComponentActivity() {
             onCreate = ::newChat,
             onRename = { id, name -> history.rename(base, id, name) },
             onDelete = { id ->
-                val target = history.sessions(base).firstOrNull { it.id == id }
-                if (target != null) {
-                    val reason = when {
-                        app.storage(target).hasState() -> "请先在共享会话「更多」中退出本机共享"
-                        app.pairingInProgress(target) -> "共享绑定正在保存，请稍后再删除。"
-                        else -> null
-                    }
-                    if (reason != null) {
-                        app.showNote(base, id, reason)
-                        if (id != session.id) message(reason)
-                    } else {
-                        history.delete(base, id)
-                        app.showNote(base, id, "")
-                    }
-                }
+                history.delete(base, id)
+                app.showNote(base, id, "")
             },
             onDraftText = { history.draftText(base, session.id, it) },
             onRemoveAsset = { history.removeAsset(base, session.id, it) },
@@ -470,10 +427,7 @@ class MainActivity : ComponentActivity() {
             onRetryMedia = { turn, asset -> app.retryMedia(base, session.id, turn, asset) },
             onSettings = { go(ChatPage.CONNECTIONS) },
             onAppearance = { go(ChatPage.APPEARANCE) },
-            onShared = {
-                if (busy) app.showNote(base, session.id, "请等待当前回复结束，再打开共享会话。")
-                else go(ChatPage.SHARED)
-            }, onHeart = { heartOpen = true }, onComputerHistory = { go(ChatPage.COMPUTER_HISTORY) },
+            onHeart = { heartOpen = true },
             onRecent = ::recent, onDeviceSettings = { go(ChatPage.DEVICE_SETTINGS) },
             draftEvent = device.draftEvent)
     }
@@ -494,17 +448,10 @@ class MainActivity : ComponentActivity() {
             !device.online -> "草稿保存在手机"
             else -> ""
         }
-        val storage = remember(native, session.id) { native?.let { app.storage(session) } }
-        val legacy = native != null && ((storage?.hasRecord == true && !device.managesLegacyNative(native, session.id)) ||
-            app.pairingInProgress(session))
-        fun openLegacy() {
-            if (native != null && app.connections.selectOffline(native)) {
-                app.history.select(native, session.id)
-                go(ChatPage.SHARED)
-            } else go(ChatPage.DEVICE_SETTINGS)
-        }
+        val hasLegacyRoom = remember(native, session.id) { native != null && app.legacyStorage(session).hasState() }
+        val readOnly = native != null && hasLegacyRoom && !device.managesLegacyNative(native, session.id)
         AndroidChatScreen(app.history, app.connections, session, listOf(session),
-            device.busy || row.reason.isNotBlank(), legacy, listOf(row.reason, delivery, device.notice).filter { it.isNotBlank() }.joinToString("\n"),
+            device.busy || (row.reason.isNotBlank() && !readOnly), readOnly, listOf(row.reason, delivery, device.notice).filter { it.isNotBlank() }.joinToString("\n"),
             null, onJumpHandled = {}, onSelect = {}, onCreate = ::newChat,
             onRename = { _, _ -> message("请在会话所属设备中重命名。") },
             onDelete = { message("请在最近对话菜单中选择仅在本机隐藏。") },
@@ -515,56 +462,27 @@ class MainActivity : ComponentActivity() {
             }, onSend = { if (device.send(heart.live)) requestNotifications(onFirstSend = true) },
             onRetry = { message("将按原发送编号自动核对。") }, onRetryMedia = device::retryMedia,
             onSettings = { go(ChatPage.DEVICE_SETTINGS) }, onAppearance = { go(ChatPage.APPEARANCE) },
-            onShared = ::openLegacy, onHeart = { heartOpen = true }, onComputerHistory = { go(ChatPage.COMPUTER_HISTORY) },
+            onHeart = { heartOpen = true },
             onRecent = ::recent, onDeviceSettings = { go(ChatPage.DEVICE_SETTINGS) },
             readDraft = { device.chat?.draft?.text.orEmpty() }, draftEvent = device.draftEvent,
             mediaAvailable = native != null,
             deviceStatus = listOf(connection, row.source).filter(String::isNotBlank).joinToString(" · "))
     }
 
-    @Composable private fun ForegroundPanel(seed: SharedSeed, room: AndroidSharedSession, onClose: () -> Unit) {
-        val storage = room.storage
-        val view = remember(storage) { ComposeView(this) }
-        val close by rememberUpdatedState(onClose)
-        val bound = storage.hasRecord
-        DisposableEffect(view, bound) {
-            fun display() {
-                if (!bound || lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-                    view.setContent { AndroidChatTheme(app.dark) {
-                        SharedChatPanel(seed, storage, false, retainedState = room.state,
-                            pairingScope = app.pairingScope, composer = { state, visible, enabled, send ->
-                                AndroidSharedRoomComposer(state, visible, enabled, send)
-                            }, onClose = close)
-                    } }
-                } else {
-                    view.setContent { }
-                    view.disposeComposition()
-                }
-            }
-            val observer = LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_RESUME) display()
-            }
-            display()
-            lifecycle.addObserver(observer)
-            onDispose { lifecycle.removeObserver(observer) }
-        }
-        key(view) { AndroidView(factory = { view }, modifier = Modifier.fillMaxSize()) }
-    }
 }
 
 @Composable
 private fun ShareDestination(app: AndroidAppState, currentSession: String, count: Int,
                              onCancel: () -> Unit, onConfirm: (String, String?) -> Unit) {
     val connections = app.connections
-    val profiles = connections.services.map { it.base to it.name } + ("" to "独立共享会话")
+    val profiles = connections.services.map { it.base to it.name } + ("" to "本机离线会话")
     var address by rememberSaveable { mutableStateOf(connections.base) }
     val sessions = app.history.sessions(address)
-    val available = remember(address, sessions) { sessions.filterNot { app.storage(it).hasState() } }
     var id by rememberSaveable(address) {
-        mutableStateOf(if (address == connections.base && available.any { it.id == currentSession }) currentSession
-            else available.firstOrNull()?.id)
+        mutableStateOf(if (address == connections.base && sessions.any { it.id == currentSession }) currentSession
+            else sessions.firstOrNull()?.id)
     }
-    val canConfirm = profiles.any { it.first == address } && (id == null || available.any { it.id == id })
+    val canConfirm = profiles.any { it.first == address } && (id == null || sessions.any { it.id == id })
     AlertDialog(onDismissRequest = onCancel, title = { Text("分享图片到会话") }, text = {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -586,17 +504,16 @@ private fun ShareDestination(app: AndroidAppState, currentSession: String, count
             var sessionsOpen by remember { mutableStateOf(false) }
             Box {
                 OutlinedButton(onClick = { sessionsOpen = true }) {
-                    Text(available.firstOrNull { it.id == id }?.title ?: "新建会话")
+                    Text(sessions.firstOrNull { it.id == id }?.title ?: "新建会话")
                 }
                 DropdownMenu(sessionsOpen, { sessionsOpen = false }) {
-                    available.forEach { target ->
+                    sessions.forEach { target ->
                         DropdownMenuItem(text = { Text("${target.title} · ${target.turns.size} 轮") },
                             onClick = { sessionsOpen = false; id = target.id })
                     }
                     DropdownMenuItem(text = { Text("新建会话") }, onClick = { sessionsOpen = false; id = null })
                 }
             }
-            if (sessions.size != available.size) Text("共享会话仅支持文字，可选择其他本地会话。")
         }
     }, confirmButton = {
         TextButton(enabled = canConfirm, onClick = { onConfirm(address, id) }) { Text("加入草稿") }

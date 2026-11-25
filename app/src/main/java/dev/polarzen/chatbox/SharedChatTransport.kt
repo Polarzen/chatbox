@@ -2,20 +2,12 @@ package dev.polarzen.chatbox
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.Proxy
 import java.net.URI
-import java.net.URLEncoder
 
-data class SharedSeed(val sourceBase: String, val username: String, val session: String, val history: List<SharedSeedTurn>)
 data class SharedSeedTurn(val question: String, val answer: String, val status: String)
-
-internal interface SharedLocalStorage {
-    fun load(): String?
-    fun save(value: String?)
-}
 
 internal enum class SharedConflict { RUNNING, UNRESOLVED, OTHER }
 internal class SharedHttpFailure(val status: Int, val conflict: SharedConflict = SharedConflict.OTHER) : Exception()
@@ -60,38 +52,6 @@ internal data class SharedPage(val turns: List<SharedTurn>, val more: Boolean) {
 }
 
 internal class SharedChatTransport(private val allowLoopback: Boolean) {
-    suspend fun connect(address: String, code: String, seed: SharedSeed?): SharedBinding {
-        val body = JSONObject().put("code", code)
-        if (seed != null) {
-            val history = JSONArray()
-            seed.history.forEach {
-                history.put(JSONObject().put("question", it.question).put("answer", it.answer).put("status", it.status))
-            }
-            body.put("sourceBase", seed.sourceBase).put("username", seed.username)
-                .put("session", seed.session).put("history", history)
-        }
-        val reply = request(address, if (seed == null) "join" else "create", null, body)
-        return SharedBinding(address, reply.getString("room"), reply.getString("instance"),
-            reply.getString("token"), reply.getBoolean("owner")).also { require(seed == null || it.owner) }
-    }
-
-    suspend fun page(binding: SharedBinding, after: Long): SharedPage {
-        val value = request(binding.address, "turns?after=$after&limit=50", binding.token)
-        return SharedPage.read(value, after)
-    }
-
-    suspend fun turn(binding: SharedBinding, id: String): SharedTurn {
-        val path = "turn?id=" + URLEncoder.encode(id, "UTF-8")
-        return SharedTurn.read(request(binding.address, path, binding.token)).also { require(it.id == id) }
-    }
-
-    suspend fun send(binding: SharedBinding, pending: SharedPending) {
-        request(binding.address, "send", binding.token, JSONObject().put("id", pending.id).put("question", pending.question))
-    }
-
-    suspend fun manage(binding: SharedBinding, path: String): JSONObject =
-        request(binding.address, path, binding.token, JSONObject())
-
     internal suspend fun request(address: String, path: String, token: String?, body: JSONObject? = null): JSONObject =
         withContext(Dispatchers.IO) {
             val uri = URI(sharedAddress(address, allowLoopback) + "/v1/" + path)

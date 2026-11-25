@@ -199,16 +199,3 @@ internal fun AndroidChatComposer(
         }
     }
 }
-
-@Composable
-internal fun AndroidSharedRoomComposer(state: SharedChatState, visible: Boolean, sendEnabled: Boolean, onSend: () -> Unit) {
-    val binding = state.binding ?: return
-    key(visible) {
-        AndroidChatComposer(sessionKey = binding.room,
-            readDraft = { if (visible && state.binding == binding) state.local.draft else "" },
-            draftEvent = state.draftEvent,
-            onDraftText = { if (state.binding == binding) state.editDraft(it) },
-            onSend = { if (state.binding == binding) onSend() }, sendEnabled = sendEnabled,
-            enabled = visible && state.pending == null)
-    }
-}

@@ -42,11 +42,9 @@ class AndroidHistoryInstrumentation : Instrumentation() {
                 host.deleteSharedPreferences(testPrefix + "personal_chat")
             }
         }
-        val pc = runCatching { AndroidPcHistoryChecks.verify(host) }
-        finish(if (phone.isSuccess && pc.isSuccess) Activity.RESULT_OK else Activity.RESULT_CANCELED, Bundle().apply {
-            putString("stream", listOf("Android history" to phone, "PC history cache" to pc).joinToString("\n") { (name, result) ->
-                result.exceptionOrNull()?.let { "$name checks failed\n${it.stackTraceToString()}" } ?: "$name checks passed"
-            })
+        finish(if (phone.isSuccess) Activity.RESULT_OK else Activity.RESULT_CANCELED, Bundle().apply {
+            putString("stream", phone.exceptionOrNull()?.let { "Android history checks failed\n${it.stackTraceToString()}" }
+                ?: "Android history checks passed")
         })
     }
 

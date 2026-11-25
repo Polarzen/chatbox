@@ -12,7 +12,7 @@ import time
 import unittest
 from urllib.parse import urlencode
 
-from shared_service import astrbot
+from shared_service import astrbot, device_runtime, service
 
 if __package__:
     from .test_service import Client, ServiceProcess, Upstream, uid
@@ -99,6 +99,38 @@ class DeviceServiceTests(unittest.TestCase):
                 return turn
             self.assertLess(time.monotonic(), deadline, turn)
             time.sleep(0.02)
+
+    def test_device_listener_rejects_existing_room_and_profile_grants(self):
+        room = self.ok(self.public.request("create", dict(code=self.host.pair(), sourceBase=self.first.base,
+                                                         username="alice", session="chat-42", history=[])))
+        profile_body = dict(code=self.host.cli("profile-bootstrap"), sourceBase=self.first.base,
+                            username="bob", sourceId=uid(), name="B")
+        profile = self.ok(self.public.request("profile/create", profile_body))
+        profile_owner = Client(self.host.port, profile["token"])
+        self.ok(profile_owner.request("profile/session", dict(sid="chat-43", title="B", activity=1, total=0)))
+        grants = [("", room, "turns"), ("profile/", profile, "turns?sid=chat-43")]
+        invitations = []
+        for prefix, grant, _ in grants:
+            legacy = Client(self.host.port, grant["token"])
+            invitations.append(self.ok(legacy.request(prefix + "invite", {}))["code"])
+        self.host.stop()
+        with service.open_server(self.host.db, "fixture-key", 0, device_only=True) as server, device_runtime.serving(server):
+            for (prefix, grant, listing), invitation in zip(grants, invitations):
+                client = Client(server.server_port, grant["token"])
+                with self.subTest(prefix=prefix):
+                    self.assertEqual(client.request(prefix + "join", {"code": invitation})[0], 404)
+                    self.assertEqual(client.request(prefix + listing)[0], 404)
+                    body = dict(id=uid(), question="old client")
+                    if prefix:
+                        body["sid"] = "chat-43"
+                    self.assertEqual(client.request(prefix + "send", body)[0], 404)
+                    self.assertEqual(client.request("device/me")[0], 401)
+        self.host.serve()
+        for (prefix, grant, listing), invitation in zip(grants, invitations):
+            legacy = Client(self.host.port, grant["token"])
+            self.assertEqual(self.ok(legacy.request(prefix + listing))["turns"], [])
+            self.ok(legacy.request(prefix + "join", {"code": invitation}))
+        self.assertEqual(self.first.messages(), [])
 
     def test_pair_address_proof_and_guest_scope(self):
         self.assertEqual(self.ok(self.get(self.public, "health")), dict(instance=self.instance, version=1))

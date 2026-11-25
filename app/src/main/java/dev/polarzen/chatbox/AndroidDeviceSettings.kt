@@ -112,8 +112,8 @@ internal fun AndroidDevicePairing(device: AndroidDeviceSync, scope: CoroutineSco
 
 @Composable
 internal fun AndroidDeviceSettings(device: AndroidDeviceSync, scope: CoroutineScope,
-                                  connect: () -> Unit, localConnections: () -> Unit, oldProfiles: () -> Unit,
-                                  oldRoom: () -> Unit, appearance: () -> Unit, onBack: () -> Unit) {
+                                  connect: () -> Unit, localConnections: () -> Unit,
+                                  appearance: () -> Unit, onBack: () -> Unit) {
     var updateAddress by rememberSaveable { mutableStateOf(false) }
     var disconnect by rememberSaveable { mutableStateOf(false) }
     var candidate by rememberSaveable { mutableStateOf("") }
@@ -139,10 +139,8 @@ internal fun AndroidDeviceSettings(device: AndroidDeviceSync, scope: CoroutineSc
         }
         if (device.notice.isNotBlank()) Text(device.notice)
         HorizontalDivider()
-        Text("本机与旧连接", style = MaterialTheme.typography.titleMedium)
+        Text("本机设置", style = MaterialTheme.typography.titleMedium)
         TextButton(onClick = localConnections) { Text("本机服务档案与密钥") }
-        TextButton(onClick = oldProfiles) { Text("旧版电脑档案连接") }
-        TextButton(onClick = oldRoom) { Text("旧版单会话共享") }
         TextButton(onClick = appearance) { Text("外观与通知") }
     }
     if (updateAddress) AlertDialog(onDismissRequest = { updateAddress = false },

@@ -164,7 +164,7 @@ def run(root, generation):
             # implementation as service.py serve. An ephemeral management port
             # keeps it off old published endpoints and avoids foreign port reuse.
             with ExitStack() as stack:
-                backend = stack.enter_context(service.open_server(config["dbPath"], secret["key"], 0))
+                backend = stack.enter_context(service.open_server(config["dbPath"], secret["key"], 0, device_only=True))
                 stack.enter_context(serving(backend))
                 port = backend.server_port
                 identity = local_json(port, "GET", "me", secret["token"])

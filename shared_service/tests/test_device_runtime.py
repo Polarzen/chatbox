@@ -226,6 +226,9 @@ assert process.poll() is not None
                       "gatewayPort": gateway_port, "phoneUrl": f"https://127.0.0.1:{proxy.server_port}"}
             first = call("configure", **config)
             self.assertTrue(first["ok"], first.get("error"))
+            with closing(http.client.HTTPConnection(first["localUrl"].removeprefix("http://"))) as client:
+                client.request("GET", "/v1/turns")
+                self.assertEqual(client.getresponse().status, 404)
             second = call("configure", **config)
             self.assertTrue(second["ok"], second.get("error"))
             self.assertEqual(first["generation"], second["generation"])

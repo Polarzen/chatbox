@@ -8,6 +8,28 @@ class AndroidDeviceHistoryTest {
     private val voice = MobileAsset("/private/reply/w.wav","audio","private voice","another-secret")
     private val row = AndroidDeviceRow("profile","sid","title",0,"电脑","user",null,"")
 
+    @Test fun outgoingLimitUsesUtf8Bytes() {
+        assertFalse(deviceQuestionTooLarge("a".repeat(65536)))
+        assertTrue(deviceQuestionTooLarge("a".repeat(65537)))
+        val atLimit = "🧪".repeat(16384)
+        assertFalse(deviceQuestionTooLarge(atLimit))
+        assertTrue(deviceQuestionTooLarge(atLimit + "问"))
+    }
+
+    @Test fun onlyIdleOwnersFromThePairedServiceCanProveAnOldRoom() {
+        val address = "https://example.test"
+        val binding = SharedBinding(address,"room","instance","owner-token",true)
+        val saved = SharedLocal(binding = binding, draft = "unsent")
+        fun proof(state: SharedLocal?) = legacyOwnerProof(state,"instance",setOf(address))
+        assertEquals(binding.token,proof(saved))
+        assertNull(proof(null))
+        assertNull(proof(saved.copy(revoked = true)))
+        assertNull(proof(saved.copy(pending = SharedPending("old-operation","unconfirmed"))))
+        assertNull(proof(saved.copy(binding = binding.copy(owner = false))))
+        assertNull(proof(saved.copy(binding = binding.copy(instance = "different"))))
+        assertNull(proof(saved.copy(binding = binding.copy(address = "https://elsewhere.test"))))
+    }
+
     @Test fun onlySubmittedTextAndTypeHintsCrossTheBoundary() {
         val turn = MobileTurn("id","猫","录音","已完成",listOf(asset),listOf(voice))
         val sent = deviceImport(turn)!!

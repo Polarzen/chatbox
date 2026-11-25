@@ -65,14 +65,13 @@ import java.util.Date
 @Composable
 internal fun AndroidChatScreen(
     history: AndroidHistory, connections: AndroidConnections,
-    session: MobileSession, sessions: List<MobileSession>, busy: Boolean, bound: Boolean,
+    session: MobileSession, sessions: List<MobileSession>, busy: Boolean, readOnly: Boolean,
     note: String, jumpTurn: String?, onJumpHandled: () -> Unit, onSelect: (String) -> Unit,
     onCreate: () -> Unit, onRename: (String, String) -> Unit, onDelete: (String) -> Unit,
     onDraftText: (String) -> Unit, onRemoveAsset: (MobileAsset) -> Unit,
     onAddAssets: (List<MobileAsset>) -> Unit, onSend: () -> Unit, onRetry: (MobileTurn) -> Unit,
     onRetryMedia: (MobileTurn, MobileAsset) -> Unit,
-    onSettings: () -> Unit, onAppearance: () -> Unit, onShared: () -> Unit, onHeart: () -> Unit,
-    onComputerHistory: () -> Unit,
+    onSettings: () -> Unit, onAppearance: () -> Unit, onHeart: () -> Unit,
     onRecent: (() -> Unit)? = null,
     onDeviceSettings: (() -> Unit)? = null,
     readDraft: (() -> String)? = null,
@@ -128,13 +127,11 @@ internal fun AndroidChatScreen(
         LaunchedEffect(wide) { if (wide) drawer.close() }
         BackHandler(!wide && drawer.isOpen) { closeDrawer() }
         val sidebar: @Composable (Modifier, Boolean) -> Unit = { modifier, overlay ->
-            AndroidSessionSidebar(modifier, profileSessions, session.id, bound,
+            AndroidSessionSidebar(modifier, profileSessions, session.id,
                 onSelect = { id -> selectedHit = null; onSelect(id); if (overlay) closeDrawer() },
                 onCreate = { selectedHit = null; onCreate(); if (overlay) closeDrawer() },
                 onRename = onRename,
                 onDelete = { id -> onDelete(id); readings.removeState("${base.length}:$base:$id") },
-                onShared = { if (overlay) closeDrawer(); onShared() },
-                onComputerHistory = onComputerHistory,
                 onDismiss = if (overlay) ::closeDrawer else null)
         }
         ModalNavigationDrawer(
@@ -159,13 +156,13 @@ internal fun AndroidChatScreen(
                             compactHeight, onRecent == null && wide && sidebarVisible,
                             onSidebar = onRecent ?: openLocalHistory,
                             onSearch = ::openSearch, onSettings = onSettings, onAppearance = onAppearance,
-                            onShared = onShared, onHeart = onHeart, onDeviceSettings = onDeviceSettings,
+                            onHeart = onHeart, onDeviceSettings = onDeviceSettings,
                             onLocalHistory = openLocalHistory.takeIf { onRecent != null && deviceStatus == null },
                             deviceStatus = deviceStatus)
                         HorizontalDivider()
                         Box(Modifier.weight(1f)) {
                             readings.SaveableStateProvider(scopeId) {
-                                ChatTimeline(session, busy, bound, hit, jumpTurn, onJumpHandled, ime,
+                                ChatTimeline(session, busy, readOnly, hit, jumpTurn, onJumpHandled, ime,
                                     onHitShown = { selectedHit = null }, onCreate = onCreate,
                                     onRetry = { retry = it.id }, onRetryMedia = onRetryMedia)
                             }
@@ -179,7 +176,7 @@ internal fun AndroidChatScreen(
                                     style = MaterialTheme.typography.bodySmall)
                             }
                         }
-                        if (!bound && session.draft.attachments.isNotEmpty()) {
+                        if (session.draft.attachments.isNotEmpty()) {
                             Box(Modifier.fillMaxWidth().moveWithChatIme(ime).background(MaterialTheme.colorScheme.background)
                                 .heightIn(max = if (compactHeight) 52.dp else 110.dp)
                                 .verticalScroll(rememberScrollState()).padding(horizontal = 8.dp)) {
@@ -187,21 +184,25 @@ internal fun AndroidChatScreen(
                             }
                         }
                     }
-                    if (bound) {
-                        TextButton(onClick = onShared, modifier = Modifier.fillMaxWidth().moveWithChatIme(ime)) { Text("打开共享会话") }
-                    } else {
-                        Surface(Modifier.moveWithChatIme(ime), tonalElevation = 1.dp) {
-                            AndroidChatComposer(sessionKey = scopeId,
-                                readDraft = readDraft ?: { history.sessions(base).firstOrNull { it.id == session.id }?.draft?.text.orEmpty() },
-                                draftEvent = Triple(draftEvent, session.turns.lastOrNull()?.id, session.draft.text.isEmpty()),
-                                onDraftText = onDraftText, onSend = onSend, sendEnabled = !busy && !recording,
-                                hasAttachments = session.draft.attachments.isNotEmpty(), compact = compactHeight,
-                                onPasteImages = { mediaAvailable && !busy && pasteMobileImages(context, onAddAssets) { mediaNote = it } },
-                                actions = {
-                                    if (mediaAvailable) AndroidMediaActions(scopeId, enabled = !busy, onAdd = onAddAssets,
-                                        onNote = { mediaNote = it }, onRecordingChanged = { recording = it })
-                                })
+                    if (readOnly) {
+                        Row(Modifier.fillMaxWidth().moveWithChatIme(ime).padding(horizontal = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Text("旧版共享记录暂不可发送。草稿保存在本机。", Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodySmall)
+                            TextButton(onClick = onCreate) { Text("新建会话") }
                         }
+                    }
+                    Surface(Modifier.moveWithChatIme(ime), tonalElevation = 1.dp) {
+                        AndroidChatComposer(sessionKey = scopeId,
+                            readDraft = readDraft ?: { history.sessions(base).firstOrNull { it.id == session.id }?.draft?.text.orEmpty() },
+                            draftEvent = Triple(draftEvent, session.turns.lastOrNull()?.id, session.draft.text.isEmpty()),
+                            onDraftText = onDraftText, onSend = onSend, sendEnabled = !busy && !readOnly && !recording,
+                            hasAttachments = session.draft.attachments.isNotEmpty(), compact = compactHeight,
+                            onPasteImages = { mediaAvailable && !busy && pasteMobileImages(context, onAddAssets) { mediaNote = it } },
+                            actions = {
+                                if (mediaAvailable) AndroidMediaActions(scopeId, enabled = !busy, onAdd = onAddAssets,
+                                    onNote = { mediaNote = it }, onRecordingChanged = { recording = it })
+                            })
                     }
                 }
             }
@@ -218,7 +219,7 @@ internal fun AndroidChatScreen(
     session.turns.find { it.id == retry }?.let { turn ->
         AlertDialog(onDismissRequest = { retry = null }, title = { Text("重新发送？") },
             text = { Text("上一条可能已经被 AstrBot 接收。请先核对。继续会发送一条新消息，可能重复执行。") },
-            confirmButton = { TextButton(enabled = !busy && !bound, onClick = {
+            confirmButton = { TextButton(enabled = !busy && !readOnly, onClick = {
                 retry = null; onRetry(turn)
             }) { Text("确认重发") } },
             dismissButton = { TextButton(onClick = { retry = null }) { Text("取消") } })
@@ -229,7 +230,7 @@ internal fun AndroidChatScreen(
 private fun ChatHeader(
     connections: AndroidConnections, title: String, titleHit: MobileHistoryHit?, short: Boolean,
     sidebarOpen: Boolean, onSidebar: () -> Unit, onSearch: () -> Unit, onSettings: () -> Unit,
-    onAppearance: () -> Unit, onShared: () -> Unit, onHeart: () -> Unit,
+    onAppearance: () -> Unit, onHeart: () -> Unit,
     onDeviceSettings: (() -> Unit)?, onLocalHistory: (() -> Unit)?, deviceStatus: String?,
 ) {
     var more by remember { mutableStateOf(false) }
@@ -254,7 +255,7 @@ private fun ChatHeader(
                     listOfNotNull(("连接设置" to onSettings).takeIf { deviceStatus == null },
                         onDeviceSettings?.let { "设备设置" to it },
                         "窗口外观" to onAppearance, onLocalHistory?.let { "本机历史" to it },
-                        ("跨设备共享会话" to onShared).takeIf { deviceStatus == null }, "心率" to onHeart).forEach { (label, action) ->
+                        "心率" to onHeart).forEach { (label, action) ->
                         DropdownMenuItem(text = { Text(label) }, onClick = { more = false; action() })
                     }
                 }
@@ -283,9 +284,9 @@ private fun ChatHeader(
 
 @Composable
 private fun AndroidSessionSidebar(
-    modifier: Modifier, sessions: List<MobileSession>, active: String, activeBound: Boolean,
+    modifier: Modifier, sessions: List<MobileSession>, active: String,
     onSelect: (String) -> Unit, onCreate: () -> Unit, onRename: (String, String) -> Unit,
-    onDelete: (String) -> Unit, onShared: () -> Unit, onComputerHistory: () -> Unit, onDismiss: (() -> Unit)?,
+    onDelete: (String) -> Unit, onDismiss: (() -> Unit)?,
 ) {
     var editId by rememberSaveable { mutableStateOf<String?>(null) }
     var deleteId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -293,7 +294,6 @@ private fun AndroidSessionSidebar(
     Surface(modifier) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 14.dp)) {
             Text("最近对话", style = MaterialTheme.typography.titleMedium)
-            AndroidHistorySourceTabs(computer = false, onPhone = {}, onComputer = onComputerHistory)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Button(onClick = onCreate, modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(12.dp)) { Text("＋  新建会话") }
@@ -351,20 +351,6 @@ private fun AndroidSessionSidebar(
             dismissButton = { TextButton(onClick = { editId = null }) { Text("取消") } })
     }
     sessions.firstOrNull { it.id == deleteId }?.let { item ->
-        val context = LocalContext.current
-        val paired = if (item.id == active) activeBound else remember(item.sharedBase, item.id) {
-            AndroidSharedStorage(context, item.sharedBase, item.id).hasRecord
-        }
-        if (paired) {
-            AlertDialog(onDismissRequest = { deleteId = null }, title = { Text("此会话仍关联共享服务") },
-                text = { Text("如需删除本机记录，请先打开“${item.title}”的共享会话，在“更多”中选择“退出本机共享”。") },
-                confirmButton = { TextButton(onClick = {
-                    deleteId = null
-                    if (item.id == active) onShared() else onSelect(item.id)
-                }) { Text(if (item.id == active) "打开共享会话" else "前往该会话") } },
-                dismissButton = { TextButton(onClick = { deleteId = null }) { Text("取消") } })
-            return@let
-        }
         AlertDialog(onDismissRequest = { deleteId = null }, title = { Text("删除会话？") },
             text = { Text("将删除本机保存的这段聊天记录“${item.title}”。确定删除吗？此操作无法撤销。") },
             confirmButton = { TextButton(onClick = { onDelete(item.id); deleteId = null }) {
@@ -405,7 +391,7 @@ private fun chatReadingSaver(turns: List<MobileTurn>) = listSaver<ChatReading, A
 
 @Composable
 private fun ChatTimeline(
-    session: MobileSession, busy: Boolean, bound: Boolean, hit: MobileHistoryHit?,
+    session: MobileSession, busy: Boolean, readOnly: Boolean, hit: MobileHistoryHit?,
     jumpTurn: String?, onJumpHandled: () -> Unit, ime: AndroidChatIme, onHitShown: () -> Unit,
     onCreate: () -> Unit, onRetry: (MobileTurn) -> Unit, onRetryMedia: (MobileTurn, MobileAsset) -> Unit,
 ) {
@@ -489,7 +475,7 @@ private fun ChatTimeline(
                 val side = if (user) MobileHistorySide.USER else MobileHistorySide.ASSISTANT
                 val relevantHit = bodyHit?.takeIf { it.turnId == turn.id && it.side == side }
                 ChatBubble(turn, user, relevantHit, markedTurn == turn.id && !user,
-                    canRetry = !busy && !bound, onRetry = { onRetry(turn) },
+                    canRetry = !busy && !readOnly, onRetry = { onRetry(turn) },
                     onRetryMedia = { asset -> onRetryMedia(turn, asset) }, onLine = { targetLine = it })
             }
         }

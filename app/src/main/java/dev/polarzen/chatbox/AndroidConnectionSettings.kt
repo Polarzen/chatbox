@@ -95,7 +95,7 @@ internal fun AndroidConnectionSettings(connections: AndroidConnections, onClose:
                         TextButton({ openHistory(address) }, enabled = pending == null) { Text("离线查看此档案的会话") }
                     }
                     HorizontalDivider()
-                    TextButton({ openHistory("") }, enabled = pending == null) { Text("打开独立共享会话") }
+                    TextButton({ openHistory("") }, enabled = pending == null) { Text("查看本机离线会话") }
                     if (error.isNotEmpty()) Text(error, color = MaterialTheme.colorScheme.error)
                 }
             }

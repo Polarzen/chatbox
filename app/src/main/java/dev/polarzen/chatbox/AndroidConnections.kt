@@ -166,7 +166,6 @@ internal class AndroidConnections internal constructor(private val storage: Andr
     val keyId get() = catalog.keyId
     private val current get() = services.find { it.base == base }
     private val activeKey get() = current?.keys?.find { it.id == keyId }
-    val profileName get() = current?.name ?: "独立共享会话"
     val keyName get() = activeKey?.name.orEmpty()
     private var activeToken by mutableStateOf(activeKey?.let { runCatching { storage.open(base, it) }.getOrNull() })
     private var verifiedNow by mutableStateOf(false)

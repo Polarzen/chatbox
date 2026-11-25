@@ -1,6 +1,6 @@
 # 设备同步协议 0.1.19
 
-服务实例内仅将经 Windows 主人确认登记的档案纳入设备目录。手机确认现有及未来范围后加入。旧房间和档案凭据保留原范围。原始草稿、附件文件、OpenAPI 密钥与管理员登录态不参与历史传输。日期用 Unix 毫秒，操作和设备编号用 UUID，JSON 使用 UTF-8。以下路径位于 `/v1/device/`。除 health、preview、join、prove 外均须设备 Bearer 凭据。
+Windows 和 Android 客户端通过设备配对建立跨端连接。服务实例内仅将经 Windows 主人确认登记的档案纳入设备目录。手机确认现有及未来范围后加入。Windows 本机服务可复用旧共享数据库。下表的 `legacyToken` 用于核对原档案或房间的主人身份，旧凭据的授权仍限于原范围。原始草稿、附件文件、OpenAPI 密钥与管理员登录态不参与历史传输。日期用 Unix 毫秒，操作和设备编号用 UUID，JSON 使用 UTF-8。以下路径位于 `/v1/device/`。除 health、preview、join、prove 外均须设备 Bearer 凭据。
 
 | 方法和路径 | 请求 | 回执 |
 | --- | --- | --- |

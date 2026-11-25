@@ -272,14 +272,11 @@ internal class DesktopDeviceSync(
     private fun roomProof(p: Profile, key: SessionKey, b: DeviceBinding): String? {
         if (!store.hasLegacySharedRecord(key)) return null
         val old = try {
-            SharedLocal.decode(DesktopSharedStorage(store, key, p.address).load(), true)
+            SharedLocal.decode(readLegacyRoomRecord(store, key, p.address), true)
         } catch (_: Exception) { return "unverified" }
-        check(old.pending == null) { "原共享房间尚有一轮发送待核对。请先在原房间核对原编号。" }
+        check(old.pending == null) { "原共享房间有一轮发送尚未确认，原记录已保留。" }
         return old.binding?.takeIf { it.owner && it.instance == b.instance }?.token ?: "unverified"
     }
-
-    private fun legacyBinding(p: Profile, b: DeviceBinding, profile: String): ProfileBinding =
-        ProfileBinding(b.address, profile, b.instance, checkNotNull(oldProfileProof(p, b, p.address)), true, profileDisplayName(p))
 
     private suspend fun directory(b: DeviceBinding): List<DeviceSession> {
         val first = api.sessions(b)
@@ -337,19 +334,13 @@ internal class DesktopDeviceSync(
         upstreamCandidates = candidates
         val removed = mutableSetOf<Pair<String, String>>()
         for ((profile, id) in byRemote) {
-            val legacy = if (store.profileAuthorization(id) != null) store.profileRemoved(id) else emptyList()
-            for (sid in store.deviceRemoved(id) + store.legacyDeviceRemovals(id)) {
+            for (sid in store.deviceRemoved(id)) {
                 api.remove(b, profile, sid)
                 removed.add(profile to sid)
-                if (sid in store.deviceRemoved(id)) store.acknowledgeDeviceRemoval(id, sid)
+                store.acknowledgeDeviceRemoval(id, sid)
             }
-            if (legacy.isNotEmpty()) {
-                val old = legacyBinding(checkNotNull(store.profile(id)), b, profile)
-                for (sid in legacy) {
-                    SharedProfileTransport(true).remove(old, sid)
-                    store.acknowledgeProfileRemoval(id, sid)
-                }
-            }
+            // Previously deleted local rows must stay hidden without deleting the remote session.
+            for (sid in store.legacyHiddenSessions(id)) removed.add(profile to sid)
         }
         val remoteRows = directory(b).associateBy { it.profile to it.sid }
         val errors = mutableMapOf<SessionKey, String>()
@@ -415,12 +406,14 @@ internal class DesktopDeviceSync(
                             api.turn(b, targetProfile, sid, previous.id)
                         } catch (e: SharedHttpFailure) {
                             if (e.status != 404) throw e
-                            // A legacy request has no device-operation record. Its original room and
-                            // id are still the authority for deduplication after a lost 0.1.18 receipt.
-                            SharedProfileTransport(true).send(legacyBinding(source, b, profile), key.sessionId, previous.id, previous.question)
+                            errors[key] = "原档案的发送尚未确认，原发送编号已保留。"
+                            continue
                         }
                         pull(b, key, targetProfile, sid, row.activity)
-                        if (store.hasLegacyProfilePending(key)) continue
+                        if (store.hasLegacyProfilePending(key)) {
+                            errors[key] = "原档案的发送尚未确认，原发送编号已保留。"
+                            continue
+                        }
                     }
                     val mediaInProgress = store.nextDeviceSend(key)?.let { it.method == "media" && it.phase.isNotEmpty() } == true
                     if (mediaInProgress || row?.reason.isNullOrEmpty() && known[targetProfile]?.available == true) {

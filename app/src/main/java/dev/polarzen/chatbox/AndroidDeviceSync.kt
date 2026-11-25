@@ -38,6 +38,16 @@ internal fun deviceMediaText(text: String, media: List<MobileAsset>): String = b
     }
 }.joinToString("\n")
 
+internal fun legacyOwnerProof(state: SharedLocal?, instance: String, trusted: Set<String>): String? {
+    if (state == null || state.revoked || state.pending != null) return null
+    return state.binding?.takeIf { it.owner && it.instance == instance && it.address in trusted }?.token
+}
+
+internal fun deviceQuestionTooLarge(question: String): Boolean {
+    val maxBytes = 64 * 1024
+    return question.length > maxBytes || question.toByteArray(Charsets.UTF_8).size > maxBytes
+}
+
 internal fun deviceImport(turn: MobileTurn): ProfileImportTurn? {
     val status = when {
         turn.status == "已完成" -> "complete"
@@ -247,12 +257,8 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
     fun nativeBusy(base: String, sid: String) = localSession(DeviceLocalKey(base,sid))?.let { isBusy(nativeRow(base,it)) } == true
     fun managesLegacyNative(base: String, sid: String): Boolean {
         val k = DeviceLocalKey(base,sid)
-        val s = localSession(k) ?: return false
-        return bound && k in legacyReady && app.legacyIdle(s) &&
+        return bound && k in legacyReady &&
             links.any { it.local == k && it.legacyAlias && it.remote !in retired }
-    }
-    fun legacyChanged(session: MobileSession) {
-        legacyReady = legacyReady.filterNot { it.sid == session.id && localSession(it)?.sharedBase == session.sharedBase }.toSet()
     }
     fun nativeChat(base: String, session: MobileSession): MobileSession {
         if (!bound) return session
@@ -531,8 +537,8 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
         val record = AndroidSharedStorage(context,session.sharedBase,session.id)
         if (!record.hasState()) return LegacyRoom(null,false)
         val state = runCatching { SharedLocal.decode(record.load(),false) }.getOrNull()
-        val owner = state?.binding?.takeIf { it.owner && it.instance == b.instance && it.address in trusted }
-        return LegacyRoom(owner?.token ?: "unverified",owner != null && state.pending == null && !state.revoked)
+        val proof = legacyOwnerProof(state,b.instance,trusted)
+        return LegacyRoom(proof ?: "unverified",proof != null)
     }
 
     private suspend fun saveLink(link: DeviceImportLink) {
@@ -595,8 +601,8 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
         val local = localKey(row)
         val native = local?.let(::localSession)
         if (local != null && native == null) return false
-        if (native != null && app.storage(native).hasState() && !managesLegacyNative(local.base,local.sid))
-            return reject("请在原共享会话核对主人授权及待处理消息。")
+        if (native != null && app.legacyStorage(native).hasState() && !managesLegacyNative(local.base,local.sid))
+            return reject("旧版共享记录为只读，可新建会话继续聊天。")
         val text = draft.text.trim()
         if (text.startsWith("/task") && (text.length == 5 || text[5].isWhitespace()))
             return reject("请在电脑 Launcher 档案中执行 /task。")
@@ -604,7 +610,7 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
         if (text.isBlank() && !hasMedia) return false
         val prompt = heart?.appendTo(text) ?: text
         val question = if (hasMedia) deviceMediaText(prompt,draft.attachments) else prompt
-        if (pcQuestionTooLarge(question) || pcQuestionTooLarge(draft.text)) return reject("提问超过 64 KiB，请缩短后发送。")
+        if (deviceQuestionTooLarge(question) || deviceQuestionTooLarge(draft.text)) return reject("提问超过 64 KiB，请缩短后发送。")
         val p = profiles.find { it.profile == row.profile }
         if (p != null && !p.available) return reject("此来源尚未在电脑上配置上游，当前可阅读历史。")
         val token = app.connections.token().orEmpty()
@@ -658,7 +664,7 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
         try {
             val local = op.local
             val native = local?.let(::localSession)
-            if (found == null && native != null && app.storage(native).hasState() &&
+            if (found == null && native != null && app.legacyStorage(native).hasState() &&
                 !managesLegacyNative(local.base,local.sid)) return
             if (op.media) { processMedia(b,op,found); return }
             val receipt = found ?: if (op.start) api.start(b,op.key.profile,op.key.sid,op.id,op.question)

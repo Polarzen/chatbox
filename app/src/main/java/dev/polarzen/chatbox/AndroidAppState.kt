@@ -6,23 +6,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-
-internal class AndroidSharedSession(val storage: AndroidSharedStorage) {
-    var heart: LiveHeartRate? = null
-    var release: Job? = null
-    val state = SharedChatState(storage, false) { text -> heart?.appendTo(text) ?: text }
-}
 
 /** Owns work that can outlive an Activity, including accepted sends and confirmed image imports. */
 internal class AndroidAppState private constructor(private val app: Context) {
@@ -34,8 +26,6 @@ internal class AndroidAppState private constructor(private val app: Context) {
     val pairingScope: CoroutineScope get() = scope
     val device by lazy { AndroidDeviceSync(app, this, scope) }
     private var devicePoll: Job? = null
-    val computerHistory by lazy { AndroidPcHistory.get(app) }
-    private val sharedSessions = mutableStateMapOf<Pair<String, String>, AndroidSharedSession>()
     private val notes = mutableStateMapOf<Pair<String, String>, String>()
     private var startedActivities = 0
 
@@ -64,8 +54,6 @@ internal class AndroidAppState private constructor(private val app: Context) {
         if (--startedActivities == 0 && !changingConfiguration) {
             delivery.setForeground(false)
             devicePoll?.cancel()
-            computerHistory.flushDraft()
-            sharedSessions.values.forEach { it.state.flushDraft() }
             history.flushDrafts()
             device.flushDrafts()
         }
@@ -77,46 +65,7 @@ internal class AndroidAppState private constructor(private val app: Context) {
         if (value.isBlank()) notes.remove(base to session) else notes[base to session] = value
     }
 
-    private fun sharedKey(session: MobileSession) = session.sharedBase to session.id
-
-    fun storage(session: MobileSession) = sharedSessions[sharedKey(session)]?.storage
-        ?: AndroidSharedStorage(app, session.sharedBase, session.id)
-
-    fun sharedSession(session: MobileSession, storage: AndroidSharedStorage): AndroidSharedSession =
-        sharedSessions[sharedKey(session)] ?: AndroidSharedSession(storage)
-
-    fun attachShared(session: MobileSession, room: AndroidSharedSession, heart: LiveHeartRate) {
-        room.release?.cancel()
-        room.release = null
-        room.heart = heart
-        sharedSessions[sharedKey(session)] = room
-    }
-
-    fun detachShared(session: MobileSession, room: AndroidSharedSession) {
-        room.heart = null
-        if (device.bound) device.legacyChanged(session)
-        if (!room.state.flushDraft()) return
-        val key = sharedKey(session)
-        if (room.storage.hasRecord || (!room.state.busy && !room.state.saveFailed)) {
-            sharedSessions.remove(key, room)
-            return
-        }
-        // A one-use pairing response must be saved even if the initiating Activity disappears.
-        // Once persisted, a future visit can reload from disk and recheck the binding normally.
-        room.release = scope.launch {
-            snapshotFlow { room.storage.hasRecord || (!room.state.busy && !room.state.saveFailed) }.first { it }
-            sharedSessions.remove(key, room)
-        }
-    }
-
-    fun pairingInProgress(session: MobileSession): Boolean = sharedSessions[sharedKey(session)]?.state?.let {
-        (it.busy && it.local.binding == null) || it.saveFailed
-    } == true
-
-    fun legacyIdle(session: MobileSession): Boolean = sharedSessions[sharedKey(session)]?.state?.let {
-        it.local.binding?.owner == true && !it.local.revoked && it.local.pending == null &&
-            !it.busy && !it.saveFailed && !it.unreadable
-    } ?: true
+    fun legacyStorage(session: MobileSession) = AndroidSharedStorage(app, session.sharedBase, session.id)
 
     /** The notification payload is untrusted. Validate all three components before selecting anything. */
     fun openReply(base: String, session: String, turn: String): Boolean {
@@ -131,8 +80,8 @@ internal class AndroidAppState private constructor(private val app: Context) {
     }
 
     fun send(base: String, session: MobileSession, retry: MobileDraft?, heart: LiveHeartRate): Boolean {
-        if (base != connections.base || delivery.busy(base, session.id) || pairingInProgress(session)) return false
-        if (storage(session).hasState() && !device.managesLegacyNative(base,session.id)) return false
+        if (base != connections.base || delivery.busy(base, session.id)) return false
+        if (legacyStorage(session).hasState() && !device.managesLegacyNative(base,session.id)) return false
         val current = history.selected(base)
         if (current.id != session.id) return false
         if (device.pendingJoin) {
@@ -158,9 +107,7 @@ internal class AndroidAppState private constructor(private val app: Context) {
     fun addSharedImages(base: String, sessionId: String?, uris: List<Uri>): Boolean {
         if (base.isNotEmpty() && connections.services.none { it.base == base }) return false
         val target = if (sessionId != null) {
-            val existing = history.sessions(base).firstOrNull { it.id == sessionId } ?: return false
-            if (storage(existing).hasState() || pairingInProgress(existing)) return false
-            existing
+            history.sessions(base).firstOrNull { it.id == sessionId } ?: return false
         } else null
         if (!connections.selectOffline(base)) return false
         val id = target?.id?.also { history.select(base, it) } ?: history.create(base).id
@@ -171,8 +118,7 @@ internal class AndroidAppState private constructor(private val app: Context) {
                 var stored = false
                 try {
                     val current = history.sessions(base).firstOrNull { it.id == id }
-                    if (current == null || (base.isNotEmpty() && connections.services.none { it.base == base }) ||
-                        storage(current).hasState() || pairingInProgress(current)) {
+                    if (current == null || (base.isNotEmpty() && connections.services.none { it.base == base })) {
                         showNote(base, id, "目标本地会话已不可用，图片未加入草稿。")
                         return@launch
                     }
@@ -196,23 +142,4 @@ internal class AndroidAppState private constructor(private val app: Context) {
         @Synchronized fun get(context: Context): AndroidAppState = instance
             ?: AndroidAppState(context.applicationContext).also { instance = it }
     }
-}
-
-/** Only type and availability cross the pairing boundary. File paths and bytes remain local. */
-internal fun androidSharedSeed(base: String, user: String, session: MobileSession): SharedSeed {
-    fun withHints(text: String, media: List<MobileAsset>): String = buildList {
-        if (text.isNotEmpty()) add(text)
-        media.forEach {
-            val type = when (it.kind) {
-                "audio" -> "语音"
-                "image" -> "图片"
-                else -> "文件"
-            }
-            add("[${type}附件 · 共享记录无法打开]")
-        }
-    }.joinToString("\n")
-    return SharedSeed(base, user, session.id, session.turns.map { turn ->
-        SharedSeedTurn(withHints(turn.question, turn.sent), withHints(turn.answer, turn.replies),
-            if (turn.status == "已完成") "complete" else "unknown")
-    })
 }

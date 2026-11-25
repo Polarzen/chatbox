@@ -961,7 +961,7 @@ class Handler(BaseHTTPRequestHandler):
     def dispatch(self):
         try:
             route, _, raw_query = self.requestline.split()[1].partition("?")
-            if route not in READ_ROUTES | WRITE_ROUTES:
+            if route not in self.server.allowed_routes:
                 raise ApiError(404, "接口不存在。")
             public = ("/v1/create", "/v1/join", "/v1/profile/create", "/v1/profile/join",
                       "/v1/device/health", "/v1/device/preview", "/v1/device/join", "/v1/device/prove")
@@ -1007,12 +1007,13 @@ def validate_chat_key(key):
 
 
 @contextmanager
-def open_server(path, key, port=8765):
+def open_server(path, key, port=8765, *, device_only=False):
     validate_chat_key(key)
     if not Path(path).is_file():
         raise ApiError(400, "请先通过 init 初始化数据库。")
     with serving_lock(path), ThreadPoolExecutor(max_workers=8) as workers:
         with Server(("127.0.0.1", port), Handler) as server:
+            server.allowed_routes = (DEVICE_READ | DEVICE_WRITE) if device_only else (READ_ROUTES | WRITE_ROUTES)
             server.service = Service(path, key, workers)
             yield server
 

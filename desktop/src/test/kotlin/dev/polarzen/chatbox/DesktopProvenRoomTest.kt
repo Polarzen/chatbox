@@ -19,7 +19,7 @@ class DesktopProvenRoomTest {
     @Test fun provenLegacyRoomKeepsBothDraftsAndOriginalFilesWhileUsingOneAuthorityForSendAndRevoke() = runBlocking {
         assumeTrue(System.getProperty("os.name").startsWith("Windows"))
         val path = files.root.toPath().resolve("history.json")
-        val store = DesktopStore(path)
+        var store = DesktopStore(path)
         val localA = store.ensureProfile("A", "https://native-a.invalid")
         val localB = store.ensureProfile("B", "https://native-b.invalid")
         val a = SessionKey("A", localA.currentSession)
@@ -41,8 +41,9 @@ class DesktopProvenRoomTest {
         store.saveDraft(a, 1, ComposerDraft("来自 A 的草稿"))
         store.saveDraft(b, 2, ComposerDraft("来自 B 的草稿"))
         store.saveDeviceOwner(instance, owner)
-        DesktopSharedStorage(store, b, localB.address).save(SharedLocal(
-            binding = SharedBinding("https://old.invalid", "original-room", instance, token, true)).encode())
+        putLegacyRoomFixture(path, b, localB.address, JSONObject().put("address", "https://old.invalid")
+            .put("room", "original-room").put("instance", instance).put("token", token).put("owner", true).toString())
+        store = DesktopStore(path)
         store.selectSession(b.profileId, b.sessionId)
         fun turn(seq: Int, id: String, question: String, answer: String) =
             JSONObject().put("seq", seq).put("id", id).put("question", question).put("answer", answer).put("status", "complete")
