@@ -2,13 +2,13 @@
 
 Chatbox 是连接 AstrBot 的 Windows 与 Android 聊天客户端。两端配对一次，即可从「最近对话」查看历史、新建会话并继续聊天，也可选择仅在本机使用。
 
-## 0.1.21 聊天窗口候选分支
+## 下载 v0.1.22 正式版
 
-本候选版从正式版 0.1.19 开发，0.1.20 手环原型独立维护。常规聊天沿用原服务；需要自选模型参考的历史时，请先核对 AstrBot 4.29.4 配套适配。[候选版升级与双端复验](docs/CHAT_WINDOW_CONTEXT.md)
+[Windows 0.1.22 安装包（MSI）](https://github.com/Polarzen/chatbox/releases/download/v0.1.22/Chatbox-0.1.22.msi) · [Android 0.1.21 安装包（APK）](https://github.com/Polarzen/chatbox/releases/download/v0.1.22/Chatbox-0.1.21.apk) · [SHA-256 校验文件](https://github.com/Polarzen/chatbox/releases/download/v0.1.22/SHA256SUMS.txt) · [发布说明](https://github.com/Polarzen/chatbox/releases/tag/v0.1.22)
 
-## 下载 0.1.19
+Windows 配对向导遇到 ngrok 路径或授权错误时，会保留已填选项并定位到需要修改的字段。修正后即可重试，成功后再显示配对码。「最近对话」同时显示对方名称和会话主题，Windows 聊天记录和搜索结果也会显示已知的消息发送时间。
 
-[Windows 安装包（MSI）](https://github.com/Polarzen/chatbox/releases/download/v0.1.19/Chatbox-0.1.19.msi) · [Android 安装包（APK）](https://github.com/Polarzen/chatbox/releases/download/v0.1.19/Chatbox-0.1.19.apk) · [SHA-256 校验文件](https://github.com/Polarzen/chatbox/releases/download/v0.1.19/SHA256SUMS.txt) · [发布说明](https://github.com/Polarzen/chatbox/releases/tag/v0.1.19)
+常规聊天继续使用原 AstrBot 接口。只有要自选哪些历史消息供模型参考时，才需由服务维护者在 AstrBot 4.29.4 上安装配套适配。正在使用 0.1.20 手环原型并需要其功能的用户，请保留原安装。[聊天上下文、升级与双端复验](docs/CHAT_WINDOW_CONTEXT.md)
 
 首次连接时，在电脑端验证 AstrBot，选择手机连接方式，再用手机扫码配对。共享服务需要 Python 3.10 或更高版本，可复用 AstrBot Launcher 的环境。[安装、首次连接与恢复指南](docs/DEVICE_SYNC_GUIDE.md)
 
