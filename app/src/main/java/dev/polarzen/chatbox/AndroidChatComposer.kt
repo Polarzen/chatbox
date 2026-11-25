@@ -1,6 +1,11 @@
 package dev.polarzen.chatbox
 
+import android.os.Build
 import android.view.KeyEvent as NativeKeyEvent
+import android.view.ViewGroup
+import android.view.WindowInsets as NativeInsets
+import android.view.WindowInsetsAnimation
+import androidx.annotation.RequiresApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -16,40 +21,115 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.MeasurePolicy
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 
-/** Keep older messages at their top-relative position when the available height changes. */
+@RequiresApi(30)
+private class ChatImeAnimation(private val current: MutableState<Any?>) :
+    WindowInsetsAnimation.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+    override fun onStart(animation: WindowInsetsAnimation, bounds: WindowInsetsAnimation.Bounds): WindowInsetsAnimation.Bounds {
+        if (animation.typeMask and NativeInsets.Type.ime() != 0) current.value = animation
+        return bounds
+    }
+
+    override fun onProgress(insets: NativeInsets, runningAnimations: List<WindowInsetsAnimation>): NativeInsets = insets
+
+    override fun onEnd(animation: WindowInsetsAnimation) {
+        if (current.value === animation) current.value = null
+    }
+}
+
+// The drawer measures its body before the timeline. Their height difference is the space
+// used by the header, composer, notices and attachments, independent of IME padding.
+internal class ChatBodyGeometry {
+    var height = 0
+        private set
+
+    fun measureBody(modifier: Modifier): Modifier = modifier.layout { measurable, constraints ->
+        height = constraints.maxHeight
+        val body = measurable.measure(constraints)
+        layout(body.width, body.height) { body.place(0, 0) }
+    }
+}
+
 @Composable
-internal fun Modifier.anchorReverseHistory(list: LazyListState, restoredHeight: Int = -1): Modifier {
-    val previous = remember(list) {
-        object {
-            var height = restoredHeight
+internal fun ChatHistoryViewport(
+    modifier: Modifier, reading: ChatReading, body: ChatBodyGeometry, content: @Composable () -> Unit,
+) {
+    val view = LocalView.current
+    val currentAnimation = remember(view) { mutableStateOf<Any?>(null) }
+    if (Build.VERSION.SDK_INT >= 30) DisposableEffect(view) {
+        // ComponentActivity.setContent owns this ancestor. Compose handles insets on its child.
+        val host = generateSequence(view.parent) { it.parent }.filterIsInstance<ViewGroup>()
+            .firstOrNull { it.id == android.R.id.content }
+        host?.setWindowInsetsAnimationCallback(ChatImeAnimation(currentAnimation))
+        onDispose { host?.setWindowInsetsAnimationCallback(null) }
+    }
+    val measure = remember(reading, body, currentAnimation) {
+        var previousAnimation: Any? = null
+        var measuredWidth = -1
+        var surroundingHeight = -1
+        var frozenHeight = -1
+        MeasurePolicy { children, constraints ->
+            val width = constraints.maxWidth
+            val height = constraints.maxHeight
+            val surrounding = body.height - height
+            val animation = currentAnimation.value
+            val wasTranslated = frozenHeight > reading.viewportHeight
+            if (animation !== previousAnimation) {
+                // Only the list that already filled the viewport before the first shrink can freeze.
+                frozenHeight = if (animation != null) reading.viewportHeight else -1
+                previousAnimation = animation
+            }
+            val list = reading.list
+            if (frozenHeight >= 0) {
+                val sameGeometry = width == measuredWidth && surrounding == surroundingHeight && height <= frozenHeight
+                val pinned = !list.isScrollInProgress && !list.canScrollBackward && list.canScrollForward
+                if (!sameGeometry || !pinned) frozenHeight = -1
+            }
+            measuredWidth = width
+            surroundingHeight = surrounding
+            // A translated child's bottom already coincides with the visible bottom on thaw.
+            reading.anchorReverseHistory(height, keepAnchor = frozenHeight < 0 && !wasTranslated)
+            val childHeight = if (frozenHeight >= 0) frozenHeight else height
+            val child = children.single().measure(Constraints.fixed(width, childHeight))
+            layout(width, height) { child.place(0, height - childHeight) }
         }
     }
-    return layout { measurable, constraints ->
-        val height = constraints.maxHeight
-        if (previous.height >= 0 && previous.height != height) {
+    Layout(content, modifier.clipToBounds(), measure)
+}
+
+// Reverse-list offsets are relative to the bottom. Remember the actual visible height
+// so resizing and restoring an older reading position preserve its distance from the top.
+internal class ChatReading(val list: LazyListState = LazyListState(), restoredHeight: Int = -1) {
+    var viewportHeight = restoredHeight
+        private set
+
+    fun anchorReverseHistory(height: Int, keepAnchor: Boolean) {
+        val previous = viewportHeight
+        viewportHeight = height
+        if (keepAnchor && previous >= 0 && previous != height) {
             Snapshot.withoutReadObservation {
-                // Index and offset already describe the restored position before the first measure.
                 val index = list.firstVisibleItemIndex
                 val offset = list.firstVisibleItemScrollOffset
-                if (index != 0 || offset != 0) {
-                    list.requestScrollToItem(index, offset + previous.height - height)
+                if (!list.isScrollInProgress && (index != 0 || offset != 0)) {
+                    list.requestScrollToItem(index, offset + previous - height)
                 }
             }
         }
-        previous.height = height
-        val child = measurable.measure(constraints)
-        layout(child.width, child.height) { child.place(0, 0) }
     }
 }
 

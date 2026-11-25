@@ -41,7 +41,9 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -112,6 +114,9 @@ internal fun AndroidChatScreen(
         LaunchedEffect(Unit) { screenFocus.requestFocus() }
         val wide = maxWidth >= 720.dp
         val compactHeight = maxHeight < 480.dp
+        val chatBody = remember(maxWidth, maxHeight, LocalDensity.current, LocalLayoutDirection.current) {
+            ChatBodyGeometry()
+        }
         var sidebarVisible by rememberSaveable { mutableStateOf(onRecent == null) }
         val openLocalHistory = {
             if (wide) sidebarVisible = !sidebarVisible else {
@@ -143,7 +148,7 @@ internal fun AndroidChatScreen(
                 }
             },
         ) {
-            Row(Modifier.fillMaxSize()) {
+            Row(chatBody.measureBody(Modifier.fillMaxSize())) {
                 if (wide && sidebarVisible) {
                     sidebar(Modifier.width(240.dp).fillMaxHeight(), false)
                     VerticalDivider()
@@ -160,7 +165,7 @@ internal fun AndroidChatScreen(
                         HorizontalDivider()
                         Box(Modifier.weight(1f)) {
                             readings.SaveableStateProvider(scopeId) {
-                                ChatTimeline(session, busy, readOnly, hit, jumpTurn, onJumpHandled,
+                                ChatTimeline(session, busy, readOnly, chatBody, hit, jumpTurn, onJumpHandled,
                                     onHitShown = { selectedHit = null }, onCreate = onCreate,
                                     onRetry = { retry = it.id }, onRetryMedia = onRetryMedia)
                             }
@@ -357,10 +362,6 @@ private fun AndroidSessionSidebar(
     }
 }
 
-// The reverse list's offset is measured from its bottom. The keyboard can close
-// while the chat is out of composition, so save the measured height with the row.
-private class ChatReading(val list: LazyListState = LazyListState(), val restoredHeight: Int = -1)
-
 private fun chatReadingSaver(turns: List<MobileTurn>) = listSaver<ChatReading, Any>(
     save = { reading ->
         val list = reading.list
@@ -368,7 +369,7 @@ private fun chatReadingSaver(turns: List<MobileTurn>) = listSaver<ChatReading, A
         val offset = list.firstVisibleItemScrollOffset
         val layout = list.layoutInfo
         val row = layout.visibleItemsInfo.firstOrNull { it.index == index }
-        if (list.canScrollBackward && row != null) listOf(index, offset, row.key, layout.viewportSize.height)
+        if (list.canScrollBackward && row != null) listOf(index, offset, row.key, reading.viewportHeight)
         else listOf(index, offset)
     },
     restore = { saved ->
@@ -389,7 +390,7 @@ private fun chatReadingSaver(turns: List<MobileTurn>) = listSaver<ChatReading, A
 
 @Composable
 private fun ChatTimeline(
-    session: MobileSession, busy: Boolean, readOnly: Boolean, hit: MobileHistoryHit?,
+    session: MobileSession, busy: Boolean, readOnly: Boolean, body: ChatBodyGeometry, hit: MobileHistoryHit?,
     jumpTurn: String?, onJumpHandled: () -> Unit, onHitShown: () -> Unit,
     onCreate: () -> Unit, onRetry: (MobileTurn) -> Unit, onRetryMedia: (MobileTurn, MobileAsset) -> Unit,
 ) {
@@ -458,23 +459,24 @@ private fun ChatTimeline(
         val hitGeometry = if (bodyHit == null) Modifier else Modifier.nestedScroll(observer).onGloballyPositioned {
             center = it.positionInRoot().y + it.size.height / 2f
         }
-        LazyColumn(Modifier.fillMaxSize().clipToBounds().anchorReverseHistory(list, reading.restoredHeight)
-            .then(hitGeometry).testTag("message-region"), state = list, reverseLayout = true,
-            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            item(key = "end-of-chat") { Spacer(Modifier.height(1.dp)) }
-            items(messageCount, key = { reversed ->
-                val index = messageCount - 1 - reversed
-                "${session.turns[index / 2].id}/${index % 2}"
-            }) { reversed ->
-                val index = messageCount - 1 - reversed
-                val turn = session.turns[index / 2]
-                val user = index % 2 == 0
-                val side = if (user) MobileHistorySide.USER else MobileHistorySide.ASSISTANT
-                val relevantHit = bodyHit?.takeIf { it.turnId == turn.id && it.side == side }
-                ChatBubble(turn, user, relevantHit, markedTurn == turn.id && !user,
-                    canRetry = !busy && !readOnly, onRetry = { onRetry(turn) },
-                    onRetryMedia = { asset -> onRetryMedia(turn, asset) }, onLine = { targetLine = it })
+        ChatHistoryViewport(Modifier.fillMaxSize().then(hitGeometry), reading, body) {
+            LazyColumn(Modifier.fillMaxSize().testTag("message-region"), state = list, reverseLayout = true,
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                item(key = "end-of-chat") { Spacer(Modifier.height(1.dp)) }
+                items(messageCount, key = { reversed ->
+                    val index = messageCount - 1 - reversed
+                    "${session.turns[index / 2].id}/${index % 2}"
+                }) { reversed ->
+                    val index = messageCount - 1 - reversed
+                    val turn = session.turns[index / 2]
+                    val user = index % 2 == 0
+                    val side = if (user) MobileHistorySide.USER else MobileHistorySide.ASSISTANT
+                    val relevantHit = bodyHit?.takeIf { it.turnId == turn.id && it.side == side }
+                    ChatBubble(turn, user, relevantHit, markedTurn == turn.id && !user,
+                        canRetry = !busy && !readOnly, onRetry = { onRetry(turn) },
+                        onRetryMedia = { asset -> onRetryMedia(turn, asset) }, onLine = { targetLine = it })
+                }
             }
         }
         if (list.canScrollBackward) {
