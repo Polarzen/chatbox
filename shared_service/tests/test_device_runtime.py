@@ -57,6 +57,12 @@ class RuntimeBoundaryTest(unittest.TestCase):
                 check_gateway(f"http://127.0.0.1:{backend.server_port}", runtime.PROBE, key, "fixture", loopback=True)
             before = len(backend.requests)
             denied = [("POST", "/v1/device/" + route) for route in ("invite", "revoke", "endpoint", "remove")]
+            wearable = {"/v1/device/wearable-" + action for action in
+                        ("config", "sync", "credential", "clear", "query", "jobs", "job-query", "job-finish")}
+            self.assertEqual({p for method, p in runtime.PUBLIC_ROUTES if "/wearable-" in p and method == "POST"},
+                             wearable)
+            denied.extend(("GET", p) for p in wearable)
+            denied.append(("POST", "/v1/device/wearable-export"))
             denied += [("GET", path) for path in ("/", "/v1/profile", "/api/tunnels", "/v1/device/devices",
                                                   "/v1/device/me/", "/v1/device/join", "//v1/device/me")]
             for method, path in denied:

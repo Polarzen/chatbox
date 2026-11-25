@@ -30,6 +30,8 @@ internal fun AndroidRecentScreen(app: AndroidAppState, onOpen: (AndroidDeviceRow
     val device = app.device
     // Directory derivation can scan many profiles. Keep it outside composition and off
     // the UI dispatcher; only the published, sorted snapshot is consumed by the list.
+    // Compose runtime 1.7.6 lint misses the assignment to the producer's value below.
+    @Suppress("ProduceStateDoesNotAssignValue")
     val rows by produceState(emptyList<AndroidDeviceRow>(), app) {
         snapshotFlow {
             val shared = device.rows

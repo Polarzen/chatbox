@@ -2,6 +2,10 @@
 
 Chatbox 是连接 AstrBot 的 Windows 与 Android 聊天客户端。两端配对一次，即可从「最近对话」查看历史、新建会话并继续聊天，也可选择仅在本机使用。
 
+## 0.1.20 手环历史数据候选版
+
+手机可授权一个个人 AstrBot 档案查询小米运动健康写入 Health Connect 的记录，并单独开启运动总结或晨间摘要。Redmi Turbo 3 和小米手环 9 的实际可读字段须在设备上核对。[安装、首次授权与实机复验](docs/WEARABLE_GUIDE.md) · [本轮验证记录](docs/WEARABLE_ACCEPTANCE.md)
+
 ## 下载 0.1.19
 
 [Windows 安装包（MSI）](https://github.com/Polarzen/chatbox/releases/download/v0.1.19/Chatbox-0.1.19.msi) · [Android 安装包（APK）](https://github.com/Polarzen/chatbox/releases/download/v0.1.19/Chatbox-0.1.19.apk) · [SHA-256 校验文件](https://github.com/Polarzen/chatbox/releases/download/v0.1.19/SHA256SUMS.txt) · [发布说明](https://github.com/Polarzen/chatbox/releases/tag/v0.1.19)

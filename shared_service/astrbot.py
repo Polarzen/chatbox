@@ -5,6 +5,7 @@ import http.client
 import json
 import time
 from urllib.parse import urlencode, urlsplit
+from uuid import UUID
 
 
 MAX_EVENT_BYTES = 4 * 1024 * 1024
@@ -35,7 +36,7 @@ def frames(response):
             data.append(line.partition(b":")[2].removeprefix(b" "))
 
 
-def read_reply(response, publish):
+def read_reply(response, publish, on_run=None):
     committed = ""
     pending = ""
     media = None
@@ -51,6 +52,17 @@ def read_reply(response, publish):
         for frame in frames(response):
             kind = frame.get("type")
             value = frame.get("data")
+            if kind == "run_started" and on_run is not None:
+                run_id = frame.get("message_id")
+                if isinstance(value, dict) and value.get("run_id") == run_id and isinstance(run_id, str):
+                    try:
+                        valid = str(UUID(run_id)) == run_id
+                    except ValueError:
+                        valid = False
+                    if valid:
+                        on_run(run_id)
+                        on_run = None
+                continue
             if kind == "plain" and frame.get("chain_type") not in HIDDEN_CHAINS:
                 flush_media()
                 value = value if isinstance(value, str) else ""
@@ -179,7 +191,7 @@ def session_exists(base, key, username, session, verify_base=None, *, deadline=N
         page += 1
 
 
-def send(base, key, username, session, question, publish, verify_base=None):
+def send(base, key, username, session, question, publish, verify_base=None, *, on_run=None):
     body = json.dumps(
         {"username": username, "session_id": session, "message": question, "enable_streaming": True},
         ensure_ascii=False,
@@ -195,4 +207,4 @@ def send(base, key, username, session, question, publish, verify_base=None):
                 raise NotDispatched("AstrBot 拒绝聊天授权。")
             if not 200 <= response.status < 300 or response.headers.get_content_type() != "text/event-stream":
                 raise ValueError("上游对话响应无效")
-            read_reply(response, publish)
+            read_reply(response, publish, on_run)

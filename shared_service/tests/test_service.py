@@ -64,6 +64,8 @@ class ReplyHandler(BaseHTTPRequestHandler):
             self.send_error(400)
             return
         session = {"alice": "chat-42", "bob": "chat-43"}.get(username)
+        if session in getattr(self.server, "removed_sessions", ()):
+            session = None
         with self.server.lock:
             self.server.session_queries.append(username)
         rows = [{"session_id": session, "creator": username, "platform_id": "webchat"}] if session else []
@@ -92,6 +94,8 @@ class ReplyHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.end_headers()
         try:
+            if getattr(self.server, "run_id", None):
+                self.event(type="run_started", data={"run_id": self.server.run_id}, message_id=self.server.run_id)
             self.event(type="plain", data="片段", streaming=True)
             if question == "等待":
                 self.server.release.wait(20)

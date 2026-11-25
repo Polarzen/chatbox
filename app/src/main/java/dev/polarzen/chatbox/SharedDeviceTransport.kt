@@ -176,6 +176,11 @@ internal class SharedDeviceTransport(private val allowLoopback: Boolean) {
         request(binding, "revoke", JSONObject().put("device", device))
     }
 
+    suspend fun wearable(binding: DeviceBinding, action: String, body: JSONObject): JSONObject {
+        require(!binding.owner && action in setOf("config", "sync", "clear", "credential"))
+        return request(binding, "wearable-$action", body)
+    }
+
     private fun readProfile(r: JSONObject) = DeviceProfile(
         r.getString("profile"), r.getString("sourceId"), r.getString("base"), r.getString("username"),
         r.getString("name"), r.getString("originDevice"), if (r.isNull("upstream")) "" else r.getString("upstream"),

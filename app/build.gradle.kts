@@ -11,8 +11,8 @@ android {
         testInstrumentationRunner = "dev.polarzen.chatbox.AndroidHistoryInstrumentation"
         minSdk = 26
         targetSdk = 35
-        versionCode = 19
-        versionName = "0.1.19"
+        versionCode = 20
+        versionName = "0.1.20"
     }
     buildFeatures { compose = true }
     compileOptions {
@@ -24,6 +24,7 @@ kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarg
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.activity:activity-compose:1.10.0")
+    implementation("androidx.health.connect:connect-client:1.1.0-beta01")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")

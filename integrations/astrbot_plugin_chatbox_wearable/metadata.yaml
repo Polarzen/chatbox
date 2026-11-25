@@ -1,0 +1,6 @@
+name: astrbot_plugin_chatbox_wearable
+display_name: Chatbox 手环数据
+desc: 在获准的个人会话查询手环历史数据，并处理运动和晨间任务
+author: Polarzen
+version: 1.0.0
+astrbot_version: ">=4.29.4"

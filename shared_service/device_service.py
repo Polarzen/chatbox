@@ -8,9 +8,11 @@ import uuid
 from urllib.parse import urlsplit
 
 if __package__:
-    from . import service as core
+    from . import service as core, wearable_api, wearable_store
 else:
     import service as core
+    import wearable_api
+    import wearable_store
 
 
 def migrate_device(db):
@@ -45,6 +47,9 @@ def migrate_device(db):
         db.execute(statement)
     if "unverified" not in {r[1] for r in db.execute("PRAGMA table_info(device_session_state)")}:
         db.execute("ALTER TABLE device_session_state ADD COLUMN unverified INTEGER NOT NULL DEFAULT 0")
+    if "upstream_run_id" not in {r[1] for r in db.execute("PRAGMA table_info(device_operations)")}:
+        db.execute("ALTER TABLE device_operations ADD COLUMN upstream_run_id TEXT")
+    wearable_store.migrate_wearable(db)
 
 
 def text_id(body, key):
@@ -63,8 +68,9 @@ def credentials(body):
 
 
 def separate_credential(db, digest):
-    if db.execute("SELECT 1 FROM devices WHERE digest=? UNION ALL SELECT 1 FROM profile_devices WHERE digest=?",
-                  (digest, digest)).fetchone():
+    if db.execute("SELECT 1 FROM devices WHERE digest=? UNION ALL SELECT 1 FROM profile_devices WHERE digest=? "
+                  "UNION ALL SELECT 1 FROM wearable_grants WHERE plugin_digest=?",
+                  (digest, digest, digest)).fetchone():
         raise core.ApiError(409, "须为设备登记独立的新凭据。")
 
 
@@ -242,6 +248,8 @@ class DeviceApi:
             return dict(row)
 
     def write(self, action, token, body):
+        if action in wearable_api.ACTIONS:
+            return wearable_api.handle(self, action, token, body)
         if action == "session":
             return 200, self.publish_session(token, body)
         if action in ("start", "send", "media-begin"):
@@ -545,7 +553,7 @@ class DeviceApi:
                                (profile, sid, identifier)).fetchone()):
                 raise core.ApiError(409, "操作编号已用于原有历史。")
             result = self.service.enqueue(db, room, identifier, question)
-            db.execute("INSERT INTO device_operations VALUES(?,?,?,?,?,?)",
+            db.execute("INSERT INTO device_operations(id,device,action,profile,sid,room) VALUES(?,?,?,?,?,?)",
                        (identifier, device["id"], action, profile, sid, room))
             if exists:
                 db.execute("UPDATE profile_sessions SET fresh=0,reason='' WHERE profile=? AND sid=?", (profile, sid))

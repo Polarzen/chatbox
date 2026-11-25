@@ -115,6 +115,8 @@ private fun AudioAsset(asset: MobileAsset) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val playback = remember(asset.path) { MobilePlayback(context.applicationContext) }
+    // Compose runtime 1.7.6 lint misses the assignment to the producer's value below.
+    @Suppress("ProduceStateDoesNotAssignValue")
     val duration by produceState<Result<Long>?>(null, asset.path) {
         value = withContext(Dispatchers.IO) { runCatching { mobileWavDuration(File(asset.path)) } }
     }
@@ -137,6 +139,7 @@ private fun AudioAsset(asset: MobileAsset) {
 
 @Composable
 private fun ImageAsset(asset: MobileAsset) {
+    @Suppress("ProduceStateDoesNotAssignValue")
     val small by produceState<Result<Bitmap>?>(null, asset.path) {
         value = withContext(Dispatchers.IO) { runCatching { mobileBitmap(File(asset.path), 256) } }
     }
@@ -147,6 +150,7 @@ private fun ImageAsset(asset: MobileAsset) {
             contentScale = ContentScale.Fit, modifier = Modifier.size(96.dp).clickable(role = Role.Button) { opened = true })
     } else Text(if (small == null) "正在读取图片…" else "图片不可用")
     if (opened) Dialog(onDismissRequest = { opened = false }) {
+        @Suppress("ProduceStateDoesNotAssignValue")
         val large by produceState<Result<Bitmap>?>(null, asset.path) {
             value = withContext(Dispatchers.IO) { runCatching { mobileBitmap(File(asset.path), 2048) } }
         }

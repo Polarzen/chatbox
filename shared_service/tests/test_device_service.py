@@ -132,6 +132,67 @@ class DeviceServiceTests(unittest.TestCase):
             self.ok(legacy.request(prefix + "join", {"code": invitation}))
         self.assertEqual(self.first.messages(), [])
 
+    def test_wearable_query_requires_same_live_webchat_and_private_phone_profile(self):
+        phone, device = self.guest()
+        other, _ = self.guest("bob")
+        profile = self.profile(phone, username="bob")
+        sid = "chat-43"
+        self.history(phone, profile, sid)
+        self.upload(phone, profile, sid, "旧问题", "旧回复")
+        config = dict(revision=1, profile=profile, sid=sid, source="fixture.band", timezone="UTC",
+                      metrics=["exercise"], morningTime="08:00", waitMinutes=30,
+                      workoutEnabled=True, morningEnabled=False, notifyWorkout=True, notifyMorning=False)
+        self.assertEqual(self.post(other, "wearable-config", **config)[0], 404)
+        shared = self.profile(self.pc, source="A", username="bob")
+        self.assertEqual(self.post(phone, "wearable-config", **dict(config, profile=shared))[0], 403)
+        self.ok(self.post(phone, "wearable-config", **config))
+        plugin = Client(self.host.port, self.ok(self.post(phone, "wearable-credential", revision=1))["token"])
+        self.assertEqual(self.get(plugin, "me")[0], 401)
+        self.assertEqual(self.post(phone, "wearable-jobs")[0], 401)
+        self.assertEqual(self.post(plugin, "wearable-clear", revision=1)[0], 401)
+        invite = self.ok(self.post(self.pc, "invite", pcProfiles=0, pcSessions=0))
+        self.assertEqual(self.post(self.public, "join", code=invite["code"], device=uid(), token=plugin.token,
+                                   username="bob", phoneProfiles=0, phoneSessions=0)[0], 409)
+        now = int(time.time() * 1000)
+        record = dict(id="ride", metric="exercise", version=1, source=config["source"], exerciseType="cycling",
+                      startMs=now-70000, endMs=now-10000)
+        batch = dict(revision=1, cursor=1, initial=True, records=[], deletes=[], statuses={"exercise": "ok"})
+        self.ok(self.post(phone, "wearable-sync", **batch))
+        self.ok(self.post(phone, "wearable-sync", **dict(batch, cursor=2, initial=False, records=[record])))
+        self.first.run_id = uid()
+        context = dict(origin="webchat:FriendMessage:webchat!bob!chat-43", sender="bob",
+                       messageId=self.first.run_id, metric="exercise")
+        self.assertEqual(self.post(plugin, "wearable-query", **context)[0], 403)
+        op = dict(profile=profile, sid=sid, id=uid(), question="等待")
+        self.ok(self.post(self.pc, "send", **op))
+        result = self.ok(self.post(plugin, "wearable-query", **context))
+        self.assertEqual((result["source"], result["data"]["durationSeconds"]), ("fixture.band", 60))
+        for changed in [dict(sender="alice"), dict(origin=context["origin"].replace("FriendMessage", "GroupMessage")),
+                        dict(origin=context["origin"] + "-other"), dict(messageId=op["id"]), dict(messageId=uid())]:
+            self.assertEqual(self.post(plugin, "wearable-query", **(context | changed))[0], 403)
+        self.assertEqual(self.post(plugin, "wearable-query", **context, username="bob")[0], 400)
+        self.assertEqual(self.post(plugin, "wearable-query", **dict(context, metric="steps"))[0], 403)
+        self.first.release.set()
+        self.wait_turn(phone, profile, sid, op["id"])
+        self.assertEqual(self.post(plugin, "wearable-query", **context)[0], 403)
+        job, = self.ok(self.post(plugin, "wearable-jobs"))["jobs"]
+        body = {"id": job["id"]}
+        self.assertEqual(self.ok(self.post(plugin, "wearable-job-query", **body))["data"]["id"], "ride")
+        self.assertEqual(self.post(plugin, "wearable-job-finish", **body, sid="elsewhere")[0], 400)
+        self.first.removed_sessions = {sid}
+        self.assertEqual(self.ok(self.post(plugin, "wearable-job-finish", **body))["status"], "destination_unavailable")
+        self.assertEqual(len(self.ok(self.get(phone, "turns", profile=profile, sid=sid))["turns"]), 2)
+        self.first.removed_sessions = set()
+        for _ in range(2):
+            self.assertEqual(self.ok(self.post(plugin, "wearable-job-finish", **body))["status"], "delivered")
+        for viewer in (phone, self.pc):
+            rows = self.ok(self.get(viewer, "turns", profile=profile, sid=sid))["turns"]
+            self.assertEqual([row["question"] for row in rows], ["旧问题", "等待", ""])
+        self.assertEqual(self.get(other, "turns", profile=profile, sid=sid)[0], 404)
+        self.assertEqual(self.first.messages(), ["等待"])
+        self.ok(self.post(self.pc, "revoke", device=device))
+        self.assertEqual(self.post(plugin, "wearable-jobs")[0], 401)
+
     def test_pair_address_proof_and_guest_scope(self):
         self.assertEqual(self.ok(self.get(self.public, "health")), dict(instance=self.instance, version=1))
         phone, device = self.guest()

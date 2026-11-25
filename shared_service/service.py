@@ -317,7 +317,9 @@ DEVICE_READ = {"/v1/device/" + action for action in
                ("health", "me", "profiles", "sessions", "turns", "turn", "operation", "devices")}
 DEVICE_WRITE = {"/v1/device/" + action for action in
                 ("invite", "preview", "join", "endpoint", "prove", "revoke", "profile", "session", "import",
-                 "start", "send", "remove", "media-begin", "media-end")}
+                 "start", "send", "remove", "media-begin", "media-end", "wearable-config", "wearable-sync",
+                 "wearable-clear", "wearable-credential", "wearable-query", "wearable-jobs",
+                 "wearable-job-query", "wearable-job-finish")}
 READ_ROUTES = {"/v1/turn", "/v1/turns"} | PROFILE_READ | DEVICE_READ
 OWNER_ROUTES = {"/v1/invite", "/v1/cancel-invite", "/v1/revoke-guests"}
 WRITE_ROUTES = {"/v1/create", "/v1/join", "/v1/send"} | OWNER_ROUTES | PROFILE_WRITE | DEVICE_WRITE
@@ -347,6 +349,7 @@ class Service:
             db.execute("UPDATE profile_sessions SET fresh=0 WHERE fresh=1 AND room IN "
                        "(SELECT room FROM turns WHERE " + abandoned + ")")
             db.execute("UPDATE turns SET status='unknown',needs_review=1 WHERE " + abandoned)
+            db.execute("UPDATE device_operations SET upstream_run_id=NULL WHERE upstream_run_id IS NOT NULL")
         self.devices = device_api_module().DeviceApi(self)
 
     def current_base(self):
@@ -487,12 +490,19 @@ class Service:
         with database(self.path, write=True) as db:
             if db.execute("UPDATE turns SET status=?,needs_review=? WHERE room=? AND id=? AND status='running'",
                           (status, needs_review, room, turn_id)).rowcount:
+                db.execute("UPDATE device_operations SET upstream_run_id=NULL WHERE id=? AND room=? "
+                           "AND upstream_run_id IS NOT NULL", (turn_id, room))
                 if status == "complete" or needs_review:
                     db.execute("UPDATE profile_sessions SET fresh=0 WHERE room=? AND fresh=1", (room,))
                 profile_activity(db, room)
 
     def generate(self, room, turn_id, username, session, question, *, legacy=False):
         last_answer = ""
+
+        def bind_run(run_id):
+            with database(self.path, write=True) as db:
+                db.execute("UPDATE device_operations SET upstream_run_id=? WHERE id=? AND room=? "
+                           "AND upstream_run_id IS NULL", (run_id, turn_id, room))
 
         def publish(answer):
             nonlocal last_answer
@@ -511,10 +521,19 @@ class Service:
             with database(self.path) as db:
                 identity = db.execute("SELECT upstream FROM rooms WHERE id=? AND username=? AND session=?",
                                       (room, username, session)).fetchone()
+                enrolled = db.execute("""SELECT op.profile,g.settings FROM device_operations op
+                    JOIN device_catalog c ON c.profile=op.profile
+                    JOIN wearable_grants g ON g.device=c.origin AND g.plugin_digest IS NOT NULL
+                    JOIN device_members m ON m.id=op.device AND m.revoked=0
+                    WHERE op.room=? AND op.id=? AND op.action IN ('start','send') AND (m.owner=1 OR m.id=c.origin)""",
+                                      (room, turn_id)).fetchone()
             if not identity:
                 raise astrbot.NotDispatched("无法确认此房间的上游身份。")
             base, key, verify = self.routes.target(identity[0], legacy=legacy)
-            astrbot.send(base, key, username, session, question, publish, verify)
+            dispatch = {}
+            if enrolled and json.loads(enrolled["settings"])["profile"] == enrolled["profile"]:
+                dispatch["on_run"] = bind_run
+            astrbot.send(base, key, username, session, question, publish, verify, **dispatch)
             status = "complete"
             needs_review = False
         except astrbot.NotDispatched:

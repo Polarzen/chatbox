@@ -147,6 +147,7 @@ class MainActivity : ComponentActivity() {
         if (!foreground) {
             foreground = true
             app.activityStarted()
+            AndroidWearableSync.get(applicationContext).foreground(true)
         }
     }
 
@@ -158,6 +159,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         if (foreground) {
+            AndroidWearableSync.get(applicationContext).foreground(false)
             app.activityStopped(isChangingConfigurations)
             foreground = false
         }

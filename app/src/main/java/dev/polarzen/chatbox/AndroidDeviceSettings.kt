@@ -1,5 +1,6 @@
 package dev.polarzen.chatbox
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -13,7 +14,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 @Composable
-private fun DeviceForm(title: String, onBack: (() -> Unit)?, content: @Composable ColumnScope.() -> Unit) {
+internal fun DeviceForm(title: String, onBack: (() -> Unit)?, content: @Composable ColumnScope.() -> Unit) {
     Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()
         .verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (onBack != null) TextButton(onClick = onBack) { Text("返回") }
@@ -117,6 +118,12 @@ internal fun AndroidDeviceSettings(device: AndroidDeviceSync, scope: CoroutineSc
     var updateAddress by rememberSaveable { mutableStateOf(false) }
     var disconnect by rememberSaveable { mutableStateOf(false) }
     var candidate by rememberSaveable { mutableStateOf("") }
+    var wearable by rememberSaveable { mutableStateOf(false) }
+    if (wearable) {
+        BackHandler { wearable = false }
+        WearableSettingsScreen(device, onBack = { wearable = false })
+        return
+    }
     DeviceForm("设备设置", onBack) {
         if (device.bound || device.pendingJoin) {
             Text(when {
@@ -140,6 +147,7 @@ internal fun AndroidDeviceSettings(device: AndroidDeviceSync, scope: CoroutineSc
         if (device.notice.isNotBlank()) Text(device.notice)
         HorizontalDivider()
         Text("本机设置", style = MaterialTheme.typography.titleMedium)
+        TextButton(onClick = { wearable = true }) { Text("手环数据") }
         TextButton(onClick = localConnections) { Text("本机服务档案与密钥") }
         TextButton(onClick = appearance) { Text("外观与通知") }
     }

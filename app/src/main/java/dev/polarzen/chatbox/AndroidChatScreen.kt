@@ -478,6 +478,7 @@ private fun ChatTimeline(
                     val index = messageCount - 1 - reversed
                     val turn = session.turns[index / 2]
                     val user = index % 2 == 0
+                    if (user && turn.question.isBlank() && turn.sent.isEmpty()) return@items
                     val side = if (user) MobileHistorySide.USER else MobileHistorySide.ASSISTANT
                     val relevantHit = bodyHit?.takeIf { it.turnId == turn.id && it.side == side }
                     ChatBubble(turn, user, relevantHit, markedTurn == turn.id && !user,

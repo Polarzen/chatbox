@@ -1,0 +1,14 @@
+{
+  "service_url": {
+    "description": "已配对的 Chatbox 共享服务地址",
+    "type": "string",
+    "hint": "使用与手机相同的受限 HTTPS 站点。在同一台电脑上也可以使用服务的 HTTP 回环地址。",
+    "default": ""
+  },
+  "plugin_token": {
+    "description": "Chatbox 签发给本插件的手环访问凭据",
+    "type": "string",
+    "hint": "填写仅限所选档案的插件令牌。留空时插件不读取数据。",
+    "default": ""
+  }
+}
