@@ -28,8 +28,9 @@ private suspend fun checkedHostStatus(): HostStatus = withContext(Dispatchers.IO
     HostStatus(local.optString("localUrl"), local.optString("gatewayUrl"), local.optString("phoneUrl"), local.optString("mode"), error)
 }
 
-private fun hostGuidance(code: String): String = when (code) {
+internal fun hostGuidance(code: String): String = when (code) {
     "ngrok_auth_required" -> "ngrok 需要账号授权。请先登录自己的 ngrok 账号，或在连接方式中输入该账号的 authtoken。"
+    "ngrok_api_unavailable" -> "无法读取 ngrok 的本机接口。若要复用已有隧道，请检查 127.0.0.1:4040 上的 ngrok 接口。若由 Chatbox 启动 ngrok，请检查 ngrok 配置后重试。"
     "ngrok_missing" -> "找不到 ngrok。请在连接方式中填写已安装的 ngrok.exe 完整路径。"
     "ngrok_target_mismatch", "ngrok_target_ambiguous", "ngrok_inspection_enabled" ->
         "已有隧道未能通过网关检查。请将所选域名转发到本机受限网关，并关闭请求检查。"
@@ -109,7 +110,7 @@ internal fun DesktopDeviceWizard(store: DesktopStore, connection: DesktopConnect
         if (issued != null) {
             pair = DevicePairCode(sync.phoneUrl, issued.code)
             expiresAt = System.nanoTime() + issued.expiresIn * 1_000_000_000L
-            message = "等待手机扫码并确认共享范围。"
+            message = ""
         } else message = sync.notice
     }
     LaunchedEffect(Unit) {
@@ -144,94 +145,101 @@ internal fun DesktopDeviceWizard(store: DesktopStore, connection: DesktopConnect
             DeviceStep.PAIR -> "连接我的手机"
         }) },
         text = {
-            Column(Modifier.widthIn(min = 280.dp, max = 510.dp).heightIn(max = 560.dp).verticalScroll(rememberScrollState()),
+            Column(Modifier.widthIn(min = 280.dp, max = 510.dp).heightIn(max = 560.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                when (step) {
-                    DeviceStep.SOURCE -> DesktopDeviceSourcePicker(connection, setupSources, !busy)
-                    DeviceStep.ENDPOINT -> {
-                        Text("AstrBot · " + connection.address)
-                        Choice("跨网络 · ngrok", mode == "ngrok", !busy) { mode = "ngrok" }
-                        Choice("局域网或已有可信 HTTPS 域名", mode == "trusted", !busy) { mode = "trusted" }
-                        Text(if (mode == "ngrok") "优先使用账号已有稳定域名。留空时尝试复用现有隧道，或使用账号可用的地址。"
-                            else "将手机可访问的 HTTPS 域名转发到本机受限网关 http://127.0.0.1:$port。", style = MaterialTheme.typography.caption)
-                        OutlinedTextField(phone, { phone = it }, label = { Text(if (mode == "ngrok") "已有 ngrok HTTPS 域名（可选）" else "手机 HTTPS 地址") },
-                            enabled = !busy, singleLine = true, modifier = Modifier.fillMaxWidth())
-                        TextButton(enabled = !busy, onClick = { advanced = !advanced }) { Text(if (advanced) "收起部署配置" else "部署配置与 ngrok 授权") }
-                        if (advanced) {
-                            if (mode == "ngrok") {
-                                OutlinedTextField(program, { program = it }, label = { Text("ngrok.exe 完整路径（可选）") }, enabled = !busy, singleLine = true)
-                                OutlinedTextField(token, { token = it }, label = { Text("ngrok authtoken（已授权可留空）") },
-                                    enabled = !busy, singleLine = true, visualTransformation = PasswordVisualTransformation())
+                val scroll = key(step) { rememberScrollState() }
+                Column(Modifier.weight(1f, fill = false).verticalScroll(scroll),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    when (step) {
+                        DeviceStep.SOURCE -> DesktopDeviceSourcePicker(connection, setupSources, !busy)
+                        DeviceStep.ENDPOINT -> {
+                            Text("AstrBot · " + connection.address)
+                            Choice("跨网络 · ngrok", mode == "ngrok", !busy) { mode = "ngrok" }
+                            Choice("局域网或已有可信 HTTPS 域名", mode == "trusted", !busy) { mode = "trusted" }
+                            Text(if (mode == "ngrok") "优先使用账号已有稳定域名。留空时尝试复用现有隧道，或使用账号可用的地址。"
+                                else "将手机可访问的 HTTPS 域名转发到本机受限网关 http://127.0.0.1:$port。", style = MaterialTheme.typography.caption)
+                            OutlinedTextField(phone, { phone = it }, label = { Text(if (mode == "ngrok") "已有 ngrok HTTPS 域名（可选）" else "手机 HTTPS 地址") },
+                                enabled = !busy, singleLine = true, modifier = Modifier.fillMaxWidth())
+                            TextButton(enabled = !busy, onClick = { advanced = !advanced }) { Text(if (advanced) "收起部署配置" else "部署配置与 ngrok 授权") }
+                            if (advanced) {
+                                if (mode == "ngrok") {
+                                    OutlinedTextField(program, { program = it }, label = { Text("ngrok.exe 完整路径（可选）") }, enabled = !busy, singleLine = true)
+                                    OutlinedTextField(token, { token = it }, label = { Text("ngrok authtoken（已授权可留空）") },
+                                        enabled = !busy, singleLine = true, visualTransformation = PasswordVisualTransformation())
+                                }
+                                OutlinedTextField(port, { port = it }, label = { Text("本机受限网关端口") }, enabled = !busy, singleLine = true)
+                                OutlinedTextField(database, { database = it }, label = { Text("原共享 SQLite 数据库路径（可选）") }, enabled = !busy, singleLine = true)
+                                setupSources?.database?.let { path -> TextButton(onClick = { database = path }, enabled = !busy) { Text("使用找到的旧部署数据库") } }
                             }
-                            OutlinedTextField(port, { port = it }, label = { Text("本机受限网关端口") }, enabled = !busy, singleLine = true)
-                            OutlinedTextField(database, { database = it }, label = { Text("原共享 SQLite 数据库路径（可选）") }, enabled = !busy, singleLine = true)
-                            setupSources?.database?.let { path -> TextButton(onClick = { database = path }, enabled = !busy) { Text("使用找到的旧部署数据库") } }
+                            if (database.isNotBlank()) Text("将沿用共享数据库 · " + database, style = MaterialTheme.typography.caption)
+                            Divider()
+                            Text("电脑预计导入 ${profiles.size} 个档案、$estimate 段已有对话。手机会在确认时显示其本地数量。")
+                            Text("两台设备将共享所有现有及以后新增的档案、会话。空会话和草稿留在本机，附件原件留在发送设备。未确定来源的离线历史待验证后纳入。")
+                            if (!sync.enabled) Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(accepted, onCheckedChange = { accepted = it }, enabled = !busy)
+                                Text("允许这两台设备共享上述范围")
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(login, onCheckedChange = { login = it }, enabled = !busy)
+                                Text("Windows 登录后自动恢复共享服务")
+                            }
                         }
-                        if (database.isNotBlank()) Text("将沿用共享数据库 · " + database, style = MaterialTheme.typography.caption)
-                        Divider()
-                        Text("电脑预计导入 ${profiles.size} 个档案、$estimate 段已有对话。手机会在确认时显示其本地数量。")
-                        Text("两台设备将共享所有现有及以后新增的档案、会话。空会话和草稿留在本机，附件原件留在发送设备。未确定来源的离线历史待验证后纳入。")
-                        if (!sync.enabled) Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(accepted, onCheckedChange = { accepted = it }, enabled = !busy)
-                            Text("允许这两台设备共享上述范围")
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(login, onCheckedChange = { login = it }, enabled = !busy)
-                            Text("Windows 登录后自动恢复共享服务")
-                        }
-                    }
-                    DeviceStep.PAIR -> {
-                        Text("当前 AstrBot 档案 · " + connection.address.ifBlank { "未选中" })
-                        host?.let { state ->
-                            Text("本机共享服务 · " + state.local.ifBlank { "尚未验证" })
-                            Text("受限网关 · " + state.gateway.ifBlank { "尚未验证" })
-                            SelectionContainer { Text("手机 HTTPS 地址 · " + state.phone.ifBlank { "尚未验证" }) }
-                            if (state.error.isBlank()) Text("入口已通过电脑的 HTTPS 检查。")
-                            else Text(hostGuidance(state.error), color = MaterialTheme.colors.error)
-                        } ?: Text("正在检查共享服务和手机入口…")
-                        pair?.let { value ->
-                            DesktopPairQr(value)
-                            SelectionContainer { Text("一次性短码 · " + value.code) }
-                            Text("在手机打开「连接我的电脑」扫码，或手填上面的 HTTPS 地址和短码。")
-                        }
-                        if (currentDevices.isEmpty()) Text("尚无已配对手机。")
-                        else {
-                            Text("已配对设备", style = MaterialTheme.typography.subtitle1)
-                            currentDevices.forEach { device ->
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(device.name, Modifier.weight(1f))
-                                    TextButton(enabled = !busy, onClick = { pendingRevoke = device }) { Text("撤销") }
+                        DeviceStep.PAIR -> {
+                            Text("当前 AstrBot 档案 · " + connection.address.ifBlank { "未选中" })
+                            host?.let { state ->
+                                Text("本机共享服务 · " + state.local.ifBlank { "尚未验证" })
+                                Text("受限网关 · " + state.gateway.ifBlank { "尚未验证" })
+                                SelectionContainer { Text("手机 HTTPS 地址 · " + state.phone.ifBlank { "尚未验证" }) }
+                                if (state.error.isBlank()) Text("入口已通过电脑的 HTTPS 检查。")
+                                else if (hostGuidance(state.error) != message) Text(hostGuidance(state.error), color = MaterialTheme.colors.error)
+                            } ?: Text("正在检查共享服务和手机入口…")
+                            pair?.let { value ->
+                                DesktopPairQr(value)
+                                SelectionContainer { Text("一次性短码 · " + value.code) }
+                                Text("在手机打开「连接我的电脑」扫码，或手填上面的 HTTPS 地址和短码。")
+                            }
+                            if (currentDevices.isEmpty()) Text("尚无已配对手机。")
+                            else {
+                                Text("已配对设备", style = MaterialTheme.typography.subtitle1)
+                                currentDevices.forEach { device ->
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(device.name, Modifier.weight(1f))
+                                        TextButton(enabled = !busy, onClick = { pendingRevoke = device }) { Text("撤销") }
+                                    }
                                 }
                             }
-                        }
-                        Divider()
-                        if (sync.unmatchedProfiles.isNotEmpty()) {
-                            Text("待关联的手机来源", style = MaterialTheme.typography.subtitle1)
-                            sync.unmatchedProfiles.forEach { source ->
-                                Text(source.name + " · " + source.username)
-                                SelectionContainer { Text(source.base, style = MaterialTheme.typography.caption) }
-                                TextButton(enabled = !busy && sync.upstreamCandidates.isNotEmpty(),
-                                    onClick = { linking = source.profile }) { Text("选择对应的电脑档案") }
-                            }
-                            if (sync.upstreamCandidates.isEmpty()) Text("请先在电脑连接设置中验证对应的 AstrBot 档案。")
                             Divider()
+                            if (sync.unmatchedProfiles.isNotEmpty()) {
+                                Text("待关联的手机来源", style = MaterialTheme.typography.subtitle1)
+                                sync.unmatchedProfiles.forEach { source ->
+                                    Text(source.name + " · " + source.username)
+                                    SelectionContainer { Text(source.base, style = MaterialTheme.typography.caption) }
+                                    TextButton(enabled = !busy && sync.upstreamCandidates.isNotEmpty(),
+                                        onClick = { linking = source.profile }) { Text("选择对应的电脑档案") }
+                                }
+                                if (sync.upstreamCandidates.isEmpty()) Text("请先在电脑连接设置中验证对应的 AstrBot 档案。")
+                                Divider()
+                            }
+                            Text("收起或退出聊天窗口后，共享服务可继续运行。电脑须开机联网，AstrBot 和手机入口可用时才能生成新回复。")
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(sync.autoStart, enabled = !busy, onCheckedChange = { value -> runAction { sync.setAutostart(value); message = sync.notice } })
+                                Text("Windows 登录后自动恢复服务")
+                            }
+                            Text("停止共享会关闭服务和登录启动。已配对的身份保留，新输入的文字会在本机排队，恢复服务后同步。",
+                                style = MaterialTheme.typography.caption)
+                            Row {
+                                TextButton(enabled = !busy, onClick = { runAction { sync.startHost(); checkHost() } }) { Text("启动服务") }
+                                TextButton(enabled = !busy, onClick = { runAction { sync.stopHost(); pair = null; checkHost() } }) { Text("停止共享") }
+                                TextButton(enabled = !busy, onClick = { runAction { checkHost() } }) { Text("检查入口") }
+                            }
+                            TextButton(enabled = !busy, onClick = { pair = null; message = ""; step = DeviceStep.SOURCE }) { Text("更改 AstrBot 或手机入口") }
                         }
-                        Text("收起或退出聊天窗口后，共享服务可继续运行。电脑须开机联网，AstrBot 和手机入口可用时才能生成新回复。")
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(sync.autoStart, enabled = !busy, onCheckedChange = { value -> runAction { sync.setAutostart(value); message = sync.notice } })
-                            Text("Windows 登录后自动恢复服务")
-                        }
-                        Text("停止共享会关闭服务和登录启动。已配对的身份保留，新输入的文字会在本机排队，恢复服务后同步。",
-                            style = MaterialTheme.typography.caption)
-                        Row {
-                            TextButton(enabled = !busy, onClick = { runAction { sync.startHost(); checkHost() } }) { Text("启动服务") }
-                            TextButton(enabled = !busy, onClick = { runAction { sync.stopHost(); pair = null; checkHost() } }) { Text("停止共享") }
-                            TextButton(enabled = !busy, onClick = { runAction { checkHost() } }) { Text("检查入口") }
-                        }
-                        TextButton(enabled = !busy, onClick = { pair = null; message = ""; step = DeviceStep.SOURCE }) { Text("更改 AstrBot 或手机入口") }
                     }
                 }
-                if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (busy) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                    if (step == DeviceStep.ENDPOINT) Text("正在配置共享服务并检查手机入口…", style = MaterialTheme.typography.body2)
+                }
                 if (message.isNotBlank()) Text(message, style = MaterialTheme.typography.body2)
             }
         },

@@ -19,7 +19,7 @@
 
    | 连接方式 | 在 Windows 上操作 |
    | --- | --- |
-   | 跨网络 · ngrok | 从官网下载 Windows 版并安装，登录自己的 ngrok 账号。已有固定域名时，在「已有 ngrok HTTPS 域名」填账号获配的完整 HTTPS 地址。在「部署配置与 ngrok 授权」可指定 `ngrok.exe` 的完整路径，并输入该账号的 authtoken。ngrok 已在此用户下授权时可留空 token。域名留空时会尝试复用现有隧道，或使用账号可用地址。已有隧道须只提供 HTTPS、关闭请求检查并指向上面的受限网关。 [ngrok Windows 下载](https://ngrok.com/download/windows) · [ngrok 账号](https://dashboard.ngrok.com/) |
+   | 跨网络 · ngrok | 从官网下载 Windows 版并安装，登录自己的 ngrok 账号。已有固定域名时，在「已有 ngrok HTTPS 域名」填账号获配的完整 HTTPS 地址。在「部署配置与 ngrok 授权」可指定 `ngrok.exe` 的完整路径。授权框可粘贴该账号的 authtoken，也可粘贴官网提供的完整 `ngrok config add-authtoken TOKEN` 命令。ngrok 已在此用户下授权时可留空 token。域名留空时会尝试复用现有隧道，或使用账号可用地址。已有隧道须只提供 HTTPS、关闭请求检查并指向上面的受限网关。 [ngrok Windows 下载](https://ngrok.com/download/windows) · [ngrok 账号](https://dashboard.ngrok.com/) |
    | 局域网或已有可信 HTTPS 域名 | 在这台电脑上的 HTTPS 反向代理中，把用于设备同步的域名转发至上述受限网关。手机和电脑均须能解析、访问该域名并信任证书。局域网方式让手机连接相应 Wi-Fi。在「手机 HTTPS 地址」填写完整 HTTPS 地址，可带端口，不加路径或查询参数。沿用旧版局域网证书时，在局域网 DNS 中将 `chatbox.home.arpa` 指向电脑。Android 对用户安装的 CA 仅为此域名开放信任。 |
 
    **请按用途填地址。**「AstrBot 地址」供电脑请求模型。「本机共享服务」是管理和历史服务的回环地址，端口由程序分配，只在电脑使用。手机填「手机 HTTPS 地址」，其代理目标只选受限网关。这样手机入口仅开放设备配对、读写会话等指定操作。邀请签发、设备撤销、上游配置和 AstrBot WebUI 均留在电脑侧。

@@ -18,7 +18,7 @@ import unittest
 
 from shared_service import device_runtime as runtime
 from shared_service.device_gateway import Gateway, RuntimeFault, check_gateway
-from shared_service.device_tunnel import selected_url
+from shared_service.device_tunnel import _authtoken, selected_url, tunnels
 
 
 class RecordingBackend(BaseHTTPRequestHandler):
@@ -69,6 +69,26 @@ class RuntimeBoundaryTest(unittest.TestCase):
                     client.request(method, path, b"{}" if method == "POST" else None)
                     self.assertEqual(client.getresponse().status, 200 if path == runtime.PROBE else 401)
             self.assertEqual(len(backend.requests), before + len(runtime.PUBLIC_ROUTES))
+
+    def test_absent_tunnel_api_returns_empty_list(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as unused:
+            unused.bind(("127.0.0.1", 0))
+            self.assertEqual(tunnels(unused.getsockname()[1]), [])
+
+    def test_authtoken_accepts_raw_value_and_documented_command(self):
+        token = "fixture-token"
+        prefix = "ngrok config add-authtoken "
+        for value in (token, prefix + token, prefix + "'" + token + "'", prefix + '"' + token + '"'):
+            with self.subTest(value=value):
+                self.assertEqual(_authtoken(value), token)
+
+    def test_authtoken_rejects_malformed_input_without_echoing_it(self):
+        prefix = "ngrok config add-authtoken "
+        for value in (" ", "two words", prefix, prefix + " token", prefix + "token extra",
+                      prefix + "'unclosed", prefix + '"two words"', prefix + "token\nsecond",
+                      "ngrok\tconfig add-authtoken token", "token\x00"):
+            with self.subTest(value=value), self.assertRaisesRegex(RuntimeFault, "^ngrok_auth_required$"):
+                _authtoken(value)
 
     def test_tunnel_selection_requires_target_https_and_no_inspection(self):
         target, public = "http://127.0.0.1:18766", "https://example.invalid"
@@ -164,7 +184,7 @@ read=t.tunnels
 t.tunnels=lambda port: [] if port==4040 else read(port)
 t.default_config=lambda: None
 config={'mode':'ngrok','ngrokPath':sys.executable,'phoneUrl':'https://fixture.invalid'}
-with t.endpoint(root,config,'http://127.0.0.1:18766','fixture-token') as (url,process):
+with t.endpoint(root,config,'http://127.0.0.1:18766','ngrok config add-authtoken fixture-token') as (url,process):
     assert url == config['phoneUrl'] and process.poll() is None
 assert process.poll() is not None
 """

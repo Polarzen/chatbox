@@ -23,7 +23,8 @@ else:
 
 def tunnels(port):
     try:
-        with closing(http.client.HTTPConnection("127.0.0.1", port, timeout=2)) as client:
+        # Windows can take just over two seconds to report a refused loopback connection.
+        with closing(http.client.HTTPConnection("127.0.0.1", port, timeout=4)) as client:
             client.request("GET", "/api/tunnels")
             response = client.getresponse()
             if response.status != 200:
@@ -70,6 +71,17 @@ def default_config():
         locations.append(Path(os.environ["LOCALAPPDATA"]) / "ngrok/ngrok.yml")
     locations += [Path.home() / ".config/ngrok/ngrok.yml", Path.home() / ".ngrok2/ngrok.yml"]
     return next((path for path in locations if path.is_file()), None)
+
+
+def _authtoken(value):
+    prefix = "ngrok config add-authtoken "
+    if value.startswith(prefix):
+        value = value[len(prefix):]
+        if len(value) >= 2 and value[0] in ("'", '"') and value[-1] == value[0]:
+            value = value[1:-1]
+    if not re.fullmatch(r"""[^\s'"\x00]+""", value):
+        raise RuntimeFault("ngrok_auth_required")
+    return value
 
 
 def own_child_lifetime():
@@ -149,7 +161,7 @@ def endpoint(root, config, gateway_url, token):
     environment = dict(os.environ)
     environment.pop("ASTRBOT_CHAT_KEY", None)
     if token:
-        environment["NGROK_AUTHTOKEN"] = token
+        environment["NGROK_AUTHTOKEN"] = _authtoken(token)
     own_child_lifetime()
     process = subprocess.Popen(arguments, env=environment, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

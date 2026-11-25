@@ -638,6 +638,7 @@ internal class DesktopDeviceSync(
         is DeviceHostFailure -> when (e.code) {
             "service_offline", "not_configured" -> "共享服务离线，待发内容已保存在电脑。"
             "gateway_unreachable", "gateway_identity_mismatch" -> "无法验证手机访问地址，请检查 HTTPS 地址与网关。"
+            "ngrok_api_unavailable" -> hostGuidance(e.code)
             "ngrok_auth_required", "ngrok_missing" -> "请检查 ngrok 程序及其授权。"
             "db_in_use" -> "原共享数据库正在使用，请先停止占用它的服务。"
             "gateway_port_in_use" -> "手机网关端口已被占用。"

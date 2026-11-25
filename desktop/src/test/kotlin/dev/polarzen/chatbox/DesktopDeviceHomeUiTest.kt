@@ -11,6 +11,8 @@ import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
 import java.nio.file.Files
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
@@ -20,9 +22,11 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.isOff
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.dp
 import org.junit.Assert.*
 import org.junit.Rule
@@ -168,6 +172,46 @@ class DesktopDeviceHomeUiTest {
         ui.onNodeWithText("查看此档案的本机原文").performClick()
         frame()
         ui.onNodeWithText("合并前回答", substring = true).assertIsDisplayed()
+    }
+
+    @Test fun enableShowsProgressAndNgrokRecoveryBesideControlsWithExpandedForm() {
+        val store = DesktopStore(dir.resolve("history.json"))
+        val profile = store.createProfile("https://astrbot.example")
+        val keys = NamedKeys(dir, DesktopCredentials(dir.resolve("keys")))
+        val finish = CountDownLatch(1)
+        val sync = DesktopDeviceSync(store, keys) { request ->
+            check(request.getString("action") == "configure")
+            check(finish.await(20, TimeUnit.SECONDS))
+            JSONObject().put("ok", false).put("error", "ngrok_api_unavailable")
+        }
+        val connection = DesktopConnection(profile.id, profile.address, listOf(profile), emptyList(), KeyList(emptyList(), null),
+            connected = true, verifying = false, pendingKeyId = null, error = null, keyErrors = emptyMap(), activeLabel = null,
+            selectProfileAction = { _, _ -> }, adoptSelectedProfileAction = {}, useAddressAction = {}, verifyAction = {},
+            selectKeyAction = {}, addKeyAction = { _, _ -> }, renameKeyAction = { _, _ -> }, removeKeyAction = {},
+            snapshotAction = { DesktopSendTarget(profile.id, profile.address, "test", false, 1) {} }, invalidateAction = {})
+        ui.setContent { MaterialTheme { DesktopDeviceWizard(store, connection, sync) {} } }
+        frame()
+        ui.onNodeWithText("下一步").performSemanticsAction(SemanticsActions.OnClick)
+        frame()
+        ui.onNodeWithText("部署配置与 ngrok 授权").performSemanticsAction(SemanticsActions.OnClick)
+        frame()
+        ui.onNode(isOff()).performScrollTo().performSemanticsAction(SemanticsActions.OnClick)
+        frame()
+        ui.onNodeWithText("AstrBot · " + profile.address).performScrollTo()
+        val enable = ui.onNodeWithText("开启共享并生成配对码")
+        try {
+            enable.assertIsDisplayed().performSemanticsAction(SemanticsActions.OnClick)
+            frame()
+            ui.onNodeWithText("正在配置共享服务并检查手机入口…").assertIsDisplayed()
+            enable.assertIsDisplayed()
+        } finally { finish.countDown() }
+        ui.waitUntil(5_000) {
+            ui.mainClock.advanceTimeByFrame()
+            ui.onAllNodesWithText("4040", substring = true).fetchSemanticsNodes().isNotEmpty()
+        }
+        ui.onNodeWithText("4040", substring = true).assertIsDisplayed()
+        enable.assertIsDisplayed()
+        assertFalse(sync.enabled)
     }
 
     @Test fun firstLaunchCanStayLocalAndReopenSetupWithoutEnablingSharing() {
