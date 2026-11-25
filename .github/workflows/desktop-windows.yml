@@ -23,6 +23,11 @@ on:
       - 'gradlew*'
       - '.github/workflows/desktop-windows.yml'
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Sign Android and publish the verified installers
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -142,3 +147,80 @@ jobs:
           path: app/build/outputs/apk/release/app-release-unsigned.apk
           retention-days: 7
           if-no-files-found: error
+
+  publish:
+    if: github.ref == 'refs/heads/main' && ((github.event_name == 'workflow_dispatch' && inputs.publish) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish installers]')))
+    needs: [windows, android-regression]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Chatbox-Windows-MSI
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: Chat-Box-Android-Unsigned
+          path: unsigned
+      - name: Prepare matching Windows and Android packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools_dir=$(find "$ANDROID_HOME/build-tools" -name apksigner -printf '%h\n' | sort -V | tail -1)
+          echo "TOOLS_DIR=$tools_dir" >> "$GITHUB_ENV"
+          apk=unsigned/app-release-unsigned.apk
+          version=$("$tools_dir/aapt2" dump badging "$apk" | sed -nE "s/^package: .*versionName='([^']+)'.*/\1/p")
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test -s "dist/Chatbox-$version.msi"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          "$tools_dir/zipalign" -P 16 -f 4 "$apk" "$RUNNER_TEMP/aligned.apk"
+      - name: Sign APK with the existing Android release key
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${KEYSTORE_BASE64:?Configure ANDROID_KEYSTORE_BASE64 with the existing signing keystore}"
+          : "${STORE_PASSWORD:?Configure ANDROID_KEYSTORE_PASSWORD}"
+          : "${KEY_ALIAS:?Configure ANDROID_KEY_ALIAS}"
+          : "${KEY_PASSWORD:?Configure ANDROID_KEY_PASSWORD}"
+          umask 077
+          ks="$RUNNER_TEMP/chatbox-release.keystore"
+          trap 'rm -f "$ks"' EXIT
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$ks"
+          "$TOOLS_DIR/apksigner" sign --ks "$ks" --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:STORE_PASSWORD --key-pass env:KEY_PASSWORD \
+            --out "dist/Chatbox-$VERSION.apk" "$RUNNER_TEMP/aligned.apk"
+      - name: Verify signer continuity and publish both installers
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          previous=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)
+          gh release download "$previous" --pattern '*.apk' --dir "$RUNNER_TEMP/previous"
+          signer() {
+            "$TOOLS_DIR/apksigner" verify --print-certs "$1" |
+              sed -nE 's/^Signer #[0-9]+ certificate SHA-256 digest: //p' | sort
+          }
+          old=$(signer "$RUNNER_TEMP"/previous/*.apk)
+          new=$(signer "dist/Chatbox-$VERSION.apk")
+          test -n "$old" && test "$old" = "$new" || { echo "Android release signer mismatch"; exit 1; }
+          cd dist
+          sha256sum "Chatbox-$VERSION.apk" "Chatbox-$VERSION.msi" > SHA256SUMS.txt
+          tag="v$VERSION"
+          if gh release view "$tag" --json isDraft,targetCommitish > "$RUNNER_TEMP/existing.json"; then
+            jq -e --arg sha "$GITHUB_SHA" '.isDraft and .targetCommitish == $sha' "$RUNNER_TEMP/existing.json"
+          else
+            gh release create "$tag" --draft --target "$GITHUB_SHA" --title "Chat Box $tag" \
+              --notes "Windows 和安卓安装包已通过 GitHub Actions 验证。安卓 APK 已与上一正式版比对签名。"
+          fi
+          gh release upload "$tag" "Chatbox-$VERSION.apk" "Chatbox-$VERSION.msi" SHA256SUMS.txt --clobber
+          gh release download "$tag" --pattern 'Chatbox-*' --dir "$RUNNER_TEMP/recheck"
+          (cd "$RUNNER_TEMP/recheck" && sha256sum -c "$GITHUB_WORKSPACE/dist/SHA256SUMS.txt")
+          gh release edit "$tag" --draft=false --latest
