@@ -91,6 +91,32 @@ jobs:
           path: desktop/build/reports/tests/test/
           retention-days: 7
           if-no-files-found: ignore
+  windows-uninstall:
+    needs: windows
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Chatbox-Windows-MSI
+          path: ${{ runner.temp }}/chatbox-uninstall-package
+      - name: Install and completely uninstall the packaged Windows app
+        shell: pwsh
+        run: |
+          $packages = @(Get-ChildItem "${{ runner.temp }}\chatbox-uninstall-package\*.msi" -File)
+          if ($packages.Count -ne 1) { throw 'Expected exactly one verified MSI package.' }
+          & .\desktop\test-windows-uninstall.ps1 -MsiPath $packages[0].FullName
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Chatbox-Windows-Uninstall-Logs
+          path: |
+            ${{ runner.temp }}/chatbox-uninstall-regression-*/**/*.log
+            ${{ runner.temp }}/chatbox-uninstall-regression-*/**/*.json
+            ${{ runner.temp }}/chatbox-uninstall-regression-*/**/*.txt
+          retention-days: 7
+          if-no-files-found: ignore
   android-regression:
     runs-on: ubuntu-24.04
     timeout-minutes: 25

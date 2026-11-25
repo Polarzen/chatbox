@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$MsiPath,
 
-    [string]$ExpectedVersion = '0.1.14'
+    [string]$ExpectedVersion = '0.1.24'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -208,6 +208,43 @@ function Add-ReplyToastRegistration($Database) {
     }
 }
 
+function Add-FullUninstallShortcut($Database) {
+    $files = @(Get-MsiRows $Database 'File' @('File', 'Component_', 'FileName'))
+    $components = @(Get-MsiRows $Database 'Component' @('Component', 'Directory_'))
+    $tracked = @{}
+    foreach ($name in @('Chatbox.exe', 'uninstall.cmd', 'Uninstall-ChatBox.ps1', 'Uninstall-ChatBoxData.ps1')) {
+        $matches = @($files | Where-Object { ($_.FileName -split '\|')[-1] -ceq $name })
+        if ($matches.Count -ne 1) { throw "Expected one tracked $name for complete uninstall." }
+        $component = @($components | Where-Object { $_.Component -ceq $matches[0].Component_ })
+        if ($component.Count -ne 1) { throw "Expected one component for $name." }
+        $tracked[$name] = [pscustomobject]@{ File = $matches[0]; Directory = $component[0].Directory_ }
+    }
+    $installDirectory = $tracked['Chatbox.exe'].Directory
+    foreach ($name in @('uninstall.cmd', 'Uninstall-ChatBox.ps1', 'Uninstall-ChatBoxData.ps1')) {
+        if ($tracked[$name].Directory -cne $installDirectory) {
+            throw "$name must be installed beside Chatbox.exe."
+        }
+    }
+    $launcherTarget = '[#' + $tracked['Chatbox.exe'].File.File + ']'
+    $mainShortcuts = @(Get-MsiRows $Database 'Shortcut' @('Shortcut', 'Directory_', 'Name', 'Target', 'Arguments') | Where-Object {
+        (($_.Name -split '\|')[-1] -eq 'Chat Box') -and $_.Target -ceq $launcherTarget -and -not $_.Arguments
+    })
+    if ($mainShortcuts.Count -ne 1) { throw 'Expected one Chat Box Start menu shortcut before adding complete uninstall.' }
+
+    # This explicit entry owns data erasure. MSI removal during an upgrade never runs it.
+    Add-MsiRowIfMissing $Database 'Shortcut' ([ordered]@{
+        Shortcut = 'ChatboxFullUninstall'
+        Directory_ = $mainShortcuts[0].Directory_
+        Name = 'UninstCB|Uninstall Chat Box'
+        Component_ = $tracked['uninstall.cmd'].File.Component_
+        Target = '[#' + $tracked['uninstall.cmd'].File.File + ']'
+        Arguments = $null
+        Description = 'Uninstall Chat Box and permanently delete local data for the current Windows user.'
+        ShowCmd = 1
+        WkDir = $installDirectory
+    }) @('Directory_', 'Name')
+}
+
 $installer = $null
 $database = $null
 try {
@@ -360,11 +397,13 @@ try {
     }
 
     Add-ReplyToastRegistration $database
+    Add-FullUninstallShortcut $database
     [void]$database.Commit()
     Write-Output "Patched MSI database: $MsiPath"
     Write-Output "  ProductVersion: $ExpectedVersion"
     Write-Output '  REINSTALLMODE: amus'
     Write-Output '  Recursive uninstall rows/actions: 0'
+    Write-Output '  Complete uninstall: tracked scripts and explicit Start menu entry'
     Write-Output "  Legacy 0.1.1 guard: $guardCondition"
     Write-Output "  RemoveExistingProducts sequence: $newRemoveSequence"
 }

@@ -49,7 +49,7 @@ if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
         from(toastDll) { into("win32-x86-64") }
     }
 }
-val windowsPackageVersion = "0.1.23"
+val windowsPackageVersion = "0.1.24"
 compose.desktop {
     application {
         mainClass = "dev.polarzen.chatbox.DesktopMainKt"
@@ -74,7 +74,24 @@ val desktopSmoke by tasks.registering(JavaExec::class) {
 }
 
 val packagedMsi = layout.buildDirectory.file("compose/binaries/main/msi/Chatbox-${windowsPackageVersion}.msi")
+val uninstallSources = layout.projectDirectory.dir("uninstall")
 tasks.configureEach {
+    if (name == "createDistributable" && System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
+        inputs.files(
+            uninstallSources.file("uninstall.cmd"),
+            uninstallSources.file("Uninstall-ChatBox.ps1"),
+            uninstallSources.file("Uninstall-ChatBoxData.ps1")
+        )
+        doLast {
+            // packageMsi consumes this app image, so the uninstaller becomes tracked MSI files.
+            val appImage = layout.buildDirectory.dir("compose/binaries/main/app/Chatbox").get().asFile
+            if (!appImage.resolve("Chatbox.exe").isFile) error("Expected Windows app image at ${appImage.absolutePath}")
+            project.copy {
+                from(uninstallSources) { include("uninstall.cmd", "Uninstall-ChatBox.ps1", "Uninstall-ChatBoxData.ps1") }
+                into(appImage)
+            }
+        }
+    }
     if (name == "packageMsi") {
         inputs.file(layout.projectDirectory.file("patch-windows-msi.ps1"))
         doLast {
