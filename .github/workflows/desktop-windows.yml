@@ -196,8 +196,6 @@ jobs:
       cancel-in-progress: false
     env:
       GH_TOKEN: ${{ github.token }}
-      CHATBOX_RELEASE_INPUT: ${{ runner.temp }}/chatbox-release-input
-      CHATBOX_RELEASE_OUTPUT: ${{ runner.temp }}/chatbox-release-output
     steps:
       - uses: actions/checkout@v4
         with:
@@ -243,6 +241,10 @@ jobs:
               output.write('publish=' + str(publish).lower() + '\n')
               output.write('version=' + version + '\n')
               output.write('notes=' + notes.as_posix() + '\n')
+          temporary = Path(os.environ['RUNNER_TEMP'])
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as environment:
+              environment.write('CHATBOX_RELEASE_INPUT=' + str(temporary / 'chatbox-release-input') + '\n')
+              environment.write('CHATBOX_RELEASE_OUTPUT=' + str(temporary / 'chatbox-release-output') + '\n')
           PY
       - uses: actions/download-artifact@v4
         if: steps.release.outputs.publish == 'true'
