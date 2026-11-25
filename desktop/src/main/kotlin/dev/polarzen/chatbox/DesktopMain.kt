@@ -1,20 +1,21 @@
 package dev.polarzen.chatbox
 
 import androidx.compose.material.AlertDialog
-import androidx.compose.material.Icon
-import androidx.compose.material.IconButton
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Search
+import androidx.compose.foundation.layout.*
+import androidx.compose.material.DropdownMenu
+import androidx.compose.material.DropdownMenuItem
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.unit.sp
+import org.json.JSONObject
+import java.util.UUID
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -85,6 +86,15 @@ fun main(args: Array<String>) {
     runDesktopShell(args)
 }
 
+private data class ContextNoticeEvidence(
+    val question: String, val preferences: ConversationPreferences, val result: AstrBotContextPreview,
+)
+
+private data class ContextSendReview(
+    val prefs: ConversationPreferences, val question: String, val editorSerial: Long, val retry: Entry?,
+    val targetGeneration: Long?, val request: JSONObject?, val preview: AstrBotContextPreview?,
+)
+
 private data class SendOperation(
     val id: Int,
     val key: SessionKey,
@@ -142,6 +152,8 @@ internal fun DesktopScreen(
     deviceSync: DesktopDeviceSync? = null,
     firstDeviceSetup: Boolean = false,
     onDeviceSetupSeen: () -> Unit = {},
+    initialSidebarPinned: Boolean = false,
+    onSidebarPinned: (Boolean) -> Unit = {},
     appearanceActions: @Composable () -> Unit = {},
 ) {
     val replyAudioCache = remember(replyImageCache) { ReplyAudioCache(replyImageCache.directory.resolveSibling("reply-audio")) }
@@ -287,8 +299,81 @@ internal fun DesktopScreen(
     val editor = loadedDraft.getOrNull()
     val draft = editor?.field ?: TextFieldValue()
     val currentImages = editor?.draft?.attachments.orEmpty()
+    LaunchedEffect(currentKey, deviceRevision, editor?.commitInProgress, preparing == null,
+        editor?.field?.composition == null, composer.recordingKey) {
+        if (editor != null && preparing == null && deviceManaged) {
+            try {
+                if (composer.restoreRejectedDraft(currentKey)) sessionsRevision.intValue++
+            } catch (_: Exception) { notices[currentKey] = "未发出的草稿仍保存在本机，暂时无法更新输入框。" }
+        }
+    }
+    val preferenceOwner = deviceSync ?: remember(store, keys) { DesktopDeviceSync(store, keys) }
+    val handle by remember(preferenceOwner, currentKey, sessionsRevision.intValue) {
+        derivedStateOf { preferenceOwner.preferences(currentKey) }
+    }
+    val prefs = handle.value
+    var nameEditor by remember(currentKey) { mutableStateOf<ChatPreferenceHandle?>(null) }
+    var contextEditor by remember(currentKey) { mutableStateOf<ChatPreferenceHandle?>(null) }
+    var addingPin by remember(currentKey) { mutableStateOf<ContextPin?>(null) }
+    var contextReview by remember(currentKey) { mutableStateOf<ContextSendReview?>(null) }
+    var confirmNew by remember(currentKey) { mutableStateOf(false) }
+    var remind by remember(currentKey, prefs.remindAfter) { mutableStateOf(false) }
+    val contextTurns = remember(currentKey, storedChat, deviceRevision, handle.ready) {
+        storedChat.entries.mapIndexedNotNull { index, entry ->
+            handle.sequenceAt(index)?.let { seq -> ContextTurn(seq, entry.question, entry.answer,
+                if (entry.status == "已完成") "complete" else "unknown") }
+        }
+    }
+    var evidence by remember(currentKey, prefs.recentTurns, prefs.pins, draft.text) { mutableStateOf<ContextNoticeEvidence?>(null) }
+    var serviceReminder by remember(currentKey, prefs.recentTurns, prefs.pins, draft.text) { mutableStateOf<String?>(null) }
+    LaunchedEffect(evidence) {
+        val observed = evidence ?: return@LaunchedEffect
+        if (!observed.result.supported || observed.question != draft.text.trim() || observed.preferences.recentTurns == null ||
+            observed.preferences.recentTurns != prefs.recentTurns || observed.preferences.pins != prefs.pins) return@LaunchedEffect
+        val through = contextTurns.filter { it.status == "complete" }.maxOfOrNull { it.seq } ?: 0L
+        try {
+            for ((kind, active) in contextNoticeConditions(observed.result, contextTurns, prefs)) {
+                val show = handle.observeNotice(kind, through, active)
+                if (!active && serviceReminder == kind) serviceReminder = null
+                if (show && (serviceReminder == null || kind == "capacity")) serviceReminder = kind
+            }
+        } catch (e: CancellationException) { throw e }
+        catch (_: Exception) { /* Keep chatting when the cross-device notice cannot be claimed. */ }
+    }
+    val completed = completedContextTurns(contextTurns)
+    LaunchedEffect(handle.identity, prefs.remindAfter, completed, handle.ready, handle.pending,
+        handle.conflicts, refreshOnFocus, deviceSync?.notice) {
+        if (prefs.remindAfter?.let { completed >= it } == true) {
+            try { if (handle.claimReminder(completed)) remind = true }
+            catch (e: CancellationException) { throw e }
+            catch (_: Exception) { /* The next focus or synchronization retries the claim. */ }
+        }
+    }
+    fun openContext(pin: ContextPin? = null) {
+        addingPin = pin
+        contextEditor = handle
+    }
+    suspend fun previewContext(value: ConversationPreferences, question: String): AstrBotContextPreview {
+        if (deviceManaged) {
+            if (handle.contextPending)
+                return AstrBotContextPreview.unavailable("上下文设置尚未同步，请先核对两台设备的选择。")
+            if (value.recentTurns != prefs.recentTurns || value.pins != prefs.pins)
+                return AstrBotContextPreview.unavailable("保存并同步后，服务将核对这项选择。")
+            return preferenceOwner.previewContext(currentKey, question)
+        }
+        val target = runCatching { connection.snapshot() }.getOrNull()
+            ?: return AstrBotContextPreview.unavailable("连接服务后可核对其上下文能力。")
+        val request = try { astrBotContext(value, contextTurns) } catch (e: Exception) {
+            return AstrBotContextPreview.unavailable(preferenceFailure(e))
+        }
+        return withContext(Dispatchers.IO) {
+            target.checkTarget()
+            previewAstrBotContext(target.address, target.token, store.username, currentKey.sessionId,
+                question, request, target.allowLoopbackHttp)
+        }
+    }
     val isOffline = selectedProfile?.offlineOnly == true
-    fun hasScreenModal() = deviceWizard || searchOpen || whaleLoginTarget != null || retryConfirmation != null || closeError != null || closingNow()
+    fun hasScreenModal() = nameEditor != null || contextEditor != null || contextReview != null || confirmNew || deviceWizard || searchOpen || whaleLoginTarget != null || retryConfirmation != null || closeError != null || closingNow()
     val screenModal = hasScreenModal()
     DesktopModalGuard(screenModal)
     val navigating = openReply != null && !screenModal
@@ -421,7 +506,7 @@ internal fun DesktopScreen(
 
     fun startRequest(
         clickedAtNanos: Long, targetKey: SessionKey, target: DesktopSendTarget, entry: Entry,
-        pending: Chat, attachments: List<Path>, taskSession: WhaleTaskSession?,
+        pending: Chat, attachments: List<Path>, taskSession: WhaleTaskSession?, approved: ContextSendReview?,
     ) {
         unsavedReplies.remove(targetKey)
         chats[targetKey] = pending
@@ -512,6 +597,14 @@ internal fun DesktopScreen(
                             requestStarted = true
                         },
                     )
+                } else if (approved != null) {
+                    requestStarted = true
+                    sendAstrBotContext(target.address, target.token, store.username, targetKey.sessionId, query,
+                        checkNotNull(approved.request), checkNotNull(approved.preview).revision, UUID.randomUUID().toString(),
+                        target.allowLoopbackHttp,
+                        onReplyImage = { id, offset -> receiveAttachment(ReplyAttachmentType.IMAGE, id, offset) },
+                        onReplyAudio = { id, offset -> receiveAttachment(ReplyAttachmentType.AUDIO, id, offset) },
+                        onEvent = ::observeTransportEvent, onText = ::receiveText)
                 } else if (attachments.isEmpty()) {
                     requestStarted = true
                     sendToAstrBot(
@@ -570,6 +663,13 @@ internal fun DesktopScreen(
                 if (failure is WhaleTaskLoginRequiredException && taskSession != null &&
                     whaleTargetCurrent(target) && whaleSession === taskSession
                 ) whaleSession = null
+                if (result.isSuccess && saved.isSuccess && approved != null && approved.retry == null) {
+                    val source = composer.editor(targetKey)
+                    if (source != null && source.editSerial == approved.editorSerial && source.draft.text.trim() == approved.question) {
+                        if (runCatching { store.saveDraft(targetKey, store.nextDraftRevision(), ComposerDraft()) }.isSuccess)
+                            composer.consumed(targetKey, source.revision)
+                    }
+                }
                 if (saved.isFailure) unsavedReplies[targetKey] = completed
                 chats[targetKey] = completed
                 sessionsRevision.intValue++
@@ -601,17 +701,47 @@ internal fun DesktopScreen(
         }
     }
 
-    fun dispatch(retryEntry: Entry? = null, targetKey: SessionKey = currentKey) {
+    fun dispatch(retryEntry: Entry? = null, targetKey: SessionKey = currentKey, approved: ContextSendReview? = null) {
         val clickedAtNanos = System.nanoTime()
         if (targetKey != currentKey || protectedHistory || editor == null ||
             composerLockedNow() || sending != null || preparing != null ||
             composer.recordingKey == targetKey || (retryEntry == null && editor.field.composition != null)
         ) return
+        val latestPrefs = preferenceOwner.preferences(currentKey)
+        val question = retryEntry?.question ?: editor.draft.text.trim()
+        val conflicts = latestPrefs.conflicts.any { it == "pins" || it == "recentTurns" }
+        if (conflicts || latestPrefs.contextPending) {
+            notices[currentKey] = "请先核对并同步上下文设置。"
+            openContext()
+            return
+        }
+        if (approved != null && (latestPrefs.value != approved.prefs || question != approved.question ||
+                editor.editSerial != approved.editorSerial || approved.preview?.canSend != true ||
+                !deviceManaged && runCatching { connection.snapshot()?.bindingGeneration }.getOrNull() != approved.targetGeneration)) {
+            notices[currentKey] = CONTEXT_CHANGED
+            return
+        }
+        if (latestPrefs.value.recentTurns != null) {
+            val hasMedia = if (retryEntry == null) editor.draft.attachments.isNotEmpty() || composer.pendingImport(targetKey) != null
+                else retryEntry.attachmentReferences.isNotEmpty() || retryEntry.attachmentDisplayName != null
+            if (hasMedia || profileId.startsWith("launcher:") && isWhaleTaskCommand(question.trimStart())) {
+                notices[currentKey] = if (hasMedia) CUSTOM_CONTEXT_MEDIA_NOTICE else "鲸鱼任务需使用服务默认上下文。"
+                return
+            }
+            if (approved == null) {
+                val request = if (deviceManaged) null else try { astrBotContext(latestPrefs.value, contextTurns) }
+                    catch (e: Exception) { notices[currentKey] = preferenceFailure(e); return }
+                contextReview = ContextSendReview(latestPrefs.value, question, editor.editSerial, retryEntry,
+                    if (deviceManaged) null else runCatching { connection.snapshot()?.bindingGeneration }.getOrNull(),
+                    request, null)
+                return
+            }
+        }
         if (deviceManaged) {
             if (retryEntry != null || deviceSync.reason(targetKey).isNotBlank()) return
             val job = scope.launch(start = CoroutineStart.LAZY) {
                 try {
-                    sendDeviceDraft(deviceSync, targetKey, editor, composer, store, replyImageCache, replyAudioCache) { message ->
+                    sendDeviceDraft(deviceSync, targetKey, editor, composer, store, replyImageCache, replyAudioCache, approved?.preview?.revision) { message ->
                         if (message == null) notices.remove(targetKey) else notices[targetKey] = message
                     }
                     sessionsRevision.intValue++
@@ -698,6 +828,13 @@ internal fun DesktopScreen(
                     notices[targetKey] = error
                     return@launch
                 }
+                val dispatchPrefs = preferenceOwner.preferences(targetKey)
+                if (dispatchPrefs.value.recentTurns != approved?.prefs?.recentTurns ||
+                    dispatchPrefs.value.pins != approved?.prefs?.pins.orEmpty() ||
+                    dispatchPrefs.conflicts.any { it == "pins" || it == "recentTurns" }) {
+                    notices[targetKey] = CONTEXT_CHANGED
+                    return@launch
+                }
                 if (retryEntry == null) {
                     editor.commitInProgress = true
                     locked = true
@@ -712,13 +849,16 @@ internal fun DesktopScreen(
                 val pending = withContext(Dispatchers.IO) {
                     val stored = current ?: store.sessionContent(targetKey.profileId, targetKey.sessionId)
                     val updated = stored.copy(entries = stored.entries + entry)
-                    if (retryEntry == null) store.commitDraft(targetKey, revision, updated)
-                    else store.saveSessionContent(targetKey.profileId, updated)
+                    if (retryEntry == null && approved == null) store.commitDraft(targetKey, revision, updated)
+                    else {
+                        if (retryEntry == null) store.saveDraft(targetKey, revision, committed)
+                        store.saveSessionContent(targetKey.profileId, updated)
+                    }
                     updated
                 }
                 if (targetKey in deletedSessionKeys) return@launch
-                if (retryEntry == null) composer.consumed(targetKey, revision)
-                startRequest(clickedAtNanos, targetKey, target, entry, pending, paths, taskSession)
+                if (retryEntry == null && approved == null) composer.consumed(targetKey, revision)
+                startRequest(clickedAtNanos, targetKey, target, entry, pending, paths, taskSession, approved)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -805,6 +945,12 @@ internal fun DesktopScreen(
             }.onFailure { notices[currentKey] = "无法打开所选会话。" }
         }
     }
+    fun newConversation() {
+        if (canCreate && !composerLockedNow()) {
+            val preferred = newSources.firstOrNull { it.id == store.activeProfileId } ?: newSources.singleOrNull()
+            if (preferred != null) createAt(preferred) else chooseNewSource = true
+        }
+    }
     val deviceReason = if (deviceManaged) deviceSync?.reason(currentKey).orEmpty() else ""
     val devicePending = if (deviceManaged) deviceSync?.pending(currentKey) ?: 0 else 0
     val sendRouteReady = if (deviceManaged) deviceReason.isBlank() else connection.connected && !connection.verifying
@@ -871,19 +1017,61 @@ internal fun DesktopScreen(
                     .onSuccess { sessionsRevision.intValue++ }
                     .exceptionOrNull()?.let { safeHistoryFailureMessage(it, "写入") }
             },
-            onNewSession = {
-                if (canCreate && !composerLockedNow()) {
-                    val preferred = newSources.firstOrNull { it.id == profileId } ?: newSources.singleOrNull()
-                    if (preferred != null) createAt(preferred) else chooseNewSource = true
+            onNewSession = { if (canCreate && !composerLockedNow()) confirmNew = true },
+            canCreate = canCreate,
+            onOpenSearch = { searchOpen = true },
+            partnerName = prefs.effectiveName,
+            initialSidebarPinned = initialSidebarPinned, onSidebarPinned = onSidebarPinned,
+            settingsLabel = "设置 · " + if (deviceManaged) deviceSync.notice else if (connection.connected) "已连接" else "未连接",
+            pinnedMessage = { index, role -> prefs.pins.isNotEmpty() && handle.sequenceAt(index)?.let { ContextPin(it, role) in prefs.pins } == true },
+            onToggleMessage = if (!handle.ready) null else toggle@{ index, role ->
+                val seq = handle.sequenceAt(index)
+                if (seq == null) { notices[currentKey] = "此消息尚未与共享会话核对。"; return@toggle }
+                val pin = ContextPin(seq, role)
+                if ("pins" in handle.conflicts) { openContext(); return@toggle }
+                if (prefs.recentTurns == null) openContext(pin) else try {
+                    handle.save(prefs.copy(pins = if (pin in prefs.pins) prefs.pins - pin else prefs.pins + pin))
+                } catch (e: Exception) { notices[currentKey] = preferenceFailure(e) }
+            },
+            reminderContent = {
+                if (remind || serviceReminder != null) Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp).testTag("context-reminder"),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(when (serviceReminder) {
+                        "capacity" -> "模型容量预计不足"
+                        "rolling" -> "下一轮将移出最近范围内的消息"
+                        else -> "自设轮数提醒 · 已满 ${prefs.remindAfter} 轮"
+                    }, Modifier.weight(1f), fontSize = 12.sp)
+                    TextButton(onClick = { openContext() }) { Text("调整上下文", fontSize = 12.sp) }
+                    TextButton(onClick = { confirmNew = true }, enabled = canCreate) { Text("新开会话", fontSize = 12.sp) }
+                    ChatIconButton(DesktopChatIcon.Close, "稍后处理", "dismiss-context-reminder", { if (serviceReminder != null) serviceReminder = null else remind = false })
                 }
             },
-            canCreate = canCreate,
             topActions = {
+                var expanded by remember { mutableStateOf(false) }
+                var details by remember { mutableStateOf(false) }
+                Box {
+                    ChatIconButton(DesktopChatIcon.More, "会话菜单", "conversation-menu", { expanded = true })
+                    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                        DropdownMenuItem(onClick = { expanded = false; nameEditor = handle }, enabled = handle.ready,
+                            modifier = Modifier.testTag("rename-peer")) { Text("修改对方名称") }
+                        DropdownMenuItem(onClick = { expanded = false; openContext() }, enabled = handle.ready,
+                            modifier = Modifier.testTag("conversation-context")) { Text("上下文") }
+                        DropdownMenuItem(onClick = { expanded = false; details = true },
+                            modifier = Modifier.testTag("conversation-details")) { Text("服务档案与连接") }
+                    }
+                }
+                DesktopModalGuard(details)
+                if (details) AlertDialog(onDismissRequest = { details = false }, title = { Text("服务档案与连接") },
+                    text = { Column {
+                        Text(selectedProfile?.address?.ifBlank { selectedProfile.id } ?: "尚未选择服务档案")
+                        DesktopConnectionControls(connection,
+                            deviceStatus = deviceSync?.takeIf { deviceManaged }?.notice,
+                            onDeviceSetup = null)
+                    } },
+                    confirmButton = { TextButton(onClick = { details = false }) { Text("完成") } })
+            },
+            settingsContent = { closeSettings ->
                 if (deviceManaged) DesktopDeviceCopies(store, currentKey, deviceRevision, replyImageCache, replyAudioCache, ::selectNative)
-                IconButton(
-                    onClick = { searchOpen = true },
-                    modifier = Modifier.size(36.dp).testTag("history-search-open"),
-                ) { Icon(Icons.Filled.Search, contentDescription = "搜索聊天记录 (Ctrl+K)") }
                 if (whaleSession != null) {
                     TextButton(onClick = {
                         whaleSession = null
@@ -898,7 +1086,7 @@ internal fun DesktopScreen(
                             notices[currentKey] = "请等待本轮发送或录音结束，再配置设备共享。"
                         else if (!sync.enabled && unsavedReplies.isNotEmpty())
                             notices[currentKey] = "有回复尚未存入本机历史。请先检查数据目录，再开启设备共享。"
-                        else deviceWizard = true
+                        else { closeSettings(); deviceWizard = true }
                     } })
             },
             draft = draft,
@@ -926,7 +1114,7 @@ internal fun DesktopScreen(
                     deviceTextOnly && currentImages.isNotEmpty() -> "此来源的媒体需在原设备发送。移除所选附件即可发送文字。"
                     deviceReason.isNotBlank() -> deviceReason
                     devicePending > 0 -> "待发送或待同步 · $devicePending 条。恢复连接后自动核对。"
-                    deviceManaged -> deviceSync?.notice?.takeIf { it.isNotBlank() }
+                    deviceManaged -> deviceSync?.notice?.takeIf { it.isNotBlank() && it != "已同步设备会话。" }
                     else -> null
                 },
             onRetry = { entry ->
@@ -937,7 +1125,7 @@ internal fun DesktopScreen(
             canRetry = canRetry,
             assistantContent = { item ->
                 DesktopReplyContent(
-                    profileId = currentKey.profileId,
+                    partnerName = prefs.effectiveName, profileId = currentKey.profileId,
                     sessionId = currentKey.sessionId,
                     answer = item.answer,
                     attachments = item.replyAttachments,
@@ -965,6 +1153,37 @@ internal fun DesktopScreen(
                     TextButton(onClick = { chooseNewSource = false; createAt(profile) }) { Text(profileDisplayName(profile)) }
                 } } }, confirmButton = { TextButton(onClick = { chooseNewSource = false }) { Text("取消") } })
         }
+        nameEditor?.let { snapshot -> PartnerNameDialog(snapshot, { nameEditor = null }, { nameEditor = null }) }
+        contextEditor?.let { snapshot ->
+            ConversationContextDialog(snapshot, contextTurns, draft.text.trim(), { value ->
+                try {
+                    val question = draft.text.trim()
+                    previewContext(value, question).also { result ->
+                        if (snapshot.value.recentTurns == value.recentTurns && snapshot.value.pins == value.pins)
+                            evidence = ContextNoticeEvidence(question, value, result)
+                    }
+                } catch (e: CancellationException) { throw e }
+                catch (_: Exception) { AstrBotContextPreview.unavailable(CONTEXT_UNAVAILABLE) }
+            }, addingPin, { contextEditor = null }, { contextEditor = null })
+        }
+        contextReview?.let { review ->
+            LaunchedEffect(review.prefs, review.question, review.editorSerial) {
+                val result = try { previewContext(review.prefs, review.question) }
+                    catch (e: CancellationException) { throw e }
+                    catch (_: Exception) { AstrBotContextPreview.unavailable(CONTEXT_UNAVAILABLE) }
+                evidence = ContextNoticeEvidence(review.question, review.prefs, result)
+                contextReview = review.copy(preview = result)
+            }
+            ContextSendDialog(review.question, prefs.effectiveName, review.preview, onConfirm = {
+                contextReview = null
+                dispatch(review.retry, currentKey, review)
+            }, onAdjust = { contextReview = null; openContext() }, onClose = { contextReview = null })
+        }
+        if (confirmNew) AlertDialog(onDismissRequest = { confirmNew = false }, title = { Text("新开会话？") },
+            text = { Text("可以从最近对话返回这里，继续阅读或编辑原草稿。") },
+            confirmButton = { TextButton(onClick = { confirmNew = false; newConversation() },
+                modifier = Modifier.testTag("confirm-new-conversation")) { Text("新开会话") } },
+            dismissButton = { TextButton(onClick = { confirmNew = false }) { Text("取消") } })
         if (deviceWizard && deviceSync != null) {
             DesktopDeviceWizard(store, connection, deviceSync, onDismiss = {
                 deviceWizard = false
@@ -1017,6 +1236,7 @@ internal fun DesktopScreen(
                 store, profileId, sessionsRevision.intValue, overrides,
                 onDismiss = { searchOpen = false },
                 onSelectHit = ::selectSearchHit,
+                partnerName = { session -> preferenceOwner.preferences(SessionKey(profileId, session)).value.effectiveName },
             )
         }
         val pendingRetry = retryConfirmation?.takeIf { it.key == currentKey }
@@ -1216,7 +1436,7 @@ internal fun safeFailureMessage(
         else -> "请求已中断。"
     }
     val message = error.message.orEmpty()
-    if (message in SAFE_FAILURES) return message
+    if (message in SAFE_FAILURES || message == CONTEXT_UNAVAILABLE || message == CONTEXT_CHANGED) return message
     if (Regex("(?:图片|语音)上传失败，服务器返回 HTTP [1-5][0-9]{2}。").matches(message)) return message
     if (Regex("服务器返回 HTTP [1-5][0-9]{2}\\.").matches(message)) return message
     if (Regex("(?:图片|语音)下载失败，服务器返回 HTTP [1-5][0-9]{2}。").matches(message)) return message

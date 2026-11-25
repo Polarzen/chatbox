@@ -53,6 +53,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.onFocusChanged
@@ -76,11 +77,13 @@ import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -163,18 +166,49 @@ internal fun DesktopChatLayout(
     profileTextOnly: Boolean = false,
     recentDetails: Map<String, DesktopRecentRow> = emptyMap(),
     deletionScope: (String) -> String? = { null },
+    partnerName: String = "助手", initialSidebarPinned: Boolean = false, onSidebarPinned: (Boolean) -> Unit = {},
+    settingsLabel: String = "设置",
+    onOpenSearch: () -> Unit = {},
+    settingsContent: @Composable (close: () -> Unit) -> Unit = {},
+    reminderContent: @Composable () -> Unit = {},
+    pinnedMessage: (Int, String) -> Boolean = { _, _ -> false },
+    onToggleMessage: ((Int, String) -> Unit)? = null,
 ) {
     BoxWithConstraints(
         modifier = Modifier.fillMaxSize().background(desktopPalette.canvas).testTag("chat-root"),
     ) {
         val narrow = maxWidth < 790.dp
-        var sidebarOpen by remember { mutableStateOf(!narrow) }
+        var sidebarOpen by remember { mutableStateOf(initialSidebarPinned && !narrow) }
+        var sidebarPinned by remember { mutableStateOf(initialSidebarPinned) }
+        var settingsOpen by remember { mutableStateOf(false) }
         LaunchedEffect(narrow, searchSelectionSerial, composerFocusSerial, replyNavigation?.serial) {
-            if (narrow) sidebarOpen = false
+            sidebarOpen = !narrow && sidebarPinned
         }
-        val embeddedSidebar = sidebarOpen && !narrow
+        val embeddedSidebar = sidebarOpen && sidebarPinned && !narrow
+        DesktopModalGuard(settingsOpen)
+        if (settingsOpen) AlertDialog(
+            onDismissRequest = { settingsOpen = false },
+            title = { Text("设置") },
+            text = { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) { settingsContent { settingsOpen = false } } },
+            confirmButton = { TextButton(onClick = { settingsOpen = false }, modifier = Modifier.testTag("close-settings")) { Text("完成") } },
+        )
 
-        Row(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
+            if (sidebarOpen && event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
+                sidebarOpen = false
+                true
+            } else false
+        }) {
+            Column(Modifier.width(52.dp).fillMaxHeight().background(desktopPalette.panel)
+                .padding(vertical = 10.dp).testTag("navigation-rail"),
+                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ChatIconButton(DesktopChatIcon.Chats, if (sidebarOpen) "收起最近对话" else "打开最近对话",
+                    "sidebar-toggle", { sidebarOpen = !sidebarOpen }, selected = sidebarOpen)
+                ChatIconButton(DesktopChatIcon.Search, "搜索聊天记录 (Ctrl+K)", "history-search-open", onOpenSearch)
+                Spacer(Modifier.weight(1f))
+                ChatIconButton(DesktopChatIcon.Settings, settingsLabel, "rail-settings", { settingsOpen = true }, selected = settingsOpen)
+            }
+            Spacer(Modifier.fillMaxHeight().width(1.dp).background(desktopPalette.line))
             if (embeddedSidebar) {
                 SessionSidebar(
                     sessions = sessions,
@@ -185,6 +219,8 @@ internal fun DesktopChatLayout(
                     onDeleteSession = onDeleteSession,
                     onRenameSession = onRenameSession,
                     onDismiss = {},
+                    onPin = { sidebarPinned = false; onSidebarPinned(false) }, pinned = true,
+                    onClose = { sidebarOpen = false },
                     modifier = Modifier.width(232.dp).fillMaxHeight(),
                 )
             }
@@ -194,14 +230,12 @@ internal fun DesktopChatLayout(
                 navigation = searchNavigation,
                 replyNavigation = replyNavigation,
                 composerFocusSerial = composerFocusSerial,
-                sessions = sessions,
                 chat = chat,
-                narrow = narrow,
-                sidebarOpen = sidebarOpen,
-                embeddedSidebar = embeddedSidebar,
-                onToggleSidebar = { sidebarOpen = !sidebarOpen },
-                onNewSession = onNewSession,
-                canCreate = canCreate,
+                partnerName = partnerName,
+                pinnedMessage = pinnedMessage, onToggleMessage = onToggleMessage,
+                reminderContent = reminderContent,
+                onNewSession = if (sessions.isEmpty() && !canCreate) ({ settingsOpen = true }) else onNewSession,
+                canCreate = canCreate || sessions.isEmpty(),
                 topActions = topActions,
                 draft = draft,
                 onDraft = onDraft,
@@ -231,10 +265,10 @@ internal fun DesktopChatLayout(
             )
         }
 
-        if (sidebarOpen && narrow) {
+        if (sidebarOpen && !embeddedSidebar) {
             Box(
-                Modifier.fillMaxSize()
-                    .background(Color.Black.copy(alpha = .34f))
+                Modifier.fillMaxSize().padding(start = 53.dp)
+                    .background(Color.Black.copy(alpha = .20f))
                     .clickable { sidebarOpen = false },
             )
             SessionSidebar(
@@ -246,7 +280,9 @@ internal fun DesktopChatLayout(
                 onDeleteSession = onDeleteSession,
                 onRenameSession = onRenameSession,
                 onDismiss = { sidebarOpen = false },
-                modifier = Modifier.align(Alignment.CenterStart)
+                onPin = if (narrow) null else ({ sidebarPinned = true; onSidebarPinned(true) }),
+                pinned = false, onClose = { sidebarOpen = false },
+                modifier = Modifier.align(Alignment.CenterStart).padding(start = 53.dp)
                     .widthIn(max = 280.dp)
                     .fillMaxHeight()
                     .fillMaxWidth(0.84f),
@@ -267,6 +303,7 @@ private fun SessionSidebar(
     onDeleteSession: (String) -> Unit,
     onRenameSession: (String, String?) -> String?,
     onDismiss: () -> Unit,
+    onPin: (() -> Unit)?, pinned: Boolean, onClose: () -> Unit,
     modifier: Modifier = Modifier,
     elevated: Boolean = false,
 ) {
@@ -290,41 +327,17 @@ private fun SessionSidebar(
                 horizontalArrangement = Arrangement.spacedBy(5.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Button(
-                    onClick = {
-                        onNewSession()
-                        if (!elevated) {
-                            scope.launch {
-                                withFrameNanos { }
-                                if (sessionListState.layoutInfo.totalItemsCount > 0) {
-                                    sessionListState.animateScrollToItem(0)
-                                }
-                            }
-                        }
-                        onDismiss()
-                    },
-                    enabled = canCreate,
-                    modifier = Modifier.weight(1f).height(42.dp).testTag("new-session-button"),
-                    colors = ButtonDefaults.buttonColors(
-                        backgroundColor = desktopPalette.accent,
-                        contentColor = desktopPalette.onAccent,
-                        disabledBackgroundColor = desktopPalette.accentSurface,
-                        disabledContentColor = desktopPalette.muted,
-                    ),
-                    shape = RoundedCornerShape(12.dp),
-                    elevation = ButtonDefaults.elevation(defaultElevation = 0.dp, pressedElevation = 1.dp),
-                ) {
-                    Text("＋   新建会话", fontSize = 14.sp)
-                }
-                if (elevated) {
-                    TextButton(onClick = onDismiss, modifier = Modifier.testTag("close-sidebar-button")) {
-                        Text("关闭", color = desktopPalette.muted, fontSize = 12.sp)
-                    }
-                }
+                Text("最近对话", Modifier.weight(1f), color = desktopPalette.ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                ChatIconButton(DesktopChatIcon.Add, "新建会话", "new-session-button", {
+                    onNewSession()
+                    if (!elevated) scope.launch { sessionListState.scrollToItem(0) }
+                    onDismiss()
+                }, enabled = canCreate)
+                if (onPin != null) ChatIconButton(DesktopChatIcon.Pin, if (pinned) "取消固定" else "固定最近对话",
+                    "pin-sidebar", onPin, selected = pinned)
+                ChatIconButton(DesktopChatIcon.Close, "收起最近对话", "close-sidebar-button", onClose)
             }
-            Spacer(Modifier.height(10.dp))
-            Text("最近对话", color = desktopPalette.muted, fontSize = 12.sp)
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(8.dp))
             if (sessions.isEmpty()) {
                 Box(Modifier.weight(1f).fillMaxWidth().padding(end = SidebarInset), contentAlignment = Alignment.Center) {
                     Text("还没有对话", color = desktopPalette.muted, fontSize = 13.sp)
@@ -358,9 +371,11 @@ private fun SessionSidebar(
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                     recentDetails[session.id]?.label?.let { Text(it, color = desktopPalette.muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                                    if (session.entryCount > 0) {
-                                        Spacer(Modifier.height(3.dp))
-                                        Text("${session.entryCount} 轮", color = desktopPalette.muted, fontSize = 11.sp)
+                                    if (session.activity > 0L) {
+                                        Text(remember(session.activity) {
+                                            java.time.format.DateTimeFormatter.ofPattern("M月d日 HH:mm")
+                                                .withZone(java.time.ZoneId.systemDefault()).format(java.time.Instant.ofEpochMilli(session.activity))
+                                        }, color = desktopPalette.muted, fontSize = 11.sp)
                                     }
                                 }
                                 Box {
@@ -587,95 +602,6 @@ private fun SessionScrollArrow(
     }
 }
 
-@Composable
-private fun ConversationToolbar(
-    selectedTitle: String,
-    sidebarOpen: Boolean,
-    onToggleSidebar: () -> Unit,
-    showNewSession: Boolean,
-    onNewSession: () -> Unit,
-    canCreate: Boolean,
-    actions: @Composable () -> Unit,
-) {
-    Layout(
-        modifier = Modifier.fillMaxWidth(),
-        content = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(
-                    onClick = onToggleSidebar,
-                    modifier = Modifier.sizeIn(minWidth = 40.dp, minHeight = 40.dp)
-                        .semantics { contentDescription = if (sidebarOpen) "收起最近对话" else "打开最近对话" }
-                        .testTag("sidebar-toggle"),
-                    contentPadding = PaddingValues(0.dp),
-                ) {
-                    Text(if (sidebarOpen) "‹" else "☰", color = desktopPalette.muted, fontSize = 19.sp)
-                }
-                Spacer(Modifier.width(8.dp))
-            }
-            Text(
-                selectedTitle,
-                color = desktopPalette.ink,
-                fontSize = 17.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Box {
-                if (showNewSession) {
-                    TextButton(
-                        onClick = onNewSession,
-                        enabled = canCreate,
-                        modifier = Modifier.testTag("new-session-toolbar-button"),
-                    ) { Text("＋ 新会话", color = desktopPalette.accent, fontSize = 13.sp) }
-                }
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) { actions() }
-        },
-    ) { (toggle, title, newSession, actionsRow), constraints ->
-        val width = constraints.maxWidth
-        val compact = width.toDp() < 640.dp
-        val inset = (if (compact) 12.dp else 22.dp).roundToPx().coerceAtMost(width / 2)
-        val contentWidth = width - 2 * inset
-        val childConstraints = constraints.copy(minWidth = 0, maxWidth = contentWidth, minHeight = 0)
-
-        val togglePlaceable = toggle.measure(childConstraints)
-        val newSessionPlaceable = newSession.measure(childConstraints.copy(maxWidth = contentWidth - togglePlaceable.width))
-        val remainingWidth = contentWidth - togglePlaceable.width - newSessionPlaceable.width
-        val minLineHeight = maxOf(
-            (if (compact) 40.dp else 62.dp).roundToPx(),
-            togglePlaceable.height,
-            newSessionPlaceable.height,
-        ).coerceAtMost(constraints.maxHeight)
-        val stackedHeightIsBounded = compact && constraints.hasBoundedHeight
-        val actionsPlaceable = actionsRow.measure(
-            childConstraints.copy(
-                maxWidth = if (compact) contentWidth else remainingWidth,
-                maxHeight = if (stackedHeightIsBounded) constraints.maxHeight - minLineHeight else constraints.maxHeight,
-            ),
-        )
-        val titleWidth = if (compact) remainingWidth else remainingWidth - actionsPlaceable.width
-        val titlePlaceable = title.measure(
-            childConstraints.copy(
-                minWidth = titleWidth,
-                maxWidth = titleWidth,
-                maxHeight = if (stackedHeightIsBounded) constraints.maxHeight - actionsPlaceable.height else constraints.maxHeight,
-            ),
-        )
-        val titleLineHeight = maxOf(minLineHeight, titlePlaceable.height)
-        val contentHeight = if (compact) titleLineHeight + actionsPlaceable.height else maxOf(titleLineHeight, actionsPlaceable.height)
-        val height = contentHeight.coerceAtLeast(constraints.minHeight)
-        layout(width, height) {
-            val lineHeight = if (compact) height - actionsPlaceable.height else height
-            togglePlaceable.placeRelative(inset, (lineHeight - togglePlaceable.height) / 2)
-            val titleStart = inset + togglePlaceable.width
-            titlePlaceable.placeRelative(titleStart, (lineHeight - titlePlaceable.height) / 2)
-            newSessionPlaceable.placeRelative(titleStart + titleWidth, (lineHeight - newSessionPlaceable.height) / 2)
-            val actionsY = if (compact) lineHeight else (height - actionsPlaceable.height) / 2
-            actionsPlaceable.placeRelative(width - inset - actionsPlaceable.width, actionsY)
-        }
-    }
-}
-
 @OptIn(ExperimentalFoundationApi::class, ExperimentalComposeUiApi::class)
 @Composable
 private fun ConversationPane(
@@ -684,12 +610,10 @@ private fun ConversationPane(
     navigation: SearchHitNavigation?,
     replyNavigation: ReplyTurnNavigation?,
     composerFocusSerial: Long,
-    sessions: List<SessionInfo>,
     chat: Chat,
-    narrow: Boolean,
-    sidebarOpen: Boolean,
-    embeddedSidebar: Boolean,
-    onToggleSidebar: () -> Unit,
+    partnerName: String,
+    pinnedMessage: (Int, String) -> Boolean, onToggleMessage: ((Int, String) -> Unit)?,
+    reminderContent: @Composable () -> Unit,
     onNewSession: () -> Unit,
     canCreate: Boolean,
     topActions: @Composable () -> Unit,
@@ -719,7 +643,6 @@ private fun ConversationPane(
     composerCommitInProgress: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    val selectedTitle = sessions.firstOrNull { it.selected }?.title?.ifBlank { "新会话" } ?: "新会话"
     val isExternalDragOver = remember { mutableStateOf(false) }
     val addImagesState = rememberUpdatedState(onAddImages)
     val dropDisabled = rememberUpdatedState(composerCommitInProgress || profileTextOnly)
@@ -766,15 +689,11 @@ private fun ConversationPane(
             ),
     ) {
       Column(Modifier.fillMaxSize()) {
-        ConversationToolbar(
-            selectedTitle = selectedTitle,
-            sidebarOpen = sidebarOpen,
-            onToggleSidebar = onToggleSidebar,
-            showNewSession = !narrow && !embeddedSidebar && !sidebarOpen,
-            onNewSession = onNewSession,
-            canCreate = canCreate,
-            actions = topActions,
-        )
+        Row(Modifier.fillMaxWidth().height(54.dp).padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(partnerName, Modifier.weight(1f).testTag("partner-name"), color = desktopPalette.ink,
+                fontWeight = FontWeight.SemiBold, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            topActions()
+        }
         Spacer(Modifier.fillMaxWidth().height(1.dp).background(desktopPalette.line))
 
         MessageViewport(
@@ -805,13 +724,22 @@ private fun ConversationPane(
             }
             itemsIndexed(chat.entries, key = { index, _ -> "${chat.session}-$index" }) { index, entry ->
                 SearchHitEntry(index) {
-                    Column(Modifier.fillMaxWidth().testTag("message-entry-$index"), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                        if (entry.question.isNotBlank() || entry.attachmentDisplayName != null || entry.attachmentReferences.isNotEmpty()) {
-                            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    val previous = chat.entries.getOrNull(index - 1)
+                    val sameSide = previous != null && previous.hasReply() == !entry.hasQuestion()
+                    Column(Modifier.fillMaxWidth().padding(top = if (index == 0 || sameSide) 0.dp else 10.dp)
+                        .testTag("message-entry-$index"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (navigation?.entryIndex == index || replyNavigation?.entryIndex == index) {
+                            Text("第 ${index + 1} 轮", Modifier.align(Alignment.CenterHorizontally),
+                                color = desktopPalette.muted, fontSize = 11.sp)
+                        }
+                        fun toggleContext(role: String, body: String): (() -> Unit)? =
+                            onToggleMessage?.takeIf { entry.status == "已完成" && body.isNotBlank() }?.let { { it(index, role) } }
+                        val failed = entry.status.startsWith("发送失败：") || entry.status.startsWith("未发送：") || entry.status == "上次回复未确认"
+                        val retry = if (failed && canRetry && !entry.blocksWhaleTaskRetry(profileId)) ({ onRetry(entry) }) else null
+                        if (entry.hasQuestion()) {
+                            MessageActions(entry.question, index, true, pinnedMessage(index, "user"), toggleContext("user", entry.question), null) {
                                 Surface(
-                                    modifier = Modifier.align(Alignment.CenterEnd)
-                                        .widthIn(max = minOf(720.dp, maxWidth * .82f))
-                                        .testTag("message-user-$index"),
+                                    modifier = Modifier.testTag("message-user-$index"),
                                     color = desktopPalette.accentSurface,
                                     shape = RoundedCornerShape(18.dp, 18.dp, 5.dp, 18.dp),
                                 ) {
@@ -824,7 +752,7 @@ private fun ConversationPane(
                                             Spacer(Modifier.height(5.dp))
                                         }
                                         if (entry.question.isNotBlank()) {
-                                            CopyableMessage(entry.question) {
+                                            SelectionContainer {
                                                 SearchHitText(entry.question, isAnswer = false, color = desktopPalette.ink, fontSize = 14.sp)
                                             }
                                         }
@@ -847,11 +775,10 @@ private fun ConversationPane(
                         LaunchedEffect(renderedState.value) {
                             if (renderedState.value) renderCallback?.invoke(chat.session, index)
                         }
-                        BoxWithConstraints(Modifier.fillMaxWidth().replyTurnAnchor(index)) {
+                        if (entry.hasReply()) MessageActions(entry.answer, index, false, pinnedMessage(index, "assistant"), toggleContext("assistant", entry.answer),
+                            retry, Modifier.replyTurnAnchor(index), partnerName) {
                             Surface(
-                                modifier = Modifier.align(Alignment.CenterStart)
-                                    .widthIn(max = minOf(760.dp, maxWidth * .86f))
-                                    .drawWithContent {
+                                modifier = Modifier.drawWithContent {
                                         drawContent()
                                         if (!renderedState.value && (entry.answer.isNotEmpty() || entry.replyAttachments.isNotEmpty())) {
                                             renderedState.value = true
@@ -861,11 +788,10 @@ private fun ConversationPane(
                                 color = desktopPalette.panel,
                                 contentColor = desktopPalette.ink,
                                 shape = RoundedCornerShape(5.dp, 18.dp, 18.dp, 18.dp),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, desktopPalette.line),
                             ) {
                                 Column(Modifier.padding(horizontal = 15.dp, vertical = 12.dp)) {
                                     if (entry.answer.isNotEmpty()) {
-                                        CopyableMessage(entry.answer) { assistantContent(entry) }
+                                        SelectionContainer { assistantContent(entry) }
                                     } else {
                                         assistantContent(entry)
                                     }
@@ -884,9 +810,6 @@ private fun ConversationPane(
                                                 }
                                             }
                                         }
-                                        val failed = entry.status.startsWith("发送失败：") ||
-                                            entry.status.startsWith("未发送：") ||
-                                            entry.status == "上次回复未确认"
                                         val blockRetry = entry.blocksWhaleTaskRetry(profileId)
                                         val active = entry.status == "发送中" && entryProgress != null
                                         var detailsExpanded by remember(chat.session, index) {
@@ -916,14 +839,6 @@ private fun ConversationPane(
                                                     modifier = Modifier.testTag("failure-details-toggle-$index"),
                                                 ) { Text(if (detailsExpanded) "收起详情" else "查看详情", color = desktopPalette.accent, fontSize = 11.sp) }
                                             }
-                                            if (canRetry && !active && failed && !blockRetry) {
-                                                Spacer(Modifier.width(6.dp))
-                                                TextButton(
-                                                    onClick = { onRetry(entry) },
-                                                    contentPadding = PaddingValues(horizontal = 5.dp, vertical = 0.dp),
-                                                    modifier = Modifier.testTag("retry-message-$index"),
-                                                ) { Text("重试", color = desktopPalette.accent, fontSize = 12.sp) }
-                                            }
                                         }
                                         if (failed && detailsExpanded) {
                                             Text(
@@ -945,6 +860,7 @@ private fun ConversationPane(
         notice?.takeIf { it.isNotBlank() }?.let {
             Text(it, color = MaterialTheme.colors.error, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 22.dp, vertical = 2.dp))
         }
+        reminderContent()
         Composer(
             attachmentsEnabled = !profileTextOnly,
             composerFocusSerial = composerFocusSerial,
@@ -986,8 +902,22 @@ private fun ConversationPane(
     }
 }
 
+private fun Entry.hasQuestion() = question.isNotBlank() || attachmentDisplayName != null || attachmentReferences.isNotEmpty()
+private fun Entry.hasReply() = answer.isNotEmpty() || replyAttachments.isNotEmpty() || status != "已完成"
+
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun CopyableMessage(text: String, content: @Composable () -> Unit) {
+private fun MessageActions(
+    text: String, index: Int, user: Boolean, pinned: Boolean, toggleContext: (() -> Unit)?,
+    retry: (() -> Unit)?, modifier: Modifier = Modifier, partnerName: String = "助手", content: @Composable () -> Unit,
+) {
+    val role = if (user) "user" else "assistant"
+    val speaker = if (user) "我" else partnerName
+    val label = if (pinned) "从上下文移除" else "加入上下文"
+    var expanded by remember { mutableStateOf(false) }
+    var focused by remember { mutableStateOf(false) }
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
     val clipboard = LocalClipboardManager.current
     var clipboardBusy by remember { mutableStateOf(false) }
     val messageClipboard = remember(clipboard) {
@@ -1002,15 +932,43 @@ private fun CopyableMessage(text: String, content: @Composable () -> Unit) {
             }
         }
     }
-    CompositionLocalProvider(LocalClipboardManager provides messageClipboard) {
-        SelectionContainer(content = content)
+    val copy = { messageClipboard.setText(AnnotatedString(text)) }
+    val hasActions = text.isNotEmpty() || retry != null || toggleContext != null
+    @Composable fun MenuButton() {
+        if (hasActions) Box {
+            ChatIconButton(DesktopChatIcon.More, "${speaker}的消息操作", "message-menu-$role-$index",
+                { expanded = true }, modifier = Modifier.onFocusChanged { focused = it.hasFocus }
+                    .alpha(if (focused || hovered || expanded) 1f else 0f))
+            DropdownMenu(expanded, { expanded = false }) {
+                if (text.isNotEmpty()) DropdownMenuItem(onClick = { expanded = false; copy() }) { Text("复制正文") }
+                if (toggleContext != null) DropdownMenuItem(onClick = { expanded = false; toggleContext() },
+                    modifier = Modifier.testTag("toggle-context-$role-$index")) { Text(label) }
+                if (retry != null) DropdownMenuItem(onClick = { expanded = false; retry() },
+                    modifier = Modifier.testTag("retry-message-$index")) { Text("重试") }
+            }
+        }
     }
-    TextButton(
-        onClick = { messageClipboard.setText(AnnotatedString(text)) },
-        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
-        modifier = Modifier.height(28.dp),
-    ) { Text("复制正文", color = desktopPalette.accent, fontSize = 11.sp) }
-    if (clipboardBusy) Text("剪贴板占用中，请再试一次。", color = MaterialTheme.colors.error, fontSize = 11.sp)
+    BoxWithConstraints(modifier.fillMaxWidth()) {
+        val bubbleWidth = minOf(660.dp, maxWidth * .82f, (maxWidth - 40.dp).coerceAtLeast(1.dp))
+        Row(Modifier.align(if (user) Alignment.CenterEnd else Alignment.CenterStart)
+            .hoverable(interaction).semantics { customActions = buildList {
+                if (text.isNotEmpty()) add(CustomAccessibilityAction("复制正文") { copy(); true })
+                if (toggleContext != null) add(CustomAccessibilityAction(label) { toggleContext(); true })
+                if (retry != null) add(CustomAccessibilityAction("重试") { retry(); true })
+            } }.onPointerEvent(PointerEventType.Press, PointerEventPass.Initial) { event ->
+                if (hasActions && event.buttons.isSecondaryPressed) {
+                    expanded = true
+                    event.changes.forEach { it.consume() }
+                }
+            }, verticalAlignment = Alignment.CenterVertically) {
+            if (user) MenuButton()
+            Column(Modifier.widthIn(max = bubbleWidth)) {
+                CompositionLocalProvider(LocalClipboardManager provides messageClipboard) { content() }
+                if (clipboardBusy) Text("剪贴板占用中，请再试一次。", color = MaterialTheme.colors.error, fontSize = 11.sp)
+            }
+            if (!user) MenuButton()
+        }
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalComposeUiApi::class)

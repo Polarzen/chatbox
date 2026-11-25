@@ -17,8 +17,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.IconButton
@@ -175,7 +175,7 @@ internal fun AndroidMediaActions(
             if (recording == null) {
                 Box {
                     IconButton(onClick = { menu = true }, enabled = enabled, modifier = Modifier.size(48.dp)) {
-                        Icon(Icons.Default.Add, "添加附件")
+                        Icon(Icons.Outlined.Add, "添加附件")
                     }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         DropdownMenuItem(text = { Text("选择图片（可多选）") }, onClick = {
@@ -196,7 +196,7 @@ internal fun AndroidMediaActions(
                         if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) begin()
                         else { permissionOrigin = scopeId; permission.launch(Manifest.permission.RECORD_AUDIO) }
                     }) {
-                    Icon(painterResource(android.R.drawable.ic_btn_speak_now), "开始麦克风录音", Modifier.size(22.dp))
+                    Icon(painterResource(R.drawable.chat_mic), "开始麦克风录音", Modifier.size(22.dp))
                 }
             } else {
                 IconButton(onClick = { recording?.stop() }, modifier = Modifier.size(48.dp)
@@ -204,7 +204,7 @@ internal fun AndroidMediaActions(
                     Box(Modifier.size(16.dp).background(LocalContentColor.current, RoundedCornerShape(2.dp)))
                 }
                 IconButton(onClick = { recording?.cancel() }, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Default.Close, "取消录音")
+                    Icon(Icons.Outlined.Close, "取消录音")
                 }
             }
         }

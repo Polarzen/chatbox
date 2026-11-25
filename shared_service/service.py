@@ -57,9 +57,10 @@ CREATE UNIQUE INDEX one_running ON turns(room) WHERE status='running';
 
 
 class ApiError(Exception):
-    def __init__(self, status, message):
+    def __init__(self, status, message, *, code=None):
         super().__init__(message)
         self.status = status
+        self.code = code
 
 
 def digest(secret):
@@ -314,10 +315,11 @@ PROFILE_READ = {"/v1/profile/" + action for action in ("sessions", "turns", "tur
 PROFILE_WRITE = {"/v1/profile/" + action for action in
                  ("create", "invite", "join", "revoke", "status", "session", "import", "remove", "send")}
 DEVICE_READ = {"/v1/device/" + action for action in
-               ("health", "me", "profiles", "sessions", "turns", "turn", "operation", "devices")}
+               ("health", "me", "profiles", "sessions", "turns", "turn", "operation", "devices", "chat-preferences")}
 DEVICE_WRITE = {"/v1/device/" + action for action in
                 ("invite", "preview", "join", "endpoint", "prove", "revoke", "profile", "session", "import",
-                 "start", "send", "remove", "media-begin", "media-end")}
+                 "start", "send", "remove", "media-begin", "media-end", "chat-preferences", "claim-context-reminder",
+                 "context-preview", "context-notice")}
 READ_ROUTES = {"/v1/turn", "/v1/turns"} | PROFILE_READ | DEVICE_READ
 OWNER_ROUTES = {"/v1/invite", "/v1/cancel-invite", "/v1/revoke-guests"}
 WRITE_ROUTES = {"/v1/create", "/v1/join", "/v1/send"} | OWNER_ROUTES | PROFILE_WRITE | DEVICE_WRITE
@@ -343,6 +345,10 @@ class Service:
             self.upstream = config["upstream"]
             self.launcher_id = config.get("launcher_id")
             self.aliases = {row[0] for row in db.execute("SELECT base FROM sources")}
+            # A process exit before a header was stored leaves the upstream outcome uncertain.
+            pending = db.execute("SELECT id FROM device_context_admissions WHERE state='pending'").fetchall()
+            for row in pending:
+                device_api_module().materialize_admission(db, row["id"])
             abandoned = "status='running' AND NOT " + MEDIA_RESERVATION
             db.execute("UPDATE profile_sessions SET fresh=0 WHERE fresh=1 AND room IN "
                        "(SELECT room FROM turns WHERE " + abandoned + ")")
@@ -460,13 +466,23 @@ class Service:
             return (202 if existing["status"] == "running" else 200), existing
 
     @staticmethod
-    def enqueue(db, room, turn_id, question):
+    def require_idle(db, room):
+        if db.execute("SELECT 1 FROM device_context_admissions WHERE room=? AND state='pending'", (room,)).fetchone():
+            raise ApiError(409, "会话已有回复正在生成，请稍后再发。")
         busy = db.execute("SELECT status FROM turns WHERE room=? AND (status='running' OR needs_review=1) LIMIT 1",
                           (room,)).fetchone()
         if busy:
             if busy["status"] == "running":
                 raise ApiError(409, "会话已有回复正在生成，请稍后再发。")
             raise ApiError(409, "上游执行结果未知，请服务主人确认 AstrBot 已空闲并运行 resolve。")
+
+    @staticmethod
+    def enqueue(db, room, turn_id, question, *, context_verified=False):
+        Service.require_idle(db, room)
+        if not context_verified and device_api_module().chat_preferences.preferences_for_room(db, room)["recentTurns"] is not None:
+            raise ApiError(409, "此会话已启用自定义上下文，请通过支持预览的设备发送。")
+        if db.execute("SELECT 1 FROM device_context_admissions WHERE room=? AND id=?", (room, turn_id)).fetchone():
+            raise ApiError(409, "操作编号已使用。")
         seq = db.execute("SELECT COALESCE(MAX(seq),0)+1 FROM turns WHERE room=?", (room,)).fetchone()[0]
         db.execute("INSERT INTO turns(room,seq,id,question,answer,status) VALUES(?,?,?,?,?,'running')",
                    (room, seq, turn_id, question, ""))
@@ -491,7 +507,7 @@ class Service:
                     db.execute("UPDATE profile_sessions SET fresh=0 WHERE room=? AND fresh=1", (room,))
                 profile_activity(db, room)
 
-    def generate(self, room, turn_id, username, session, question, *, legacy=False):
+    def generate(self, room, turn_id, username, session, question, *, legacy=False, context=None, revision=None):
         last_answer = ""
 
         def publish(answer):
@@ -507,6 +523,11 @@ class Service:
 
         status = "unknown"
         needs_review = True
+
+        def accept_context():
+            with database(self.path, write=True) as db:
+                device_api_module().materialize_admission(db, turn_id)
+
         try:
             with database(self.path) as db:
                 identity = db.execute("SELECT upstream FROM rooms WHERE id=? AND username=? AND session=?",
@@ -514,15 +535,26 @@ class Service:
             if not identity:
                 raise astrbot.NotDispatched("无法确认此房间的上游身份。")
             base, key, verify = self.routes.target(identity[0], legacy=legacy)
-            astrbot.send(base, key, username, session, question, publish, verify)
+            if context is None:
+                astrbot.send(base, key, username, session, question, publish, verify)
+            else:
+                astrbot.send(base, key, username, session, question, publish, verify,
+                             context=context, revision=revision, turn_id=turn_id, accepted=accept_context)
             status = "complete"
             needs_review = False
         except astrbot.NotDispatched:
             needs_review = False
+            if context is not None:
+                with database(self.path, write=True) as db:
+                    db.execute("UPDATE device_context_admissions SET state='rejected' WHERE id=? AND state='pending'",
+                               (turn_id,))
         except Exception:
             # Transport errors can contain private upstream data. Keep the last confirmed prefix.
             pass
         finally:
+            if context is not None and needs_review:
+                # A lost response may follow provider execution. Preserve the operation, block automatic replays.
+                accept_context()
             self.finish(room, turn_id, status, needs_review)
 
 
@@ -983,6 +1015,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(405, "请求方法不适用。")
         except ApiError as exc:
             status, value = exc.status, {"error": str(exc)}
+            if exc.code:
+                value["code"] = exc.code
         except TimeoutError:
             status, value = 408, {"error": "接收请求超时。"}
         except Exception:

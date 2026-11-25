@@ -53,7 +53,10 @@ class DesktopDeviceHomeUiTest {
         ui.mainClock.autoAdvance = false
         ui.setContent { Box(Modifier.requiredSize(1000.dp, 700.dp)) { MaterialTheme { DesktopScreen(store, keys, images) } } }
         frame()
-        assertEquals(1, ui.onAllNodesWithContentDescription("连接状态：未连接", substring = true).fetchSemanticsNodes().size)
+        ui.onNodeWithTag("sidebar-toggle").performClick()
+        frame()
+        ui.onNodeWithTag("pin-sidebar").performClick()
+        frame()
         ui.onNodeWithText("最近对话").assertIsDisplayed()
         ui.onNodeWithText("测试甲").performClick()
         ui.waitUntil(5_000) {
@@ -63,6 +66,9 @@ class DesktopDeviceHomeUiTest {
         ui.onNodeWithText("甲的回答", substring = true).assertIsDisplayed()
         assertEquals(first.id, store.activeProfileId)
         ui.onNodeWithTag("new-session-button").performClick()
+        frame()
+        assertEquals(1, store.sessions(first.id).size)
+        ui.onNodeWithTag("confirm-new-conversation").performClick()
         frame()
         assertEquals(first.id, store.activeProfileId)
         assertEquals(2, store.sessions(first.id).size)
@@ -113,6 +119,8 @@ class DesktopDeviceHomeUiTest {
                     ui.onAllNodesWithContentDescription("设备同步状态：" + text, substring = true).fetchSemanticsNodes().size == 1
                 }
             }
+            ui.onNodeWithTag("rail-settings").performClick()
+            frame()
             assertHeader("已同步设备会话")
             online.set(false)
             runBlocking { sync.refresh() }
@@ -231,6 +239,8 @@ class DesktopDeviceHomeUiTest {
         ui.onNodeWithText("仅在本机使用").performSemanticsAction(SemanticsActions.OnClick)
         frame()
         ui.runOnIdle { assertTrue(skipped); assertFalse(sync.enabled); assertNull(store.deviceOwner()) }
+        ui.onNodeWithTag("rail-settings").performClick()
+        frame()
         ui.onNodeWithTag("connection-control-status").performClick()
         frame()
         ui.onNodeWithTag("device-setup-open").performClick()

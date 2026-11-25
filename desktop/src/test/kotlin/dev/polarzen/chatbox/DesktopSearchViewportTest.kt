@@ -128,6 +128,10 @@ class DesktopSearchViewportTest {
         }
         settle()
         val manualY = hitBox().center.y
+        rule.runOnIdle { count.intValue++ }
+        settle()
+        assertEquals("A new reply leaves the manually scrolled paragraph in place", manualY, hitBox().center.y, 1f)
+        rule.onNodeWithTag("return-to-latest").assertIsDisplayed()
         rule.runOnIdle { precedingMediaHeight.intValue = 360 }
         settle()
         assertTrue("After a wheel gesture media growth cannot reclaim the search anchor",
@@ -135,14 +139,16 @@ class DesktopSearchViewportTest {
 
         rule.onNodeWithTag("return-to-latest").performClick()
         settle()
-        rule.onNodeWithText("Last line of turn 1").assertIsDisplayed()
+        rule.onNodeWithText("Last line of turn 2").assertIsDisplayed()
         rule.onNodeWithTag("return-to-latest").assertDoesNotExist()
         locate(2)
         assertLocated()
 
         rule.runOnIdle { count.intValue++ }
         settle()
-        rule.onNodeWithText("Last line of turn 2").assertIsDisplayed()
-        rule.onNodeWithTag("return-to-latest").assertDoesNotExist()
+        assertEquals("An appended turn preserves the reading position", readingY, hitBox().center.y, 1f)
+        rule.onNodeWithTag("return-to-latest").performClick()
+        settle()
+        rule.onNodeWithText("Last line of turn 3").assertIsDisplayed()
     }
 }

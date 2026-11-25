@@ -6,6 +6,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -95,6 +96,10 @@ class DesktopSharedChatTest {
         ui.onNodeWithText("此会话保留了已同步的历史。", substring = true).assertIsDisplayed()
         ui.onNodeWithTag("send-button").assertIsNotEnabled()
         ui.onNodeWithTag("shared-chat-open").assertDoesNotExist()
+        ui.onNodeWithTag("sidebar-toggle").performClick()
+        ui.mainClock.advanceTimeBy(120)
+        ui.onNodeWithTag("pin-sidebar").performClick()
+        ui.mainClock.advanceTimeBy(120)
         ui.onNodeWithText("普通会话").performClick()
         ui.mainClock.advanceTimeBy(120)
         ui.onNodeWithText("有旧绑定的会话").performClick()
@@ -102,10 +107,15 @@ class DesktopSharedChatTest {
         ui.onNodeWithText("本机回答", substring = true).assertIsDisplayed()
         ui.onNodeWithText("native draft").assertIsDisplayed()
         ui.onNodeWithTag("profile-share-open").assertDoesNotExist()
+        ui.onNodeWithTag("rail-settings").performClick()
+        ui.mainClock.advanceTimeBy(220)
         ui.onNodeWithTag("connection-control-status").performClick()
         ui.mainClock.advanceTimeBy(120)
         ui.onNodeWithTag("device-setup-open").performClick()
-        ui.mainClock.advanceTimeBy(120)
+        ui.waitUntil(5_000) {
+            ui.mainClock.advanceTimeByFrame()
+            ui.onAllNodesWithTag("device-setup-dialog").fetchSemanticsNodes().isNotEmpty()
+        }
         ui.onNodeWithTag("device-setup-dialog").assertIsDisplayed()
         assertNull(store.deviceOwner())
         assertEquals(pendingRoom, readLegacyRoomRecord(store, key, profile.address))

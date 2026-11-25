@@ -22,6 +22,15 @@ private val AndroidDeviceRow.key get() = DeviceRoomKey(profile,sid)
 private val DeviceSession.key get() = DeviceRoomKey(profile,sid)
 private fun localProfile(base: String) = "local:$base"
 private const val RETIRED_REASON = "电脑已移除此会话。手机上的原记录及草稿仍可查看。"
+
+internal fun deviceDraftRow(saved: DeviceRoomDraft, profiles: List<DeviceProfile>, retired: Set<DeviceRoomKey>): AndroidDeviceRow? {
+    val key = saved.key
+    if (saved.text.isEmpty() && key in retired) return null
+    val profile = profiles.find { it.profile == key.profile } ?: return null
+    return AndroidDeviceRow(key.profile,key.sid,"新会话",saved.created,profile.name,profile.username,null,
+        if (key in retired) RETIRED_REASON else "")
+}
+
 private fun wireBase(base: String): String {
     val uri = URI(base)
     val port = if (uri.port == -1 || uri.scheme == "https" && uri.port == 443 || uri.scheme == "http" && uri.port == 80)
@@ -155,6 +164,79 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
         private set
     private var lastRevision: String? = null
     private var storageIssue = false
+    private var preferenceRevision by mutableStateOf(0L)
+
+    fun preferences(base: String, sid: String): ChatPreferenceHandle =
+        preferenceHandleFor(DeviceLocalKey(base, sid), null)
+
+    fun preferences(row: AndroidDeviceRow): ChatPreferenceHandle = preferenceHandleFor(localKey(row), row)
+
+    private fun preferenceHandleFor(local: DeviceLocalKey?, row: AndroidDeviceRow?): ChatPreferenceHandle {
+        preferenceRevision
+        val grant = binding
+        val paired = row != null || (bound || pendingJoin) && !local?.base.isNullOrBlank()
+        fun room(): PreferenceRoom? {
+            if (!bound || !paired) return null
+            val key = if (local != null) links.singleOrNull { it.local == local }?.remote else row?.key
+            return key?.takeIf { k -> k !in retired && directory.any { it.key == k } }?.let { PreferenceRoom(it.profile,it.sid) }
+        }
+        val target = room()
+        val native = local?.let(::localSession)
+        val ready = if (paired) target != null else native != null
+        fun valid() = ready && if (paired) binding?.instance == grant?.instance && binding?.device == grant?.device && room() == target
+            else local != null && localSession(local) != null && (local.base.isEmpty() || !bound && !pendingJoin)
+        fun update(edit: (PreferenceJournal) -> PreferenceJournal): PreferenceJournal {
+            val result = if (target != null) store.preferenceJournal(target, edit)
+                else history.preferenceJournal(checkNotNull(local).base, local.sid, edit)
+            preferenceRevision++
+            return result
+        }
+        val snapshot = when {
+            !ready -> PreferenceJournal()
+            target != null -> store.preferenceJournal(target)
+            else -> history.preferenceJournal(checkNotNull(local).base, local.sid)
+        }
+        val identity = org.json.JSONArray(listOf(if (paired) "device" else "direct", if (paired) grant?.instance else null,
+            target?.profile ?: local?.base ?: row?.profile, target?.sid ?: local?.sid ?: row?.sid)).toString()
+        val verified = target?.let { bodies[DeviceRoomKey(it.profile, it.sid)] }.orEmpty()
+        return preferenceHandle(identity, snapshot, paired, ready, { index ->
+            if (paired) verified.getOrNull(index)?.takeIf { it.status == "complete" }?.seq
+            else native?.turns?.getOrNull(index)?.takeIf { it.status == "已完成" }?.let { index.toLong() + 1 }
+        }, ::valid, ::update, { threshold ->
+            var claimed = false
+            if (target != null) action {
+                if (valid()) {
+                    val b = checkNotNull(binding)
+                    synchronizePreferences(b,target)
+                    if (store.preferenceJournal(target).value.remindAfter == threshold)
+                        claimed = api.claimContextReminder(b,target.profile,target.sid,threshold)
+                }
+            }
+            claimed
+        }, { kind, through, active ->
+            var claimed = false
+            if (target != null) action {
+                if (valid()) {
+                    val current = store.preferenceJournal(target)
+                    if (!current.contextPending && current.value.recentTurns == snapshot.value.recentTurns &&
+                        current.value.pins == snapshot.value.pins)
+                        claimed = api.observeContextNotice(checkNotNull(binding),target.profile,target.sid,kind,through,active)
+                }
+            }
+            claimed
+        }, { local?.let(::localSession)?.turns?.indexOfLast { it.status == "已完成" }?.toLong()?.plus(1) ?: 0L })
+    }
+
+    private suspend fun synchronizePreferences(b: DeviceBinding, room: PreferenceRoom) {
+        var changed = false
+        try {
+            withContext(Dispatchers.IO) {
+                syncPreferenceRoom(api,b,room) { edit ->
+                    store.preferenceJournal(room) { old -> edit(old).also { if (it != old) changed = true } }
+                }
+            }
+        } finally { if (changed) preferenceRevision++ }
+    }
 
     init {
         try {
@@ -214,7 +296,9 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
         for (base in bases()) {
             for (session in history.sessions(base)) {
                 val row = nativeRow(base,session)
-                if (session.turns.isNotEmpty() || directory.any { it.key == row.key }) entries[row.key] = row
+                val placeholder = drafts[row.key]?.takeIf { row.key !in retired }
+                if (session.turns.isNotEmpty() || directory.any { it.key == row.key } || placeholder != null)
+                    entries[row.key] = row.copy(activity = maxOf(row.activity,placeholder?.created ?: 0L))
             }
         }
         for (session in directory) {
@@ -223,10 +307,7 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
                 p.name,p.username,null,session.reason))
         }
         for ((key, saved) in drafts) {
-            if (saved.text.isEmpty() || key in entries) continue
-            val p = profiles.find { it.profile == key.profile } ?: continue
-            entries[key] = AndroidDeviceRow(p.profile,key.sid,"新会话",saved.created,p.name,p.username,null,
-                if (key in retired) RETIRED_REASON else "")
+            if (key !in entries) deviceDraftRow(saved,profiles,retired)?.let { entries[key] = it }
         }
         return entries.values.filter { it.key !in hidden }.sortedWith(compareByDescending<AndroidDeviceRow> { it.activity }
             .thenBy { it.profile }.thenBy { it.sid })
@@ -297,15 +378,12 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
     fun newChat(profile: DeviceProfile) {
         if (!bound || profiles.none { it.profile == profile.profile }) return
         val nativeBase = bases().find { own(it)?.profile == profile.profile }
-        if (nativeBase != null) {
-            open(nativeRow(nativeBase,history.create(nativeBase)))
-        } else {
-            val key = DeviceRoomKey(profile.profile,UUID.randomUUID().toString())
-            val now = System.currentTimeMillis()
-            store.draft(key,"",now)
-            drafts = drafts + (key to DeviceRoomDraft(key,"",now))
-            open(AndroidDeviceRow(profile.profile,key.sid,"新会话",now,profile.name,profile.username,null,""))
-        }
+        val now = System.currentTimeMillis()
+        val row = if (nativeBase != null) nativeRow(nativeBase,history.create(nativeBase))
+            else AndroidDeviceRow(profile.profile,UUID.randomUUID().toString(),"新会话",now,profile.name,profile.username,null,"")
+        store.draft(row.key,"",now)
+        drafts = drafts + (row.key to DeviceRoomDraft(row.key,"",now))
+        open(row)
     }
     fun closeChat() { flushDrafts(); selection = null }
     fun hide(row: AndroidDeviceRow) {
@@ -529,6 +607,20 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
             if (syncBody(b,key)) changed = true
         }
         if (changed) readBodies()
+        val visible = visibleKeys().toSet()
+        val dirty = withContext(Dispatchers.IO) { store.pendingPreferenceRooms() }.toMutableSet()
+        for (entry in all) {
+            val room = PreferenceRoom(entry.profile, entry.sid)
+            val source = PreferenceRoom(entry.profile,"")
+            if (entry.key !in visible && room !in dirty && source !in dirty) continue
+            try {
+                synchronizePreferences(b, room)
+                dirty.remove(source)
+            } catch (e: SharedHttpFailure) {
+                if (e.status == 401 || e.status >= 500) throw e
+                notice = "对话设置暂未同步（HTTP ${e.status}）。"
+            }
+        }
         online = true
     }
 
@@ -580,15 +672,40 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
         if (old != updated) history.update(key.base,key.sid,updated)
     }
 
+    suspend fun previewContext(row: AndroidDeviceRow, question: String): AstrBotContextPreview {
+        val grant = binding ?: return AstrBotContextPreview.unavailable(CONTEXT_UNAVAILABLE)
+        val handle = preferences(row)
+        if (!bound || !handle.ready || handle.contextPending)
+            return AstrBotContextPreview.unavailable("请先同步并核对这段会话的上下文设置。")
+        val preview = api.contextPreview(grant, row.profile, row.sid, question)
+        return if (binding == grant && preferences(row).identity == handle.identity) preview
+               else AstrBotContextPreview.unavailable(CONTEXT_CHANGED)
+    }
+
+    suspend fun previewContext(base: String, session: MobileSession, question: String) =
+        previewContext(nativeRow(base, session), question)
+
     fun send(heart: LiveHeartRate?): Boolean {
         val row = current ?: return false
         val s = chat ?: return false
         return enqueue(row,s.draft,heart,true)
     }
-    fun sendNative(base: String, session: MobileSession, draft: MobileDraft, heart: LiveHeartRate?, consume: Boolean): Boolean =
-        enqueue(nativeRow(base,session),draft,heart,consume)
+    fun sendNative(base: String, session: MobileSession, draft: MobileDraft, heart: LiveHeartRate?, consume: Boolean,
+                   preview: AstrBotContextPreview? = null): Boolean =
+        enqueue(nativeRow(base,session),draft,heart,consume,preview)
 
-    private fun enqueue(row: AndroidDeviceRow, draft: MobileDraft, heart: LiveHeartRate?, consume: Boolean): Boolean {
+    fun sendReviewed(row: AndroidDeviceRow, draft: MobileDraft, prefs: ConversationPreferences,
+                     preview: AstrBotContextPreview, consume: Boolean = true): Boolean {
+        if (current?.key != row.key || !preferences(row).value.sameContext(prefs) ||
+            consume && chat?.draft != draft) {
+            notice = CONTEXT_CHANGED
+            return false
+        }
+        return enqueue(row, draft, null, consume, preview)
+    }
+
+    private fun enqueue(row: AndroidDeviceRow, draft: MobileDraft, heart: LiveHeartRate?, consume: Boolean,
+                        preview: AstrBotContextPreview? = null): Boolean {
         if (!bound || isBusy(row)) return false
         flushDrafts()
         history.flushDrafts()
@@ -608,7 +725,14 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
             return reject("请在电脑 Launcher 档案中执行 /task。")
         val hasMedia = draft.attachments.isNotEmpty()
         if (text.isBlank() && !hasMedia) return false
-        val prompt = heart?.appendTo(text) ?: text
+        val prefs = preferences(row)
+        if (prefs.contextPending)
+            return reject("上下文设置尚未同步，请先核对。")
+        val custom = prefs.value.recentTurns != null
+        if (custom && hasMedia) return reject(CUSTOM_CONTEXT_MEDIA_NOTICE)
+        if (custom != (preview != null) || preview != null && (!preview.canSend || preview.networkMessage == null ||
+                !prefs.ready)) return reject(CONTEXT_CHANGED)
+        val prompt = preview?.networkMessage ?: heart?.appendTo(text) ?: text
         val question = if (hasMedia) deviceMediaText(prompt,draft.attachments) else prompt
         if (deviceQuestionTooLarge(question) || deviceQuestionTooLarge(draft.text)) return reject("提问超过 64 KiB，请缩短后发送。")
         val p = profiles.find { it.profile == row.profile }
@@ -624,7 +748,8 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
             links.any { it.remote == row.key }
         val id = UUID.randomUUID().toString()
         val op = DeviceQueued(row.key,id,question,draft.text.takeIf { consume },local,!exists,hasMedia,native?.draftRevision ?: 0L,
-            authored = draft.text,mediaKeyId = app.connections.keyId.takeIf { hasMedia },nativePrompt = prompt.takeIf { hasMedia })
+            authored = draft.text,mediaKeyId = app.connections.keyId.takeIf { hasMedia },nativePrompt = prompt.takeIf { hasMedia },
+            contextRevision = preview?.revision)
         try {
             if (hasMedia && local != null) {
                 // The native row holds the original attachment references while the reservation
@@ -657,20 +782,27 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
             op = op.copy(key = key)
             pending = store.pending()
         }
-        val found = try { api.operation(b,op.id) } catch (e: SharedHttpFailure) {
-            if (e.status != 404) throw e
-            null
-        }
+        var found: DeviceOperation? = null
+        var checked = false
         try {
+            found = try { api.operation(b,op.id) } catch (e: SharedHttpFailure) {
+                if (e.status != 404) throw e
+                null
+            }
+            checked = true
             val local = op.local
             val native = local?.let(::localSession)
             if (found == null && native != null && app.legacyStorage(native).hasState() &&
                 !managesLegacyNative(local.base,local.sid)) return
             if (op.media) { processMedia(b,op,found); return }
             val receipt = found ?: if (op.start) api.start(b,op.key.profile,op.key.sid,op.id,op.question)
-                else api.send(b,op.key.profile,op.key.sid,op.id,op.question)
+                else api.send(b,op.key.profile,op.key.sid,op.id,op.question,op.contextRevision)
             acknowledge(op,receipt)
+        } catch (_: DeviceContextAwaiting) {
+            notice = "正在等待 AstrBot 确认本次上下文。"
+            return
         } catch (e: SharedHttpFailure) {
+            if (!checked && e.conflict != SharedConflict.CONTEXT_REJECTED) throw e
             val accepted = found != null || op.media && store.pending().any { it.id == op.id && it.dispatched }
             when (deviceSendFailure(e,accepted)) {
                 DeviceSendFailure.KEEP_PENDING -> throw e
@@ -680,7 +812,8 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
                 }
                 DeviceSendFailure.REJECTED -> Unit
             }
-            val reason = "服务拒绝本次发送（HTTP ${e.status}）。"
+            val reason = if (e.conflict == SharedConflict.CONTEXT_REJECTED) "上游未派发本次上下文，请重新预览。"
+                else "服务拒绝本次发送（HTTP ${e.status}）。"
             if (op.media) finishUnsentMedia(op,reason)
             val draftText = op.local?.let(::localSession)?.draft?.text ?: (draftEdits[op.key] ?: drafts[op.key])?.text
             store.reject(op,!op.media && draftText != op.authored)

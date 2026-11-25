@@ -358,19 +358,20 @@ private fun uploadHttpError(status: Int, label: String): String = when (status) 
     else -> "${label}上传失败，服务器返回 HTTP $status。"
 }
 
-private fun openAstrBotConnection(target: URI): HttpURLConnection {
+internal fun openAstrBotConnection(target: URI): HttpURLConnection {
     val url = target.toURL()
     return (if (target.scheme.equals("http", true)) url.openConnection(Proxy.NO_PROXY)
         else url.openConnection()) as HttpURLConnection
 }
 
-private fun sendToAstrBotPayload(
+internal fun sendToAstrBotPayload(
     base: String, token: String, user: String, session: String,
     allowLoopbackHttp: Boolean, onReplyImage: (String?, Int) -> Unit,
     onReplyAudio: (String?, Int) -> Unit, onEvent: (AstrBotTransportEvent) -> Unit, onText: (String) -> Unit,
-    message: () -> Any,
+    contextFields: JSONObject? = null, message: () -> Any,
 ) {
-    val target = endpoint(base, allowLoopbackHttp)
+    val chat = endpoint(base, allowLoopbackHttp)
+    val target = if (contextFields == null) chat else URI(chat.toASCIIString() + "/context/send")
     val c = openAstrBotConnection(target)
     try {
         onEvent(AstrBotTransportEvent.ChatStarted)
@@ -382,8 +383,10 @@ private fun sendToAstrBotPayload(
         c.setRequestProperty("Authorization", "Bearer $token")
         c.setRequestProperty("Accept", "text/event-stream")
         c.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-        val bytes = JSONObject().put("message", message()).put("username", user).put("session_id", session)
-            .put("enable_streaming", true).toString().toByteArray(Charsets.UTF_8)
+        val body = JSONObject().put("message", message()).put("username", user).put("session_id", session)
+            .put("enable_streaming", true)
+        contextFields?.keys()?.forEach { key -> body.put(key, contextFields.get(key)) }
+        val bytes = body.toString().toByteArray(Charsets.UTF_8)
         c.setFixedLengthStreamingMode(bytes.size)
         c.outputStream.use { it.write(bytes) }
         val status = c.responseCode
@@ -392,7 +395,8 @@ private fun sendToAstrBotPayload(
             when (status) {
                 401 -> "密钥无效或已撤销。"
                 403 -> "权限不足，请检查聊天权限。"
-                404 -> "找不到对话接口，请检查 AstrBot 版本和服务地址。"
+                404 -> if (contextFields == null) "找不到对话接口，请检查 AstrBot 版本和服务地址。" else CONTEXT_UNAVAILABLE
+                409 -> if (contextFields != null) CONTEXT_CHANGED else "服务器返回 HTTP 409。"
                 in 300..399 -> "服务返回重定向，请直接填写最终服务地址。"
                 else -> "服务器返回 HTTP $status。"
             }

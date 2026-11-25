@@ -239,6 +239,28 @@ internal class DesktopComposerSession(
         saves.remove(key)?.cancel()
     }
 
+    /** Handle a confirmed rejection after the editor has already consumed its queued draft. */
+    fun restoreRejectedDraft(key: SessionKey): Boolean {
+        val editor = editors[key] ?: return false
+        if (editor.commitInProgress || editor.field.composition != null || recordingKey == key || pendingImport(key) != null) return false
+        val (request, restored) = store.restoredDeviceDraft(key) ?: return false
+        if (editor.draft == restored || !editor.dirty && editor.draft == ComposerDraft()) {
+            if (editor.draft != restored) {
+                editor.editSerial++
+                editor.revision = store.nextDraftRevision()
+                editor.draft = restored
+                editor.field = TextFieldValue(restored.text, selection = TextRange(restored.text.length))
+            }
+            store.acknowledgeRestoredDraft(key, request)
+        } else {
+            // The store moves the rejected draft to its own session when a newer editor must win.
+            editor.revision = store.nextDraftRevision()
+            store.saveDraft(key, editor.revision, editor.draft)
+            editor.dirty = false
+        }
+        return true
+    }
+
     fun consumed(key: SessionKey, revision: Long) {
         val editor = editors[key] ?: return
         if (editor.revision != revision) return

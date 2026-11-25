@@ -92,8 +92,9 @@ def reconcile(db, entry):
         if collision:
             reason = f"电脑历史第 {collision[0]} 轮的编号已在原房间另一位置使用，无法接续。"
     if not reason and last < entry["total"]:
-        busy = db.execute("SELECT 1 FROM turns WHERE room=? AND (status='running' OR needs_review=1) LIMIT 1",
-                          (room,)).fetchone()
+        busy = db.execute("""SELECT 1 FROM turns WHERE room=? AND (status='running' OR needs_review=1)
+                             UNION ALL SELECT 1 FROM device_context_admissions WHERE room=? AND state='pending' LIMIT 1""",
+                          (room, room)).fetchone()
         if busy:
             reason = "原共享房间有正在生成或结果未知的轮次，暂时无法合并电脑历史。"
         else:

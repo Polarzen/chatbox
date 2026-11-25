@@ -1,13 +1,19 @@
 package dev.polarzen.chatbox
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.ui.res.painterResource
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
@@ -24,52 +30,68 @@ internal fun defaultDeviceProfile(available: List<DeviceProfile>, lastProfile: S
         ?: available.singleOrNull()
 }
 
+internal fun initialChatRow(rows: List<AndroidDeviceRow>, kind: String?, owner: String?, sid: String?,
+                            localAvailable: Boolean, currentBase: String, currentSid: String): AndroidDeviceRow? {
+    if (kind == "local" && localAvailable && owner != null && sid != null)
+        return AndroidDeviceRow("phone-only:$owner", sid, "", 0, "", "", owner, "")
+    return rows.firstOrNull { kind == "device" && it.profile == owner && it.sid == sid }
+        ?: rows.firstOrNull { it.nativeBase == currentBase && it.sid == currentSid } ?: rows.firstOrNull()
+}
+
+internal fun androidRecentRows(app: AndroidAppState): List<AndroidDeviceRow> {
+    val shared = app.device.rows
+    val local = (app.connections.services.map { it.base } + "").distinct().flatMap { base ->
+        app.history.sessions(base).mapNotNull { session ->
+            val draft = session.draft
+            val localDraft = session.turns.isEmpty() && (draft.text.isNotBlank() || draft.attachments.isNotEmpty())
+            if ((!localDraft && (base.isNotEmpty() || session.manualName == null && session.turns.isEmpty())) ||
+                shared.any { it.nativeBase == base && it.sid == session.id }) return@mapNotNull null
+            val title = if (localDraft) "草稿 · " + draft.text.lineSequence().first().take(48).ifBlank { "附件" }
+                else session.title
+            AndroidDeviceRow("phone-only:$base", session.id, title,
+                session.turns.lastOrNull()?.createdAt ?: 0L,
+                app.connections.services.firstOrNull { it.base == base }?.name ?: "本机",
+                app.history.user, base, "")
+        }
+    }
+    return if (local.isEmpty()) shared else (shared + local).sortedWith(
+        compareByDescending<AndroidDeviceRow> { it.activity }.thenBy { it.profile }.thenBy { it.sid })
+}
+
 @Composable
 internal fun AndroidRecentScreen(app: AndroidAppState, onOpen: (AndroidDeviceRow) -> Unit,
-                                onCreate: () -> Unit, settings: () -> Unit) {
+                                onCreate: () -> Unit, active: (AndroidDeviceRow) -> Boolean = { false },
+                                modifier: Modifier = Modifier.fillMaxSize().systemBarsPadding(),
+                                settings: () -> Unit) {
     val device = app.device
-    // Directory derivation can scan many profiles. Keep it outside composition and off
-    // the UI dispatcher; only the published, sorted snapshot is consumed by the list.
-    val rows by produceState(emptyList<AndroidDeviceRow>(), app) {
-        snapshotFlow {
-            val shared = device.rows
-            val local = (app.connections.services.map { it.base } + "").distinct().flatMap { base ->
-                app.history.sessions(base).mapNotNull { session ->
-                    val draft = session.draft
-                    val localDraft = session.turns.isEmpty() && (draft.text.isNotBlank() || draft.attachments.isNotEmpty())
-                    if ((!localDraft && (base.isNotEmpty() || session.turns.isEmpty())) ||
-                        shared.any { it.nativeBase == base && it.sid == session.id }) return@mapNotNull null
-                    val title = if (localDraft) "草稿 · " + draft.text.lineSequence().first().take(48).ifBlank { "附件" }
-                        else session.title
-                    AndroidDeviceRow("phone-only:$base", session.id, title,
-                        session.turns.lastOrNull()?.createdAt ?: 0L,
-                        app.connections.services.firstOrNull { it.base == base }?.name ?: "本机",
-                        app.history.user, base, "")
-                }
-            }
-            if (local.isEmpty()) shared else (shared + local).sortedWith(
-                compareByDescending<AndroidDeviceRow> { it.activity }.thenBy { it.profile }.thenBy { it.sid })
-        }.flowOn(Dispatchers.IO).collect { value = it }
+    val rows by produceState<List<AndroidDeviceRow>?>(null, app) {
+        snapshotFlow { androidRecentRows(app) }.flowOn(Dispatchers.IO).collect { value = it }
     }
     var hide by remember { mutableStateOf<AndroidDeviceRow?>(null) }
-    Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 16.dp)) {
+    Column(modifier.padding(horizontal = 12.dp)) {
         Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("最近对话", Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium)
-            TextButton(onClick = settings) { Text("设备设置") }
+            Text("最近对话", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+            IconButton(onClick = onCreate) { Icon(Icons.Outlined.Add, "新建会话") }
+            IconButton(onClick = settings) { Icon(painterResource(R.drawable.chat_settings), "设备设置") }
         }
-        Button(onClick = onCreate, modifier = Modifier.fillMaxWidth()) { Text("＋ 新建会话") }
         if (device.bound && !device.online) Text("离线 · 显示本机缓存",
             Modifier.padding(vertical = 6.dp), style = MaterialTheme.typography.bodySmall)
         if (device.notice.isNotBlank()) Text(device.notice, Modifier.padding(vertical = 4.dp),
             style = MaterialTheme.typography.bodySmall, maxLines = 3, overflow = TextOverflow.Ellipsis)
-        if (rows.isEmpty()) {
+        if (rows.isNullOrEmpty()) {
             Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                Text(if (device.syncing) "正在读取会话…" else "暂无对话。新建会话后即可开始聊天。")
+                if (rows == null || device.syncing) Text("正在读取会话…") else Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("暂无对话", style = MaterialTheme.typography.titleMedium)
+                    TextButton(onClick = onCreate) { Text("新建会话") }
+                }
             }
         } else LazyColumn(modifier = Modifier.weight(1f), contentPadding = PaddingValues(vertical = 8.dp)) {
-            items(rows, key = { "${it.profile.length}:${it.profile}:${it.sid}" }) { row ->
+            items(rows.orEmpty(), key = { "${it.profile.length}:${it.profile}:${it.sid}" }) { row ->
                 var menu by remember { mutableStateOf(false) }
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                val isCurrent = active(row)
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    .background(if (isCurrent) MaterialTheme.colorScheme.primaryContainer else androidx.compose.ui.graphics.Color.Transparent)
+                    .semantics { selected = isCurrent }, verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f).clickable(role = Role.Button) { onOpen(row) }
                         .padding(horizontal = 4.dp, vertical = 12.dp)) {
                         Text(row.title, style = MaterialTheme.typography.titleMedium,
@@ -80,14 +102,13 @@ internal fun AndroidRecentScreen(app: AndroidAppState, onOpen: (AndroidDeviceRow
                     }
                     if (device.bound && !row.profile.startsWith("phone-only:")) Box {
                         IconButton(onClick = { menu = true }) {
-                            Icon(Icons.Default.MoreVert, "会话 ${row.title} 菜单")
+                            Icon(painterResource(R.drawable.chat_more), "会话 ${row.title} 菜单")
                         }
                         DropdownMenu(menu, { menu = false }) {
                             DropdownMenuItem(text = { Text("在本机隐藏") }, onClick = { menu = false; hide = row })
                         }
                     }
                 }
-                HorizontalDivider()
             }
         }
     }

@@ -4,6 +4,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AndroidDeviceHistoryTest {
+    @Test fun confirmedEmptyRoomCanBeRestoredUntilHiddenByItsAuthority() {
+        val source = DeviceProfile("owner","device-source","https://source.invalid","user","电脑","device","service",true)
+        val key = DeviceRoomKey("owner","empty-session")
+        val draft = DeviceRoomDraft(key,"",100L)
+        val row = deviceDraftRow(draft,listOf(source),emptySet())!!
+        assertEquals(row,initialChatRow(listOf(row),"device","owner","empty-session",false,"",""))
+        assertNull(deviceDraftRow(draft,listOf(source),setOf(key)))
+        assertNull(deviceDraftRow(draft,emptyList(),emptySet()))
+        assertTrue(deviceDraftRow(draft.copy(text="未发送的文字"),listOf(source),setOf(key))!!.reason.isNotBlank())
+    }
     private val asset = MobileAsset("/private/input/cat.png","image","private photo","remote-secret")
     private val voice = MobileAsset("/private/reply/w.wav","audio","private voice","another-secret")
     private val row = AndroidDeviceRow("profile","sid","title",0,"电脑","user",null,"")

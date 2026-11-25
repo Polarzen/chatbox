@@ -376,6 +376,12 @@ private fun runPrimaryWindow(
                             store, keys, images, window, historySearchOpen,
                             deviceSync = deviceSync,
                             firstDeviceSetup = firstDeviceSetup,
+                            initialSidebarPinned = settings.recentPanelPinned,
+                            onSidebarPinned = { pinned ->
+                                val updated = settings.copy(recentPanelPinned = pinned)
+                                runCatching { settingsStore.save(updated) }.onSuccess { settings = updated }
+                                    .onFailure { shellError = "无法保存最近对话的固定状态。" }
+                            },
                             onDeviceSetupSeen = {
                                 if (!Files.exists(setupMarker) && runCatching { Files.createFile(setupMarker) }.isFailure)
                                     shellError = "无法保存首启设置。请检查本地数据目录的写入权限。"

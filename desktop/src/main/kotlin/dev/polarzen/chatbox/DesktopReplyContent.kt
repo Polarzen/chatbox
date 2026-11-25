@@ -48,25 +48,23 @@ internal fun DesktopReplyContent(
     retrying: Set<ReplyAttachmentKey>,
     retryEnabled: Boolean,
     onRetry: (ReplyAttachmentKey) -> Unit,
+    partnerName: String = "助手",
 ) {
     if (answer.isEmpty() && attachments.isEmpty()) return
     val urlRanges = remember(answer) { chatUrlRanges(answer) }
     Column {
         var cursor = 0
-        var textLabelShown = false
         // sortedBy is stable: attachments at the same text offset retain their SSE order.
         val orderedAttachments = attachments.sortedBy { it.textOffset }
         for (index in 0..orderedAttachments.size) {
             val attachment = orderedAttachments.getOrNull(index)
             val offset = attachment?.textOffset?.coerceIn(cursor, answer.length) ?: answer.length
             if (offset > cursor) {
-                val prefix = if (textLabelShown) "" else "助手："
                 val bodyOffset = cursor
-                val body = prefix + answer.substring(bodyOffset, offset)
+                val body = answer.substring(bodyOffset, offset)
                 key(profileId, sessionId, bodyOffset) {
-                    SelectableReplyText(body, bodyOffset, prefix.length, urlRanges)
+                    SelectableReplyText(body, bodyOffset, 0, urlRanges)
                 }
-                textLabelShown = true
             }
             if (attachment == null) break
             DisableSelection {
@@ -75,12 +73,11 @@ internal fun DesktopReplyContent(
                     Text("${attachment.type.label}不可用：服务未提供附件编号。", modifier = Modifier.padding(start = 8.dp))
                 } else {
                     DesktopReplyAttachment(key, imageCache, audioCache, cacheGeneration[key] ?: 0,
-                        failures[key], key in retrying, retryEnabled, onRetry)
+                        failures[key], key in retrying, retryEnabled, onRetry, partnerName)
                 }
             }
             cursor = offset
         }
-        if (!textLabelShown && attachments.isNotEmpty()) Text("助手：")
     }
 }
 
@@ -124,7 +121,7 @@ private fun DesktopReplyAttachment(
     failure: String?,
     retrying: Boolean,
     retryEnabled: Boolean,
-    onRetry: (ReplyAttachmentKey) -> Unit,
+    onRetry: (ReplyAttachmentKey) -> Unit, partnerName: String,
 ) {
     var bitmap by remember(key) { mutableStateOf<ImageBitmap?>(null) }
     var validated by remember(key, generation) { mutableStateOf<ValidatedAudio?>(null) }
@@ -144,7 +141,7 @@ private fun DesktopReplyAttachment(
     } else if (image != null) {
         Image(
             bitmap = image,
-            contentDescription = "助手回复图片",
+            contentDescription = "${partnerName}的回复图片",
             modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp).padding(start = 8.dp),
             contentScale = ContentScale.Fit,
         )

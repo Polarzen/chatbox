@@ -1,0 +1,1109 @@
+diff --git a/astrbot/core/agent/runners/tool_loop_agent_runner.py b/astrbot/core/agent/runners/tool_loop_agent_runner.py
+--- a/astrbot/core/agent/runners/tool_loop_agent_runner.py
++++ b/astrbot/core/agent/runners/tool_loop_agent_runner.py
+@@ -109,6 +109,7 @@
+ 
+ 
+ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
++    provider_view = None
+     TOOL_RESULT_MAX_ESTIMATED_TOKENS = 27_500
+     TOOL_RESULT_PREVIEW_MAX_ESTIMATED_TOKENS = 7000
+     EMPTY_OUTPUT_RETRY_ATTEMPTS = 3
+@@ -234,6 +235,8 @@
+         read_tool: FunctionTool | None = None,
+         **kwargs: T.Any,
+     ) -> None:
++        self.context_selection = kwargs.get("context_selection")
++        self.provider_view = None
+         self.req = request
+         self.streaming = streaming
+         self.enforce_max_turns = enforce_max_turns
+@@ -326,6 +329,12 @@
+                 0,
+                 Message(role="system", content=request.system_prompt),
+             )
++        if self.context_selection:
++            if tool_schema_mode != "full":
++                raise ValueError("当前工具模式未验证上下文选择。")
++            self.provider_view = self.context_selection.bind(
++                request, provider, run_context.context.event.unified_msg_origin, messages)
++            run_context.context.event.set_extra("_context_current_index", len(messages) - 1)
+         self.run_context.messages = messages
+ 
+         self.stats = AgentStats()
+@@ -507,8 +516,15 @@
+         self, *, include_model: bool = True
+     ) -> T.AsyncGenerator[LLMResponse, None]:
+         """Yields chunks *and* a final LLMResponse."""
++        messages = self.run_context.messages
++        if self.provider_view:
++            await self.context_selection.verify_current(self.run_context.context.context.conversation_manager, self.req)
++            messages = self.provider_view.project(messages)
++        sanitized = self._sanitize_contexts_for_provider(messages)
++        if self.provider_view and [m.model_dump() if isinstance(m, Message) else m for m in sanitized] != [m.model_dump() for m in messages]:
++            raise ValueError("模型模态转换会改变所选内容。")
+         payload = {
+-            "contexts": self._sanitize_contexts_for_provider(self.run_context.messages),
++            "contexts": sanitized,
+             "func_tool": self._func_tool_for_provider(),
+             "session_id": self.req.session_id,
+             "conversation_id": (
+@@ -518,6 +534,9 @@
+             "abort_signal": self._abort_signal,
+             "request_max_retries": self.request_max_retries,
+         }
++        if self.provider_view:
++            payload["strict_context"] = True
++            payload["request_max_retries"] = 1
+         if include_model:
+             # For primary provider we keep explicit model selection if provided.
+             payload["model"] = self.req.model
+@@ -554,6 +573,11 @@
+             )
+             return
+ 
++        if self.provider_view:
++            async for response in self._iter_llm_responses():
++                self._sanitize_malformed_tool_calls(response)
++                yield response
++            return
+         candidates = [self.provider, *self.fallback_providers]
+         total_candidates = len(candidates)
+         last_exception: Exception | None = None
+@@ -827,12 +851,14 @@
+         # Process request-time context before sending it to the provider.
+         token_usage = self.req.conversation.token_usage if self.req.conversation else 0
+         self._simple_print_message_role("[BefCompact]", self.run_context.messages)
+-        processed_messages = await self._await_or_stop(
+-            self.request_context_manager.process(
+-                self.run_context.messages,
+-                trusted_token_usage=token_usage,
+-            )
+-        )
++        processed_messages = self.run_context.messages
++        if not self.provider_view:
++            processed_messages = await self._await_or_stop(
++                self.request_context_manager.process(
++                    self.run_context.messages,
++                    trusted_token_usage=token_usage,
++                )
++            )
+         if processed_messages is None:
+             yield await self._finalize_aborted_step()
+             return
+diff --git a/astrbot/core/agent/webchat_selection.py b/astrbot/core/agent/webchat_selection.py
+new file mode 100644
+--- /dev/null
++++ b/astrbot/core/agent/webchat_selection.py
+@@ -0,0 +1,272 @@
++"""Explicit request-local WebChat history selection for the local OpenAI runner."""
++
++import hashlib
++import json
++from dataclasses import dataclass
++
++from astrbot.core.agent.context.token_counter import EstimateTokenCounter
++from astrbot.core.agent.message import Message, get_checkpoint_id
++
++
++class SelectionError(ValueError):
++    pass
++
++
++def digest(value):
++    data = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
++    return hashlib.sha256(data.encode()).hexdigest()
++
++
++def provider_identity(provider, fallback_limit=0):
++    from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
++
++    if type(provider) is not ProviderOpenAIOfficial:
++        raise SelectionError("当前提供商未验证上下文选择。")
++    config = provider.provider_config
++    if set(config.get("custom_extra_body") or {}) & {"messages", "model", "tools", "stream"}:
++        raise SelectionError("提供商额外参数覆盖模型请求。")
++    from astrbot.core.utils.llm_metadata import LLM_METADATAS
++    limit = config.get("max_context_tokens") or (LLM_METADATAS.get(provider.get_model()) or {}).get("limit", {}).get("context") or fallback_limit
++    return (config["id"], provider.get_model(), config.get("api_base", ""),
++            limit, digest(config.get("custom_extra_body")))
++
++
++def native_rounds(history):
++    """Map checkpoints to runtime indices. Checkpoints themselves never reach the LLM."""
++    rounds = {}
++    current = []
++    index = 0
++    for item in history:
++        if not isinstance(item, dict):
++            raise SelectionError("原生历史格式无法验证。")
++        if item.get("role") == "_checkpoint":
++            checkpoint = get_checkpoint_id(item)
++            if not checkpoint or checkpoint in rounds:
++                raise SelectionError("原生历史检查点重复或缺失。")
++            rounds[checkpoint] = current
++            current = []
++        else:
++            current.append((index, item))
++            index += 1
++    if current:
++        raise SelectionError("原生历史末尾缺少检查点。")
++    return rounds
++
++
++def check_tool_bundle(messages):
++    pending = set()
++    for item in messages:
++        role = item["role"]
++        if role == "tool":
++            tool_id = item.get("tool_call_id")
++            if tool_id not in pending:
++                raise SelectionError("历史工具结果无法匹配调用。")
++            pending.remove(tool_id)
++        else:
++            if pending:
++                raise SelectionError("历史工具调用缺少结果。")
++            if calls := item.get("tool_calls"):
++                if role != "assistant" or not isinstance(calls, list):
++                    raise SelectionError("历史工具调用格式无法验证。")
++                ids = [c.get("id") if isinstance(c, dict) else None for c in calls]
++                if not all(isinstance(i, str) and i for i in ids) or len(set(ids)) != len(ids):
++                    raise SelectionError("历史工具调用标识缺失或重复。")
++                pending = set(ids)
++    if pending:
++        raise SelectionError("历史工具调用缺少结果。")
++
++
++def token_estimate(messages):
++    counter = EstimateTokenCounter()
++    return counter.count_tokens([Message.model_validate(m) for m in messages]) + 4 * len(messages)
++
++
++@dataclass(frozen=True)
++class ContextSelection:
++    revision: str
++    umo: str
++    cid: str
++    history_hash: str
++    message: str
++    provider_key: tuple
++    indices: frozenset
++    begin_count: int = 0
++    begin_hash: str = digest([])
++
++    async def verify_current(self, manager, request):
++        cid = await manager.get_curr_conversation_id(self.umo)
++        if not request.conversation or cid != request.conversation.cid:
++            raise SelectionError("当前会话已切换，请重新预览。")
++        conv = await manager.get_conversation(self.umo, cid)
++        if not conv or digest(json.loads(conv.history)) != self.history_hash:
++            raise SelectionError("原生历史已变化，请重新预览。")
++
++    def bind(self, request, provider, umo, history):
++        if (umo != self.umo or not request.conversation
++                or self.cid and self.cid != request.conversation.cid
++                or not isinstance(request.contexts, list)
++                or digest(request.contexts[:self.begin_count]) != self.begin_hash
++                or digest(request.contexts[self.begin_count:]) != self.history_hash
++                or digest(json.loads(request.conversation.history)) != self.history_hash):
++            raise SelectionError("历史或请求钩子已改变上下文，请重新预览。")
++        if provider_identity(provider) != self.provider_key or request.model not in (None, "", self.provider_key[1]):
++            raise SelectionError("选择的模型已变化，请重新预览。")
++        if request.prompt != self.message or request.image_urls or request.audio_urls:
++            raise SelectionError("当前问题已被转换，无法验证。")
++        # Verify the complete prefix including the current question on each agent step.
++        prefix = [m.model_dump() for m in history]
++        start = int(bool(request.system_prompt)) + self.begin_count
++        end = len(prefix) - 1
++        if end < start or prefix[end]["role"] != "user":
++            raise SelectionError("无法定位当前问题。")
++        current = prefix[end]["content"]
++        parts = [current] if isinstance(current, str) else [p.get("text") for p in current if p.get("type") == "text"]
++        if parts.count(self.message) != 1:
++            raise SelectionError("无法确认当前问题恰好发送一次。")
++        keep = [i for i in range(end) if i < start or i - start in self.indices]
++        return ProviderView(prefix, keep)
++
++
++@dataclass
++class ProviderView:
++    prefix: list
++    keep: list
++
++    def project(self, messages):
++        n = len(self.prefix)
++        if [m.model_dump() for m in messages[:n]] != self.prefix:
++            raise SelectionError("运行中的历史被修改，请重新预览。")
++        return [messages[i] for i in self.keep] + messages[n - 1:]
++
++
++def verified_turns(records):
++    """Index prompt/reply pairs without treating attachments as plain text."""
++    rows = {}
++    unlinked = set()
++    filenames = {}
++    for record in records:
++        kind = record.content.get("type")
++        if kind not in ("bot", "user"):
++            continue
++        parts = record.content.get("message") or []
++        text = "".join(p.get("text", "") for p in parts if p.get("type") == "plain")
++        if not record.llm_checkpoint_id:
++            if kind == "user":
++                unlinked.add(text)
++            continue
++        row = rows.setdefault(record.llm_checkpoint_id, {"user": [], "bot": [], "plain": True})
++        row[kind].append(text)
++        if kind == "user":
++            filenames.setdefault(record.llm_checkpoint_id, set()).update(
++                p["filename"] for p in parts if p.get("type") == "file" and isinstance(p.get("filename"), str))
++        if any(p.get("type") not in ("plain", "think", "tool_call", "tool_call_result") for p in parts):
++            row["plain"] = False
++    indexed = {}
++    for key, row in rows.items():
++        if len(row["user"]) == 1 and row["bot"]:
++            indexed[key] = (row["user"][0], "".join(row["bot"]), row["plain"])
++        elif len(row["user"]) != 1:
++            unlinked.update(row["user"])
++    return indexed, unlinked, filenames
++
++
++def select_history(history, records, settings):
++    """Hints prove locally held display text. Only pins and N select model input."""
++    indexed, unlinked, filenames = verified_turns(records)
++    by_pair = {}
++    for key, (question, answer, _) in indexed.items():
++        by_pair.setdefault((question, answer), []).append(key)
++    native = native_rounds(history)
++    recent = settings["recent"]
++    completed = [key for key, entries in native.items()
++                 if entries and entries[-1][1].get("role") == "assistant" and not entries[-1][1].get("tool_calls")]
++    if recent and set(list(indexed)[-recent:]) - native.keys():
++        raise SelectionError("最近轮次在原生历史中缺失，请减少轮数。")
++    required = {key: {"user", "assistant"} for key in completed[-recent:]} if recent else {}
++    if required.keys() - indexed.keys():
++        raise SelectionError("最近轮次无法与已保存的聊天记录核实。")
++    evidence = {}
++    for hint in [*settings.get("hints", []), *settings["pins"]]:
++        pair = (hint["question"], hint["answer"])
++        checkpoint = hint.get("checkpoint")
++        if checkpoint:
++            matched = checkpoint in indexed and indexed[checkpoint][:2] == pair
++        else:
++            matches = by_pair.get(pair, [])
++            matched = len(matches) == 1 and pair[0] not in unlinked and indexed[matches[0]][2]
++            checkpoint = matches[0] if matched else None
++        if not matched or checkpoint not in native:
++            if "role" in hint:
++                raise SelectionError("固定消息的原生检查点缺失或不唯一。请刷新记录或移除该固定项。")
++            continue
++        evidence[checkpoint] = hint
++        if "role" in hint:
++            required.setdefault(checkpoint, set()).add(hint["role"])
++
++    keep, selected, costs = set(), [], []
++    for key, entries in native.items():
++        if key not in required:
++            continue
++        turns = [(i, item) for i, item in entries if item["role"] != "system"]
++        roles = [item["role"] for _, item in turns]
++        if (not roles or roles[0] != "user" or roles.count("user") != 1
++                or roles[-1] != "assistant" or turns[-1][1].get("tool_calls")):
++            raise SelectionError("所选轮次尚未完成或边界不明确。")
++        check_tool_bundle([item for _, item in entries])
++        systems = [(i, m) for i, m in entries if m["role"] == "system"]
++        if len(required[key]) == 1 and systems:
++            user_index = turns[0][0]
++            for index, block in systems:
++                content = block.get("content")
++                if (index >= user_index or not isinstance(content, str)
++                        or not content.startswith("File Extract Results of user uploaded files:\n")
++                        or "\nFile Name: " not in content
++                        or content.rsplit("\nFile Name: ", 1)[1] not in filenames.get(key, ())):
++                    raise SelectionError("此轮含无法归属单侧的系统内容，请选择完整问答。")
++            # _apply_file_extract attaches uploaded-file text before this turn's user prompt.
++            if "user" not in required[key]:
++                systems = []
++        for role, field in (("user", "question"), ("assistant", "answer")):
++            if role not in required[key]:
++                continue
++            view = {"role": role, "text": "", "checkpoint": key}
++            if proof := evidence.get(key):
++                view.update(text=proof[field], seq=proof["seq"])
++            selected.append(view)
++            group = systems + [(i, m) for i, m in turns if (m["role"] == "user") == (role == "user")]
++            systems = []
++            keep.update(i for i, _ in group)
++            costs.append(token_estimate([m for _, m in group]))
++    projected = [m for i, m in enumerate(m for m in history if m["role"] != "_checkpoint") if i in keep]
++    return frozenset(keep), selected, projected, costs
++
++
++async def reject_event(event, message):
++    from astrbot.core.platform.sources.webchat.webchat_queue_mgr import webchat_queue_mgr
++
++    event.set_extra("_context_failed", True)
++    await webchat_queue_mgr.put_back_queue(str(event.message_obj.message_id),
++                                          {"type": "error", "data": message})
++
++
++def wire_estimate(messages, tools):
++    wire = json.dumps([messages, tools], ensure_ascii=False, separators=(",", ":"))
++    return token_estimate([{"role": "user", "content": wire}])
++
++
++def verify_wire_budget(provider, payload, extra):
++    limit = provider.provider_config.get("max_context_tokens", 0)
++    messages = payload["messages"]
++    check_tool_bundle(messages)
++    if set(extra) & {"messages", "model", "tools", "stream"}:
++        raise SelectionError("提供商额外参数改变模型请求。")
++    import copy
++    cleaned = copy.deepcopy({"messages": messages})
++    provider._sanitize_assistant_messages(cleaned)
++    if len(cleaned["messages"]) != len(messages):
++        raise SelectionError("提供商将移除所选消息，请调整范围。")
++    # Include the wire-format tool schema, reasoning and metadata. This is an estimate.
++    cost = wire_estimate(messages, payload.get("tools", []))
++    reserve = extra.get("max_completion_tokens") or extra.get("max_tokens") or payload.get("max_tokens") or 0
++    if limit and cost + reserve >= limit:
++        raise SelectionError(f"完整请求预计 {cost} tokens，预留输出 {reserve}，配置上限 {limit}。请减少轮数或移除固定项。")
+diff --git a/astrbot/core/astr_agent_run_util.py b/astrbot/core/astr_agent_run_util.py
+--- a/astrbot/core/astr_agent_run_util.py
++++ b/astrbot/core/astr_agent_run_util.py
+@@ -326,6 +326,10 @@
+                     pass
+             logger.error(traceback.format_exc())
+ 
++            if astr_event.get_extra("_context_selection"):
++                from astrbot.core.agent.webchat_selection import SelectionError, reject_event
++                await reject_event(astr_event, str(e) if isinstance(e, SelectionError) else "模型未能处理所选范围，请检查容量或调整上下文。")
++                return
+             custom_error_message = extract_persona_custom_error_message_from_event(
+                 astr_event
+             )
+diff --git a/astrbot/core/astr_main_agent.py b/astrbot/core/astr_main_agent.py
+--- a/astrbot/core/astr_main_agent.py
++++ b/astrbot/core/astr_main_agent.py
+@@ -651,6 +651,10 @@
+                     "You cannot use shell or Python to perform skills. "
+                     "If you need to use these capabilities, ask the user to enable Computer Use in the AstrBot WebUI -> Config."
+                 )
++    _apply_persona_tools(req, persona, plugin_context)
++
++
++def _apply_persona_tools(req, persona, plugin_context):
+     tmgr = plugin_context.get_llm_tool_manager()
+ 
+     # inject toolset in the persona
+@@ -1173,6 +1177,8 @@
+     config: MainAgentBuildConfig,
+     req: ProviderRequest,
+     session_id: str,
++    *,
++    configure_environment: bool = True,
+ ) -> None:
+     if req.func_tool is None:
+         req.func_tool = ToolSet()
+@@ -1185,8 +1191,9 @@
+         if not ep or not at:
+             logger.error("Shipyard sandbox configuration is incomplete.")
+             return
+-        os.environ["SHIPYARD_ENDPOINT"] = ep
+-        os.environ["SHIPYARD_ACCESS_TOKEN"] = at
++        if configure_environment:
++            os.environ["SHIPYARD_ENDPOINT"] = ep
++            os.environ["SHIPYARD_ACCESS_TOKEN"] = at
+ 
+     tool_mgr = llm_tools
+     req.func_tool.add_tool(tool_mgr.get_builtin_tool(ExecuteShellTool))
+@@ -1282,8 +1289,10 @@
+ ) -> None:
+     cfg = plugin_context.get_config(umo=event.unified_msg_origin)
+     normalize_legacy_web_search_config(cfg)
+-    prov_settings = cfg.get("provider_settings", {})
+-
++    _add_configured_web_search_tools(req, plugin_context, cfg.get("provider_settings", {}))
++
++
++def _add_configured_web_search_tools(req, plugin_context, prov_settings):
+     if not prov_settings.get("web_search", False):
+         return
+ 
+@@ -1957,7 +1966,7 @@
+                 config.fallback_max_context_tokens
+             )
+ 
+-    if event.get_platform_name() == "webchat":
++    if event.get_platform_name() == "webchat" and not event.get_extra("_context_selection"):
+         asyncio.create_task(_handle_webchat(event, req, provider))
+ 
+     if req.func_tool and req.func_tool.tools:
+@@ -2000,6 +2009,7 @@
+     )
+ 
+     reset_coro = agent_runner.reset(
++        context_selection=event.get_extra("_context_selection"),
+         provider=provider,
+         request=req,
+         run_context=AgentContextWrapper(
+diff --git a/astrbot/core/pipeline/process_stage/follow_up.py b/astrbot/core/pipeline/process_stage/follow_up.py
+--- a/astrbot/core/pipeline/process_stage/follow_up.py
++++ b/astrbot/core/pipeline/process_stage/follow_up.py
+@@ -182,6 +182,8 @@
+         return None
+     runner_event = getattr(getattr(runner.run_context, "context", None), "event", None)
+     if runner_event is None:
++        return None
++    if event.get_extra("_context_selection") or runner_event.get_extra("_context_selection"):
+         return None
+     active_sender_id = runner_event.get_sender_id()
+     if not active_sender_id or active_sender_id != sender_id:
+diff --git a/astrbot/core/pipeline/process_stage/method/agent_request.py b/astrbot/core/pipeline/process_stage/method/agent_request.py
+--- a/astrbot/core/pipeline/process_stage/method/agent_request.py
++++ b/astrbot/core/pipeline/process_stage/method/agent_request.py
+@@ -49,6 +49,10 @@
+             )
+             return
+ 
++        if event.get_extra("_context_selection") and not isinstance(self.agent_sub_stage, InternalAgentSubStage):
++            from astrbot.core.agent.webchat_selection import reject_event
++            await reject_event(event, "运行器已变化，请重新预览。")
++            return
+         agent_config = self.config.get("agent_runner", {})
+         event.trace.record(
+             "agent_start",
+diff --git a/astrbot/core/pipeline/process_stage/method/agent_sub_stages/internal.py b/astrbot/core/pipeline/process_stage/method/agent_sub_stages/internal.py
+--- a/astrbot/core/pipeline/process_stage/method/agent_sub_stages/internal.py
++++ b/astrbot/core/pipeline/process_stage/method/agent_sub_stages/internal.py
+@@ -2,6 +2,7 @@
+ 
+ import asyncio
+ import base64
++import json
+ from collections.abc import AsyncGenerator
+ from dataclasses import replace
+ 
+@@ -480,6 +481,10 @@
+                         unregister_active_runner(event.unified_msg_origin, agent_runner)
+ 
+         except Exception as e:
++            if event.get_extra("_context_selection"):
++                from astrbot.core.agent.webchat_selection import SelectionError, reject_event
++                await reject_event(event, str(e) if isinstance(e, SelectionError) else "运行器无法核实请求，请重新预览。")
++                return
+             logger.error(f"Error occurred while processing agent: {e}")
+             custom_error_message = extract_persona_custom_error_message_from_event(
+                 event
+@@ -510,11 +515,17 @@
+         runner_stats: AgentStats | None,
+         user_aborted: bool = False,
+     ) -> None:
+-        if not req or not req.conversation:
++        if event.get_extra("_context_failed") or not req or not req.conversation:
+             return
+ 
+         messages_to_save: list[Message] = []
+-        skipped_initial_system = False
++        selection = event.get_extra("_context_selection")
++        previous = []
++        if selection:
++            await selection.verify_current(self.conv_manager, req)
++            previous = json.loads(req.conversation.history)
++            all_messages = all_messages[event.get_extra("_context_current_index"):]
++        skipped_initial_system = bool(selection)
+         for message in all_messages:
+             if message.role == "system" and not skipped_initial_system:
+                 skipped_initial_system = True
+@@ -525,7 +536,7 @@
+ 
+         checkpoint_id = event.get_extra("llm_checkpoint_id")
+         has_checkpoint = isinstance(checkpoint_id, str) and bool(checkpoint_id)
+-        message_to_save = dump_messages_with_checkpoints(messages_to_save)
++        message_to_save = previous + dump_messages_with_checkpoints(messages_to_save)
+         if not user_aborted and (
+             llm_response is None or llm_response.role != "assistant"
+         ):
+@@ -536,7 +547,7 @@
+                     ).model_dump()
+                 )
+             if has_checkpoint or (llm_response is None and req.tool_calls_result):
+-                token_usage = None if has_checkpoint else req.conversation.token_usage
++                token_usage = 0 if selection else (None if has_checkpoint else req.conversation.token_usage)
+                 await self.conv_manager.update_conversation(
+                     event.unified_msg_origin,
+                     req.conversation.cid,
+@@ -570,6 +581,12 @@
+                 ).model_dump()
+             )
+ 
++        if selection and has_checkpoint and not user_aborted and llm_response and llm_response.completion_text:
++            from astrbot.core.agent.webchat_selection import digest
++            # Optional completion proof. An older/default writer may remove this;
++            # a subsequent duplicate then receives 409 rather than an unverified replay.
++            message_to_save[-1]["_chatbox_completed"] = digest(llm_response.completion_text)
++
+         # if user_aborted:
+         #     message_to_save.append(
+         #         Message(
+@@ -587,7 +604,7 @@
+             event.unified_msg_origin,
+             req.conversation.cid,
+             history=message_to_save,
+-            token_usage=token_usage,
++            token_usage=0 if event.get_extra("_context_selection") else token_usage,
+         )
+ 
+ 
+diff --git a/astrbot/core/platform/sources/webchat/webchat_adapter.py b/astrbot/core/platform/sources/webchat/webchat_adapter.py
+--- a/astrbot/core/platform/sources/webchat/webchat_adapter.py
++++ b/astrbot/core/platform/sources/webchat/webchat_adapter.py
+@@ -257,6 +257,8 @@
+             payload = raw_message[2]
+             if isinstance(payload, dict):
+                 message_event.set_extra("locale", payload.get("locale"))
++                if payload.get("_context_selection") is not None:
++                    message_event.set_extra("_context_selection", payload["_context_selection"])
+                 flags = resolve_webchat_request_flags(payload)
+                 message_event.set_extra("flags", flags)
+                 for key, value in flags.items():
+diff --git a/astrbot/core/provider/sources/openai_source.py b/astrbot/core/provider/sources/openai_source.py
+--- a/astrbot/core/provider/sources/openai_source.py
++++ b/astrbot/core/provider/sources/openai_source.py
+@@ -536,6 +536,7 @@
+         *,
+         request_max_retries: int | None = None,
+         conversation_id: str | None = None,
++        strict_context: bool = False,
+     ) -> LLMResponse:
+         if tools:
+             model = payloads.get("model", "").lower()
+@@ -565,6 +566,9 @@
+ 
+         model = payloads.get("model", "").lower()
+ 
++        if strict_context:
++            from astrbot.core.agent.webchat_selection import verify_wire_budget
++            verify_wire_budget(self, payloads, extra_body)
+         self._sanitize_assistant_messages(payloads)
+ 
+         completion = await retry_provider_request(
+@@ -596,6 +600,7 @@
+         *,
+         request_max_retries: int | None = None,
+         conversation_id: str | None = None,
++        strict_context: bool = False,
+     ) -> AsyncGenerator[LLMResponse, None]:
+         """流式查询API，逐步返回结果"""
+         if tools:
+@@ -625,6 +630,9 @@
+             del payloads[key]
+         self._apply_provider_specific_request_overrides(payloads, extra_body)
+ 
++        if strict_context:
++            from astrbot.core.agent.webchat_selection import verify_wire_budget
++            verify_wire_budget(self, payloads, extra_body)
+         self._sanitize_assistant_messages(payloads)
+ 
+         stream = await retry_provider_request(
+@@ -1205,6 +1213,7 @@
+         request_max_retries: int | None = None,
+         **kwargs,
+     ) -> LLMResponse:
++        strict_context = kwargs.pop("strict_context", False)
+         conversation_id = kwargs.pop("conversation_id", None)
+         payloads, context_query = await self._prepare_chat_payload(
+             prompt,
+@@ -1231,7 +1240,7 @@
+         for retry_cnt in range(max_retries):
+             try:
+                 self.client.api_key = chosen_key
+-                query_kwargs = {}
++                query_kwargs = {"strict_context": True} if strict_context else {}
+                 if conversation_id:
+                     query_kwargs["conversation_id"] = conversation_id
+                 llm_response = await self._query(
+@@ -1242,6 +1251,8 @@
+                 )
+                 break
+             except Exception as e:
++                if strict_context:
++                    raise
+                 last_exception = e
+                 (
+                     success,
+@@ -1288,6 +1299,7 @@
+         **kwargs,
+     ) -> AsyncGenerator[LLMResponse, None]:
+         """流式对话，与服务商交互并逐步返回结果"""
++        strict_context = kwargs.pop("strict_context", False)
+         conversation_id = kwargs.pop("conversation_id", None)
+         payloads, context_query = await self._prepare_chat_payload(
+             prompt,
+@@ -1312,7 +1324,7 @@
+         for retry_cnt in range(max_retries):
+             try:
+                 self.client.api_key = chosen_key
+-                query_kwargs = {}
++                query_kwargs = {"strict_context": True} if strict_context else {}
+                 if conversation_id:
+                     query_kwargs["conversation_id"] = conversation_id
+                 async for response in self._query_stream(
+@@ -1324,6 +1336,8 @@
+                     yield response
+                 break
+             except Exception as e:
++                if strict_context:
++                    raise
+                 last_exception = e
+                 (
+                     success,
+diff --git a/astrbot/dashboard/api/auth.py b/astrbot/dashboard/api/auth.py
+--- a/astrbot/dashboard/api/auth.py
++++ b/astrbot/dashboard/api/auth.py
+@@ -50,6 +50,7 @@
+     """Authenticate a request and expose its API key scope to OpenAPI."""
+ 
+     scope: str
++    record_use: bool = True
+ 
+     async def __call__(self, request: Request) -> AuthContext:
+         """Require the configured scope for a request.
+@@ -60,7 +61,7 @@
+         Returns:
+             Authentication context for the authorized caller.
+         """
+-        return await require_scope(request, self.scope)
++        return await require_scope(request, self.scope, record_use=self.record_use)
+ 
+ 
+ def _extract_raw_api_key(request: Request) -> str | None:
+@@ -133,6 +134,7 @@
+     request: Request,
+     raw_key: str,
+     scope: str,
++    *, record_use: bool = True,
+ ) -> AuthContext:
+     if scope not in ALL_OPEN_API_SCOPES:
+         raise ApiError("Insufficient API key scope", status_code=403)
+@@ -155,7 +157,8 @@
+         )
+     ):
+         raise ApiError("Insufficient API key scope", status_code=403)
+-    await request.app.state.db.touch_api_key(api_key.key_id)
++    if record_use:
++        await request.app.state.db.touch_api_key(api_key.key_id)
+     return AuthContext(
+         username=f"{API_KEY_USERNAME_PREFIX}{api_key.key_id}",
+         scopes=scopes,
+@@ -164,10 +167,10 @@
+     )
+ 
+ 
+-async def require_scope(request: Request, scope: str) -> AuthContext:
++async def require_scope(request: Request, scope: str, *, record_use: bool = True) -> AuthContext:
+     raw_key = _extract_raw_api_key(request)
+     if raw_key:
+-        return await _require_api_key_scope(request, raw_key, scope)
++        return await _require_api_key_scope(request, raw_key, scope, record_use=record_use)
+ 
+     token = _extract_dashboard_jwt(request)
+     if not token:
+@@ -184,7 +187,7 @@
+         auth_header = request.headers.get("Authorization", "").strip()
+         if auth_header.startswith("Bearer "):
+             try:
+-                return await _require_api_key_scope(request, token, scope)
++                return await _require_api_key_scope(request, token, scope, record_use=record_use)
+             except ApiError as api_key_exc:
+                 raise api_key_exc from exc
+         raise ApiError("Invalid token", status_code=401) from exc
+diff --git a/astrbot/dashboard/api/open_api.py b/astrbot/dashboard/api/open_api.py
+--- a/astrbot/dashboard/api/open_api.py
++++ b/astrbot/dashboard/api/open_api.py
+@@ -5,8 +5,10 @@
+ from fastapi import APIRouter, Depends, File, Query, Request, UploadFile, WebSocket
+ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+ 
++from astrbot.core.utils.session_lock import session_lock_manager
+ from astrbot.dashboard.responses import ApiError, error, ok
+-from astrbot.dashboard.schemas import ImMessageRequest, OpenApiChatRequest
++from astrbot.dashboard.schemas import ContextPreviewRequest, ContextSendRequest, ImMessageRequest, OpenApiChatRequest
++from astrbot.dashboard.services.chatbox_context import context_request
+ from astrbot.dashboard.services.auth_service import CHAT_ADMIN_SCOPE
+ from astrbot.dashboard.services.chat_service import (
+     ChatService,
+@@ -188,6 +190,27 @@
+     )
+ 
+ 
++@router.post("/chat/context/preview")
++async def chat_context_preview(
++    payload: ContextPreviewRequest,
++    auth: AuthContext = Depends(ScopeDependency("chat", record_use=False)),
++    service: OpenApiService = Depends(get_service),
++    chat: ChatService = Depends(get_chat_service),
++):
++    return await context_request(payload.model_dump(), auth, service, chat, sending=False)
++
++
++@router.post("/chat/context/send")
++async def chat_context_send(
++    payload: ContextSendRequest,
++    auth: AuthContext = Depends(require_chat_scope),
++    service: OpenApiService = Depends(get_service),
++    chat: ChatService = Depends(get_chat_service),
++):
++    async with session_lock_manager.acquire_lock(f"chatbox:admission:{payload.session_id.strip()}"):
++        return await context_request(payload.model_dump(), auth, service, chat, sending=True)
++
++
+ @router.get("/chat/sessions")
+ async def chat_sessions(
+     request: Request,
+diff --git a/astrbot/dashboard/schemas.py b/astrbot/dashboard/schemas.py
+--- a/astrbot/dashboard/schemas.py
++++ b/astrbot/dashboard/schemas.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ from typing import Any, Literal
++from uuid import UUID
+ 
+ from pydantic import BaseModel, ConfigDict, Field
+ 
+@@ -224,6 +225,39 @@
+ 
+ class PypiIndexTestRequest(BaseModel):
+     index_url: str | None = None
++
++
++class ContextHint(BaseModel):
++    model_config = ConfigDict(extra="forbid", strict=True)
++    seq: int = Field(ge=1)
++    question: str
++    answer: str
++    checkpoint: str | None = None
++
++
++class ContextPin(ContextHint):
++    role: Literal["user", "assistant"]
++
++
++class ContextSettings(BaseModel):
++    model_config = ConfigDict(extra="forbid", strict=True)
++    recent: int = Field(ge=0, le=500)
++    pins: list[ContextPin] = Field(max_length=128)
++    hints: list[ContextHint] = Field(default_factory=list, max_length=500)
++
++
++class ContextPreviewRequest(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++    username: str
++    session_id: str
++    message: str
++    context: ContextSettings
++
++
++class ContextSendRequest(ContextPreviewRequest):
++    turn_id: UUID
++    revision: str
++    enable_streaming: bool = True
+ 
+ 
+ class OpenApiChatRequest(OpenModel):
+diff --git a/astrbot/dashboard/services/chat_service.py b/astrbot/dashboard/services/chat_service.py
+--- a/astrbot/dashboard/services/chat_service.py
++++ b/astrbot/dashboard/services/chat_service.py
+@@ -1279,6 +1279,7 @@
+         self,
+         username: str,
+         post_data: dict,
++        *, context_selection=None, context_receipt=None,
+     ) -> AsyncIterator[str]:
+         if "message" not in post_data and "files" not in post_data:
+             raise ChatServiceError("Missing key: message or files")
+@@ -1332,7 +1333,8 @@
+             saved_user_record = await self.platform_history_mgr.insert(
+                 platform_id=platform_history_id,
+                 user_id=webchat_conv_id,
+-                content={"type": "user", "message": message_parts_for_storage},
++                content={"type": "user", "message": message_parts_for_storage,
++                         **({"chatbox_receipt": context_receipt} if context_receipt else {})},
+                 sender_id=username,
+                 sender_name=username,
+                 llm_checkpoint_id=llm_checkpoint_id,
+@@ -1370,6 +1372,7 @@
+                     webchat_conv_id,
+                     {
+                         "message": message_parts,
++                        "_context_selection": context_selection,
+                         "selected_provider": selected_provider,
+                         "selected_model": selected_model,
+                         "flags": flags,
+diff --git a/astrbot/dashboard/services/chatbox_context.py b/astrbot/dashboard/services/chatbox_context.py
+new file mode 100644
+--- /dev/null
++++ b/astrbot/dashboard/services/chatbox_context.py
+@@ -0,0 +1,203 @@
++"""Read-only preview and at-most-once admission for explicit WebChat context."""
++
++import json
++
++from astrbot.core.astr_main_agent_resources import (
++    CHATUI_INLINE_GENUI_SYSTEM_PROMPT, CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT,
++    LLM_SAFETY_MODE_SYSTEM_PROMPT, TOOL_CALL_PROMPT,
++)
++from types import SimpleNamespace
++from uuid import UUID
++
++from fastapi.responses import StreamingResponse
++
++from astrbot.core.agent.webchat_selection import (
++    ContextSelection, SelectionError, digest, provider_identity, select_history, wire_estimate,
++)
++from astrbot.core.config.agent_runner import normalize_agent_runner
++from astrbot.dashboard.responses import ApiError, ok
++from astrbot.dashboard.services.auth_service import CHAT_ADMIN_SCOPE
++from astrbot.dashboard.services.chat_service import build_webchat_unified_msg_origin, extract_platform_message_text
++from astrbot.dashboard.services.open_api_service import OpenApiServiceError
++
++
++def preview_tool_schema(plugin_ctx, conf, persona, provider, umo):
++    """Use the native selection and schema builders without executing tools or hooks."""
++    from astrbot.core.astr_main_agent import (
++        MainAgentBuildConfig, _add_configured_web_search_tools, _apply_local_env_tools,
++        _apply_persona_tools, _apply_sandbox_tools, _apply_web_search_citation_prompt,
++        _plugin_tool_fix, _proactive_cron_job_tools,
++    )
++    from astrbot.core.provider.entities import ProviderRequest
++    from astrbot.core.tools.knowledge_base_tools import KnowledgeBaseQueryTool
++    from astrbot.core.tools.message_tools import SendMessageToUserTool
++
++    req = ProviderRequest(system_prompt="")
++    settings = conf["provider_settings"]
++    manager = plugin_ctx.get_llm_tool_manager()
++    _apply_persona_tools(req, persona, plugin_ctx)
++    if conf.get("kb_agentic_mode", False):
++        req.func_tool.add_tool(manager.get_builtin_tool(KnowledgeBaseQueryTool))
++    plugins = conf.get("plugin_set", ["*"])
++    event = SimpleNamespace(plugins_name=None if plugins == ["*"] else plugins,
++                            get_platform_name=lambda: "webchat")
++    _plugin_tool_fix(event, req)
++    _add_configured_web_search_tools(req, plugin_ctx, settings)
++    runtime = settings.get("computer_use_runtime", "none")
++    if runtime == "local":
++        _apply_local_env_tools(req, plugin_ctx)
++    elif runtime == "sandbox":
++        cfg = MainAgentBuildConfig(sandbox_cfg=settings.get("sandbox", {}))
++        _apply_sandbox_tools(cfg, req, umo, configure_environment=False)
++    if settings.get("proactive_capability", {}).get("add_cron_tools", True):
++        _proactive_cron_job_tools(req, plugin_ctx)
++    req.func_tool.add_tool(manager.get_builtin_tool(SendMessageToUserTool))
++    _apply_web_search_citation_prompt(event, req)
++    modalities = provider.provider_config.get("modalities")
++    if modalities and "tool_use" not in modalities:
++        return [], req.system_prompt
++    return req.func_tool.openai_schema(omit_empty_parameter_field="gemini" in provider.get_model().lower()), req.system_prompt
++
++
++async def context_request(data, auth, service, chat, *, sending):
++    username = data["username"].strip() if auth.via == "api_key" else auth.username
++    sid = data["session_id"].strip()
++    if not sid or not username or "!" in sid or "!" in username:
++        raise ApiError("会话标识无效。")
++    if auth.via == "api_key":
++        try:
++            await service.validate_chat_username(username, allow_admin_username=(
++                "*" in auth.scopes or CHAT_ADMIN_SCOPE in auth.scopes))
++        except OpenApiServiceError as exc:
++            raise ApiError(str(exc), 403) from exc
++    session = await chat.db.get_platform_session_by_id(sid)
++    if session and (session.creator != username or session.is_group or session.platform_id != "webchat"):
++        raise ApiError("会话不属于此用户或不是 WebChat 私聊。", 403)
++    new_session = session is None
++    session = session or SimpleNamespace(creator=username, session_id=sid, platform_id="webchat", is_group=False)
++    records = await chat.get_sorted_platform_history(session)
++    if new_session and records:
++        raise ApiError("会话归属无法核实。", 403)
++    if len(records) >= 100000:
++        raise ApiError("历史记录过多，无法核实完整范围。", 409)
++    umo = build_webchat_unified_msg_origin(session)
++    settings = data["context"]
++    message = data["message"]
++    if sending:
++        turn_id = str(UUID(str(data["turn_id"])))
++        receipt = digest([umo, auth.api_key_id, message, settings, data["revision"]])
++        prior = [r for r in records if r.llm_checkpoint_id == turn_id]
++        if prior:
++            user_rows = [r for r in prior if r.content.get("type") == "user"]
++            if len(user_rows) != 1 or user_rows[0].content.get("chatbox_receipt") != receipt:
++                raise ApiError("turn_id 已用于另一个请求。", 409)
++            if chat.get_active_chat_runs(username, sid):
++                raise ApiError("此请求仍在运行。", 409)
++            bot_rows = [r for r in prior if r.content.get("type") == "bot"]
++            cid = await chat.conv_mgr.get_curr_conversation_id(umo)
++            conv = await chat.conv_mgr.get_conversation(umo, cid) if cid else None
++            history = json.loads(conv.history) if conv else []
++            from astrbot.core.agent.message import get_checkpoint_id
++            saved = [m for m in history if get_checkpoint_id(m) == turn_id]
++            answer = "".join(extract_platform_message_text(r.content) for r in bot_rows)
++            if not answer or len(saved) != 1 or saved[0].get("_chatbox_completed") != digest(answer):
++                raise ApiError("此请求已受理，尚无完整可重放的回复。", 409)
++            # Replaying media or tool activity as plain text would be misleading.
++            if any(part.get("type") not in ("plain", "think") for r in bot_rows for part in r.content["message"]):
++                raise ApiError("此请求已处理，请在会话中查看完整回复。", 409)
++            async def replay():
++                for event in ({"type": "plain", "data": answer}, {"type": "end", "data": ""}):
++                    yield "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
++            return StreamingResponse(replay(), media_type="text/event-stream")
++    plugin_ctx = chat.core_lifecycle.star_context
++    conf = plugin_ctx.get_config(umo=umo)
++    # Match the ordinary pipeline. External runners maintain private model history.
++    result = dict(supported=False, canSend=False, revision="", reason="", selected=[])
++    try:
++        runner = normalize_agent_runner(conf.get("agent_runner"))
++        if runner["runner_type"] != "local" or not conf["provider_settings"]["enable"]:
++            raise SelectionError("当前运行器未验证上下文选择。")
++        if runner["config"].get("misc", {}).get("tool_schema_mode", "full") != "full":
++            raise SelectionError("当前工具模式未验证上下文选择。")
++        provider = await plugin_ctx.get_using_provider_async(umo=umo)
++        provider_key = provider_identity(provider, runner["config"].get("compression", {}).get("fallback_max_tokens", 128000))
++        result["supported"] = True
++        cid = await chat.conv_mgr.get_curr_conversation_id(umo) or ""
++        conv = await chat.conv_mgr.get_conversation(umo, cid) if cid else None
++        if cid and not conv:
++            raise SelectionError("原生会话无法读取。")
++        history = json.loads(conv.history) if conv else []
++        if not isinstance(history, list):
++            raise SelectionError("原生模型历史格式无法验证。")
++        keep, selected, projected, group_costs = select_history(history, records, settings)
++        history_hash = digest(history)
++        limit = provider_key[3]
++        _, persona, _, default_webchat = await plugin_ctx.persona_manager.resolve_selected_persona(
++            umo=umo, conversation_persona_id=conv.persona_id if conv else None, platform_name="webchat",
++            provider_settings=conf["provider_settings"])
++        persona = persona or {}
++        begin = persona.get("_begin_dialogs_processed") or []
++        system = CHATUI_INLINE_GENUI_SYSTEM_PROMPT + TOOL_CALL_PROMPT
++        if persona.get("prompt"):
++            system += "\n# Persona Instructions\n\n" + persona["prompt"]
++        elif default_webchat:
++            system += CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT
++        persona_cfg = runner["config"]["persona"]
++        if persona_cfg["safety_mode"] and persona_cfg["safety_mode_strategy"] == "system_prompt":
++            system += LLM_SAFETY_MODE_SYSTEM_PROMPT
++        schemas, tool_prompt = preview_tool_schema(plugin_ctx, conf, persona, provider, umo)
++        fixed = [{"role": "system", "content": system + tool_prompt}, *begin, {"role": "user", "content": message}]
++        extra = dict(provider.provider_config.get("custom_extra_body") or {})
++        parameters = {"model": provider.get_model()}
++        provider._apply_provider_specific_request_overrides(parameters, extra)
++        reserve = extra.get("max_completion_tokens") or extra.get("max_tokens") or parameters.get("max_tokens") or 0
++        revision = digest([username, auth.api_key_id, sid, cid, message, settings, sorted(keep),
++                           history_hash, selected, provider_key, digest(fixed), digest(schemas), reserve])
++        if type(reserve) is not int or reserve < 0:
++            raise SelectionError("提供商输出预留无法核实。")
++        cost = wire_estimate(fixed[:1] + projected + fixed[1:], schemas) + reserve
++        result.update(revision=revision, selected=selected, estimate=True, estimatedTokens=cost,
++                      maxTokens=limit or None, recent=settings["recent"])
++        if limit and cost >= limit:
++            fitting = []
++            used = cost - sum(group_costs)
++            for item, group_cost in zip(selected, group_costs, strict=True):
++                used += group_cost
++                if used >= limit:
++                    break
++                fitting.append(item)
++            result["fittingVisibleMessagesEstimate"] = fitting
++            if cost - sum(group_costs) >= limit:
++                raise SelectionError(
++                    f"仅当前问题与服务配置已预计达到上限 {limit} tokens。请缩短当前问题。"
++                    "若仍超限，请减少服务启用的工具、降低输出预留，或选用上下文窗口更大的模型。")
++            raise SelectionError(f"请求连同已配置工具和输出预留预计 {cost} tokens，配置上限 {limit}。"
++                                 f"计入历史工具调用后，预计可容纳前 {len(fitting)} 条；请减少轮数或移除固定项。")
++        if chat.get_active_chat_runs(username, sid):
++            raise SelectionError("该会话有请求正在运行，请在完成后重新预览。")
++        if not message.strip():
++            raise SelectionError("请输入当前问题。")
++        near = bool(limit and cost >= limit * 0.85)
++        result.update(canSend=True, nearLimit=near, reason=(
++            f"模型容量预计不足：所选历史和问题约 {cost} tokens，配置上限 {limit}。可减少轮数或移除固定项。"
++            if near else "估算含所选历史、当前问题、人格及示例、已启用的工具定义和输出预留。插件在运行时追加的内容将在模型请求前复核。"))
++    except SelectionError as exc:
++        result["reason"] = str(exc)
++    except (ValueError, KeyError, TypeError):
++        result["reason"] = "原生配置或模型历史格式无法核实。"
++    if not sending:
++        return ok(result)
++    if not result["canSend"] or data["revision"] != result["revision"]:
++        raise ApiError(result["reason"] if not result["canSend"] else "预览已过期，请重新预览。", 409)
++    selection = ContextSelection(revision, umo, cid, history_hash, message, provider_key, keep,
++                                 len(begin), digest(begin))
++    if new_session:
++        error = await service.ensure_chat_session(username, sid)
++        if error:
++            raise ApiError("无法核实此会话的归属。", 409)
++    stream = await chat.build_chat_stream(username, {
++        "session_id": sid, "message": message, "enable_streaming": data.get("enable_streaming", True),
++        "_llm_checkpoint_id": turn_id,
++        "_api_key_allow_admin_role": auth.via != "api_key" or "*" in auth.scopes or CHAT_ADMIN_SCOPE in auth.scopes,
++    }, context_selection=selection, context_receipt=receipt)
++    return StreamingResponse(stream, media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+diff --git a/astrbot/dashboard/services/open_api_service.py b/astrbot/dashboard/services/open_api_service.py
+--- a/astrbot/dashboard/services/open_api_service.py
++++ b/astrbot/dashboard/services/open_api_service.py
+@@ -154,6 +154,28 @@
+             raise OpenApiServiceError(username_err)
+         if not effective_username:
+             raise OpenApiServiceError("Invalid username")
++        await self.validate_chat_username(effective_username, allow_admin_username=allow_admin_username)
++
++        raw_session_id = post_data.get("session_id", post_data.get("conversation_id"))
++        session_id = str(raw_session_id).strip() if raw_session_id is not None else ""
++        if not session_id:
++            session_id = str(uuid4())
++            post_data["session_id"] = session_id
++
++        ensure_session_err = await self.ensure_chat_session(
++            effective_username,
++            session_id,
++        )
++        if ensure_session_err:
++            raise OpenApiServiceError(ensure_session_err)
++
++        config_id, resolve_err = self.resolve_chat_config_id(post_data, conf_list)
++        if resolve_err:
++            raise OpenApiServiceError(resolve_err)
++
++        return effective_username, session_id, config_id
++
++    async def validate_chat_username(self, effective_username: str, *, allow_admin_username: bool) -> None:
+         for config in self.core_lifecycle.astrbot_config_mgr.confs.values():
+             if not isinstance(config, dict):
+                 continue
+@@ -166,25 +188,6 @@
+                 raise OpenApiServiceError(
+                     "username is reserved for an AstrBot administrator"
+                 )
+-
+-        raw_session_id = post_data.get("session_id", post_data.get("conversation_id"))
+-        session_id = str(raw_session_id).strip() if raw_session_id is not None else ""
+-        if not session_id:
+-            session_id = str(uuid4())
+-            post_data["session_id"] = session_id
+-
+-        ensure_session_err = await self.ensure_chat_session(
+-            effective_username,
+-            session_id,
+-        )
+-        if ensure_session_err:
+-            raise OpenApiServiceError(ensure_session_err)
+-
+-        config_id, resolve_err = self.resolve_chat_config_id(post_data, conf_list)
+-        if resolve_err:
+-            raise OpenApiServiceError(resolve_err)
+-
+-        return effective_username, session_id, config_id
+ 
+     async def ensure_chat_session(
+         self,

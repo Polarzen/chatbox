@@ -1,6 +1,7 @@
 """Device pairing and explicitly shared native profiles on a local Chatbox instance."""
 
 import hmac
+import hashlib
 import secrets
 import sqlite3
 import time
@@ -9,8 +10,10 @@ from urllib.parse import urlsplit
 
 if __package__:
     from . import service as core
+    from . import chat_preferences
 else:
     import service as core
+    import chat_preferences
 
 
 def migrate_device(db):
@@ -37,6 +40,12 @@ def migrate_device(db):
            id TEXT PRIMARY KEY, device TEXT NOT NULL REFERENCES device_members, action TEXT NOT NULL,
            profile TEXT NOT NULL REFERENCES device_catalog, sid TEXT NOT NULL, room TEXT NOT NULL REFERENCES rooms,
            FOREIGN KEY(room,id) REFERENCES turns(room,id))""",
+        """CREATE TABLE IF NOT EXISTS device_context_admissions(
+           id TEXT PRIMARY KEY, device TEXT NOT NULL REFERENCES device_members, profile TEXT NOT NULL REFERENCES device_catalog,
+           sid TEXT NOT NULL, room TEXT NOT NULL REFERENCES rooms, question TEXT NOT NULL,
+           state TEXT NOT NULL CHECK(state IN ('pending','rejected')))""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS device_pending_context ON device_context_admissions(room)
+           WHERE state='pending'""",
         """CREATE TRIGGER IF NOT EXISTS device_turn_added AFTER INSERT ON turns BEGIN
            UPDATE profiles SET revision=revision+1 WHERE id IN
            (SELECT s.profile FROM profile_sessions s JOIN device_catalog c ON c.profile=s.profile
@@ -45,6 +54,7 @@ def migrate_device(db):
         db.execute(statement)
     if "unverified" not in {r[1] for r in db.execute("PRAGMA table_info(device_session_state)")}:
         db.execute("ALTER TABLE device_session_state ADD COLUMN unverified INTEGER NOT NULL DEFAULT 0")
+    chat_preferences.migrate(db)
 
 
 def text_id(body, key):
@@ -165,12 +175,77 @@ def session_json(row):
                 reason=row["reason"], originDevice=row["origin"])
 
 
+CONTEXT_REJECTED = "上游已确认本次上下文未派发，请重新预览。"
+
+
+def admission_receipt(row):
+    if row["state"] == "rejected":
+        raise core.ApiError(409, CONTEXT_REJECTED, code="context_not_dispatched")
+    return dict(contextState="pending", profile=row["profile"], sid=row["sid"],
+                id=row["id"], question=row["question"])
+
+
+def materialize_admission(db, identifier):
+    row = db.execute("SELECT * FROM device_context_admissions WHERE id=? AND state='pending'", (identifier,)).fetchone()
+    if not row:
+        return
+    db.execute("DELETE FROM device_context_admissions WHERE id=?", (identifier,))
+    core.Service.enqueue(db, row["room"], identifier, row["question"], context_verified=True)
+    db.execute("INSERT INTO device_operations VALUES(?,?,?,?,?,?)",
+               (identifier, row["device"], "send", row["profile"], row["sid"], row["room"]))
+
+
 def operation(db, device, identifier):
+    admission = db.execute("SELECT * FROM device_context_admissions WHERE device=? AND id=?",
+                           (device["id"], identifier)).fetchone()
+    if admission:
+        session_row(db, device, admission["profile"], admission["sid"])
+        return admission, admission_receipt(admission)
     row = db.execute("SELECT * FROM device_operations WHERE device=? AND id=?", (device["id"], identifier)).fetchone()
     if row:
         session_row(db, device, row["profile"], row["sid"])
         return row, dict(profile=row["profile"], sid=row["sid"], turn=core.find_turn(db, row["room"], identifier))
     return None, None
+
+
+def context_selection(db, entry):
+    prefs = chat_preferences.read_preferences(db, entry)
+    if prefs["recentTurns"] is None:
+        return None
+    pins = []
+    size = 0
+    for pin in prefs["pins"]:
+        row = db.execute("SELECT question,answer FROM turns WHERE room=? AND seq=? AND status='complete'",
+                         (entry["room"], pin["seq"])).fetchone()
+        if not row or not row["question" if pin["role"] == "user" else "answer"]:
+            raise core.ApiError(409, "固定消息已变化，请重新选择。")
+        hint = dict(pin, question=row["question"], answer=row["answer"])
+        size += len(core.encoded(hint))
+        if size > core.MAX_BODY:
+            raise core.ApiError(413, "固定消息超过预览大小限制。")
+        pins.append(hint)
+    recent = prefs["recentTurns"]
+    context = dict(recent=recent, pins=pins)
+    hints = []
+    remaining = min(512 * 1024, core.MAX_BODY - size - 1024)
+    if recent:
+        rows = db.execute("""SELECT seq,question,answer FROM turns WHERE room=? AND status='complete'
+                             ORDER BY seq DESC LIMIT ?""", (entry["room"], recent))
+        for row in rows:
+            if not row["question"] or not row["answer"] or len(row["question"]) + len(row["answer"]) > remaining:
+                continue
+            hint = dict(row)
+            cost = len(core.encoded(hint)) + 1
+            if cost <= remaining:
+                remaining -= cost
+                hints.append(hint)
+    if hints:
+        context["hints"] = hints
+    return context
+
+
+def preview_revision(upstream, profile, username, sid, question, context, revision):
+    return hashlib.sha256(core.encoded([upstream, profile, username, sid, question, context, revision])).hexdigest()
 
 
 class DeviceApi:
@@ -185,6 +260,11 @@ class DeviceApi:
                 core.fields(params, ())
                 return {"instance": db.execute("SELECT instance FROM config").fetchone()[0], "version": 1}
             device = authorize(db, token, owner=action == "devices")
+            if action == "chat-preferences":
+                core.fields(params, ("profile", "sid"))
+                target = {key: values[0] for key, values in params.items()}
+                entry = session_row(db, device, text_id(target, "profile"), text_id(target, "sid"))
+                return chat_preferences.read_preferences(db, entry)
             if action in ("me", "profiles", "devices"):
                 core.fields(params, ())
                 if action == "me":
@@ -242,6 +322,8 @@ class DeviceApi:
             return dict(row)
 
     def write(self, action, token, body):
+        if action == "context-preview":
+            return 200, self.context_preview(token, body)
         if action == "session":
             return 200, self.publish_session(token, body)
         if action in ("start", "send", "media-begin"):
@@ -281,6 +363,16 @@ class DeviceApi:
                 db.execute("DELETE FROM device_invite")
                 return 200, me(db, {"id": identifier, "owner": False})
             device = authorize(db, token, owner=action in ("invite", "endpoint", "revoke", "remove"))
+            preference_fields = {"chat-preferences": ("expected", "changes"), "claim-context-reminder": ("threshold",),
+                                 "context-notice": ("kind", "through", "active")}
+            if action in preference_fields:
+                core.fields(body, ("profile", "sid", *preference_fields[action]))
+                entry = session_row(db, device, text_id(body, "profile"), text_id(body, "sid"))
+                if action == "chat-preferences":
+                    return 200, chat_preferences.update_preferences(db, entry, body["expected"], body["changes"])
+                if action == "context-notice":
+                    return 200, chat_preferences.context_notice(db, entry, body["kind"], body["through"], body["active"])
+                return 200, chat_preferences.claim_reminder(db, entry, body["threshold"])
             if action == "invite":
                 core.fields(body, ("pcProfiles", "pcSessions"))
                 code = secrets.token_urlsafe(20)
@@ -326,6 +418,7 @@ class DeviceApi:
                 row = profile_row(db, device, profile)
                 db.execute("""INSERT INTO device_session_state(profile,sid,origin,removed) VALUES(?,?,?,1)
                               ON CONFLICT(profile,sid) DO UPDATE SET removed=1""", (profile, sid, row["origin"]))
+                db.execute("DELETE FROM chat_preferences WHERE profile=? AND sid=?", (profile, sid))
                 db.execute("UPDATE profiles SET revision=revision+1 WHERE id=?", (profile,))
                 return 200, {}
             if action == "media-end":
@@ -477,6 +570,13 @@ class DeviceApi:
         device = authorize(db, token)
         catalog = profile_row(db, device, profile)
         tombstone(db, profile, sid)
+        admission = db.execute("SELECT * FROM device_context_admissions WHERE id=?", (identifier,)).fetchone()
+        if admission:
+            if (admission["device"], admission["profile"], admission["sid"], admission["question"], action) != (
+                    device["id"], profile, sid, question, "send"):
+                raise core.ApiError(409, "操作编号已用于其他目标或内容。")
+            session_row(db, device, profile, sid)
+            return device, None, None, admission_receipt(admission)
         previous, op = operation(db, device, identifier)
         if previous:
             if (previous["action"], previous["profile"], previous["sid"], op["turn"]["question"]) != (
@@ -497,11 +597,53 @@ class DeviceApi:
             raise core.ApiError(409, "此来源尚无可用的已登记上游。")
         return device, upstream, catalog["username"], None
 
+    def preview_target(self, db, token, profile, sid):
+        device = authorize(db, token)
+        catalog = profile_row(db, device, profile)
+        entry = session_row(db, device, profile, sid)
+        upstream, username = self.route(db, catalog), catalog["username"]
+        if (not upstream or not entry["ready"] or entry["total"] != entry["imported"]
+                or not entry["room"] or entry["room"] != self.routes.find_room(db, upstream, username, sid)
+                or db.execute("SELECT 1 FROM device_session_state WHERE profile=? AND sid=? AND unverified=1",
+                              (profile, sid)).fetchone()):
+            raise core.ApiError(409, entry["reason"] or "此会话尚无可核实的上游上下文。")
+        return upstream, username, entry["room"], context_selection(db, entry)
+
+    def upstream_preview(self, upstream, username, sid, question, context):
+        try:
+            base, key, verify = self.routes.target(upstream)
+        except core.astrbot.NotDispatched:
+            return core.astrbot.unavailable("无法核实已登记的 AstrBot 服务。")
+        return core.astrbot.preview_context(base, key, username, sid, question, context, verify)
+
+    def context_preview(self, token, body):
+        core.fields(body, ("profile", "sid", "question"))
+        profile, sid = text_id(body, "profile"), text_id(body, "sid")
+        question = core.string(body, "question", empty=True, max_bytes=core.MAX_QUESTION)
+        with core.database(self.path) as db:
+            target = self.preview_target(db, token, profile, sid)
+        upstream, username, _, context = target
+        result = self.upstream_preview(upstream, username, sid, question,
+                                       context if context is not None else dict(recent=0, pins=[]))
+        # A revoked grant, removed session or edited preference cannot disclose an old preview.
+        with core.database(self.path) as db:
+            if self.preview_target(db, token, profile, sid) != target:
+                raise core.ApiError(409, "上下文已变动，请重新预览。")
+        if context is None and result["supported"]:
+            return dict(supported=True, canSend=False, revision="", reason="服务支持自选上下文。当前采用服务默认历史。",
+                        selected=[])
+        if result["canSend"]:
+            result["revision"] = preview_revision(upstream, profile, username, sid, question, context, result["revision"])
+        return result
+
     def submit(self, action, token, body):
-        core.fields(body, ("profile", "sid", "id", "question"))
+        core.fields(body, {"profile", "sid", "id", "question"} | (body.keys() & {"revision"}))
         profile, sid = text_id(body, "profile"), text_id(body, "sid")
         identifier = core.request_id(body["id"])
         question = core.string(body, "question", max_bytes=core.MAX_QUESTION)
+        context = None
+        revision = core.string(body, "revision", max_bytes=256) if "revision" in body else None
+        upstream_revision = None
         with core.database(self.path) as db:
             device, upstream, username, op = self.prepare(db, action, token, profile, sid, identifier, question)
             if op:
@@ -513,10 +655,29 @@ class DeviceApi:
                 if entry:
                     raise core.ApiError(409, "会话编号已存在。")
             else:
-                session_row(db, device, profile, sid)
-                if not entry["ready"] or entry["total"] != entry["imported"]:
+                entry = session_row(db, device, profile, sid)
+                if (not entry["ready"] or entry["total"] != entry["imported"] or not entry["room"]
+                        or entry["room"] != self.routes.find_room(db, upstream, username, sid)):
                     raise core.ApiError(409, entry["reason"] or "历史尚未同步完整。")
+                context = context_selection(db, entry)
+        if context is not None and action == "media-begin":
+            raise core.ApiError(409, "自定义上下文目前仅支持文本。")
+        if (context is None) != (revision is None):
+            raise core.ApiError(409, "上下文已变动，请重新预览。")
         exists, failure = self.routes.check_origin(upstream, username, sid)
+        if context is not None and not failure and (exists or entry["fresh"]):
+            preview = self.upstream_preview(upstream, username, sid, question, context)
+            if preview["canSend"]:
+                upstream_revision = preview["revision"]
+            if not upstream_revision or revision != preview_revision(
+                    upstream, profile, username, sid, question, context, upstream_revision):
+                # Another worker might already have accepted this id while the preview ran.
+                with core.database(self.path) as db:
+                    _, _, _, op = self.prepare(db, action, token, profile, sid, identifier, question)
+                    if op:
+                        return 200, op
+                reason = preview["reason"] if not preview["canSend"] else ""
+                raise core.ApiError(409, reason or "上下文已变动，请重新预览。")
         with core.database(self.path, write=True) as db:
             device, current, user, op = self.prepare(db, action, token, profile, sid, identifier, question)
             if op:
@@ -540,15 +701,31 @@ class DeviceApi:
                     raise core.ApiError(409, entry["reason"] or "历史尚未同步完整。")
                 if not exists and not entry["fresh"]:
                     raise core.ApiError(409, "AstrBot 未找到属于该用户的原会话。")
+                if context_selection(db, entry) != context:
+                    raise core.ApiError(409, "上下文设置已变动，请重新预览。")
             if (core.find_turn(db, room, identifier) or
                     db.execute("SELECT 1 FROM profile_imports WHERE profile=? AND sid=? AND id=?",
                                (profile, sid, identifier)).fetchone()):
                 raise core.ApiError(409, "操作编号已用于原有历史。")
-            result = self.service.enqueue(db, room, identifier, question)
-            db.execute("INSERT INTO device_operations VALUES(?,?,?,?,?,?)",
-                       (identifier, device["id"], action, profile, sid, room))
+            if context is None:
+                result = self.service.enqueue(db, room, identifier, question)
+                db.execute("INSERT INTO device_operations VALUES(?,?,?,?,?,?)",
+                           (identifier, device["id"], action, profile, sid, room))
+            else:
+                self.service.require_idle(db, room)
+                db.execute("INSERT INTO device_context_admissions VALUES(?,?,?,?,?,?,'pending')",
+                           (identifier, device["id"], profile, sid, room, question))
             if exists:
                 db.execute("UPDATE profile_sessions SET fresh=0,reason='' WHERE profile=? AND sid=?", (profile, sid))
+        if context is not None:
+            try:
+                self.service.workers.submit(self.service.generate, room, identifier, username, sid, question,
+                                            context=context, revision=upstream_revision)
+            except RuntimeError:
+                with core.database(self.path, write=True) as db:
+                    db.execute("UPDATE device_context_admissions SET state='rejected' WHERE id=?", (identifier,))
+                raise core.ApiError(409, CONTEXT_REJECTED, code="context_not_dispatched")
+            return 202, dict(contextState="pending", profile=profile, sid=sid, id=identifier, question=question)
         op = dict(profile=profile, sid=sid, turn=result)
         if action == "media-begin":
             return 202, dict(op, dispatch=True)
@@ -565,7 +742,7 @@ class DeviceApi:
         if status not in ("complete", "unknown"):
             raise core.ApiError(400, "媒体结果状态无效。")
         row, op = operation(db, device, identifier)
-        if not row or (row["action"], row["profile"], row["sid"]) != ("media-begin", profile, sid):
+        if not row or "action" not in row.keys() or (row["action"], row["profile"], row["sid"]) != ("media-begin", profile, sid):
             raise core.ApiError(404, "找不到此设备的媒体操作。")
         if op["turn"]["status"] == "running":
             db.execute("UPDATE turns SET answer=?,status=?,needs_review=? WHERE room=? AND id=?",

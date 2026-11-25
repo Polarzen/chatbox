@@ -9,7 +9,7 @@ import java.net.URI
 
 data class SharedSeedTurn(val question: String, val answer: String, val status: String)
 
-internal enum class SharedConflict { RUNNING, UNRESOLVED, OTHER }
+internal enum class SharedConflict { RUNNING, UNRESOLVED, CONTEXT_REJECTED, OTHER }
 internal class SharedHttpFailure(val status: Int, val conflict: SharedConflict = SharedConflict.OTHER) : Exception()
 
 internal fun sharedAddress(input: String, allowLoopback: Boolean): String {
@@ -87,7 +87,9 @@ internal class SharedChatTransport(private val allowLoopback: Boolean) {
                             }
                             if (count < buffer.size) String(buffer, 0, count) else ""
                         }
-                        when (raw?.let { JSONObject(it).optString("error") }) {
+                        val reply = raw?.let(::JSONObject)
+                        if (reply?.optString("code") == "context_not_dispatched") SharedConflict.CONTEXT_REJECTED
+                        else when (reply?.optString("error")) {
                             "会话已有回复正在生成，请稍后再发。" -> SharedConflict.RUNNING
                             "上游执行结果未知，请服务主人确认 AstrBot 已空闲并运行 resolve。" -> SharedConflict.UNRESOLVED
                             else -> SharedConflict.OTHER

@@ -34,6 +34,7 @@ internal fun DesktopHistorySearch(
     overrides: Map<String, Chat>,
     onDismiss: () -> Unit,
     onSelectHit: (HistoryHit, String) -> Boolean,
+    partnerName: (String) -> String = { "助手" },
 ) {
     var query by remember { mutableStateOf("") }
     val focus = remember { FocusRequester() }
@@ -79,7 +80,7 @@ internal fun DesktopHistorySearch(
                     when {
                         profileId.isBlank() -> Text("请先选择服务档案。")
                         query.isBlank() -> Text("输入关键词以搜索当前服务档案。")
-                        else -> HistoryResults(store, profileId, revision, overrides, query) { hit ->
+                        else -> HistoryResults(store, profileId, revision, overrides, query, partnerName) { hit ->
                             onSelectHit(hit, query).also { if (it) onDismiss() }
                         }
                     }
@@ -97,6 +98,7 @@ private fun HistoryResults(
     revision: Int,
     overrides: Map<String, Chat>,
     query: String,
+    partnerName: (String) -> String,
     onSelect: (HistoryHit) -> Boolean,
 ) {
     var refresh by remember(store, profileId) { mutableIntStateOf(0) }
@@ -139,7 +141,7 @@ private fun HistoryResults(
                         val source = when (hit.side) {
                             HistorySide.TITLE -> "会话标题"
                             HistorySide.USER -> "第 ${hit.entryIndex + 1} 轮 · 用户"
-                            HistorySide.ASSISTANT -> "第 ${hit.entryIndex + 1} 轮 · 助手"
+                            HistorySide.ASSISTANT -> "第 ${hit.entryIndex + 1} 轮 · ${partnerName(hit.sessionId)}"
                         }
                         Column(
                             Modifier.fillMaxWidth().clickable(role = Role.Button) {

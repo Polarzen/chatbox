@@ -91,10 +91,53 @@ internal class AndroidAppState private constructor(private val app: Context) {
         if (device.bound && base.isNotBlank()) {
             return device.sendNative(base,current,retry ?: current.draft,heart,retry == null)
         }
+        if (device.preferences(base, session.id).value.recentTurns != null) {
+            showNote(base, session.id, CONTEXT_CHANGED)
+            return false
+        }
         delivery.send(base, session.id, connections.token().orEmpty(), history.user, retry ?: current.draft, heart,
             consumeDraft = retry == null) { message ->
             showNote(base, session.id, message)
         }
+        return delivery.busy(base, session.id)
+    }
+
+    suspend fun previewContext(base: String, session: MobileSession, prefs: ConversationPreferences,
+                               turns: List<ContextTurn>, draft: MobileDraft, heart: LiveHeartRate?): AstrBotContextPreview {
+        if (draft.attachments.isNotEmpty()) return AstrBotContextPreview.unavailable(CUSTOM_CONTEXT_MEDIA_NOTICE)
+        if (base != connections.base || history.selected(base).id != session.id || device.pendingJoin)
+            return AstrBotContextPreview.unavailable(CONTEXT_CHANGED)
+        val message = heart?.appendTo(draft.text.trim()) ?: draft.text.trim()
+        if (device.bound && base.isNotBlank()) return device.previewContext(base, session, message)
+        val token = connections.token().orEmpty()
+        if (base.isBlank() || token.isBlank()) return AstrBotContextPreview.unavailable(CONTEXT_UNAVAILABLE)
+        return withContext(Dispatchers.IO) {
+            previewAstrBotContext(base, token, history.user, session.id, message, astrBotContext(prefs, turns))
+        }
+    }
+
+    fun sendReviewed(base: String, session: MobileSession, retry: MobileTurn?, draft: MobileDraft,
+                     prefs: ConversationPreferences, preview: AstrBotContextPreview): Boolean {
+        history.flushDrafts()
+        val current = history.selected(base)
+        val handle = device.preferences(base, session.id)
+        val stale = base != connections.base || current.id != session.id || !preview.canSend || preview.networkMessage == null ||
+            !handle.ready || handle.contextPending || !handle.value.sameContext(prefs) || prefs.recentTurns == null ||
+            retry == null && current.draft != draft || retry != null && current.turns.none { it.id == retry.id }
+        if (stale || device.pendingJoin || delivery.busy(base, session.id) ||
+            legacyStorage(session).hasState() && !device.managesLegacyNative(base, session.id)) {
+            showNote(base, session.id, CONTEXT_CHANGED)
+            return false
+        }
+        if (device.bound && base.isNotBlank()) return device.sendNative(base, current, draft, null, retry == null, preview)
+        val context = try { astrBotContext(prefs, mobileContextTurns(current, handle)) }
+        catch (_: IllegalArgumentException) {
+            showNote(base, session.id, CONTEXT_CHANGED)
+            return false
+        }
+        delivery.send(base, session.id, connections.token().orEmpty(), history.user, draft, null,
+            consumeDraft = retry == null, networkQuestion = preview.networkMessage, context = context,
+            contextRevision = preview.revision) { showNote(base, session.id, it) }
         return delivery.busy(base, session.id)
     }
 

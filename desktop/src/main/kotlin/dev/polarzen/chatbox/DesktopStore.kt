@@ -377,6 +377,71 @@ internal class DesktopStore(private val file: Path) {
     private fun historySession(source: JSONObject, key: SessionKey) =
         findSession(requireProfile(source, key.profileId), key.sessionId) ?: error("本机已删除此会话。")
 
+    @Synchronized
+    fun preferenceAuthority(key: SessionKey): PreferenceRoom? {
+        val p = findProfile(state, key.profileId) ?: return null
+        val scope = p.optJSONObject("deviceProfile")?.getString("profile") ?: return null
+        val row = findSession(p, key.sessionId) ?: return null
+        val sid = row.optString("deviceSid").ifEmpty { return null }
+        return PreferenceRoom(row.optString("deviceAuthority", scope), sid)
+    }
+
+    @Synchronized
+    fun hasSession(key: SessionKey) = findProfile(state, key.profileId)?.let { findSession(it,key.sessionId) } != null
+
+    @Synchronized
+    fun directJournal(key: SessionKey, edit: (PreferenceJournal) -> PreferenceJournal = { it }): PreferenceJournal {
+        val profile = requireProfile(state, key.profileId)
+        val row = historySession(state, key)
+        val old = PreferenceJournal.decode(profile.opt("chatPreferences") as? String, row.opt("chatPreferences") as? String)
+        return edit(old).also { next ->
+            if (next != old) persist(requireAtomic = true) { copy ->
+                requireProfile(copy, key.profileId).put("chatPreferences", next.encode(true))
+                historySession(copy, key).put("chatPreferences", next.encode(false))
+            }
+        }
+    }
+
+    @Synchronized
+    fun deviceJournal(room: PreferenceRoom, edit: (PreferenceJournal) -> PreferenceJournal = { it }): PreferenceJournal {
+        val profile = state.optJSONObject("deviceChatPreferences")?.optJSONObject(room.profile)
+        val old = PreferenceJournal.decode(profile?.opt("profile") as? String,
+            profile?.optJSONObject("rooms")?.opt(room.sid) as? String)
+        return edit(old).also { next ->
+            if (next != old) persist(requireAtomic = true) { copy ->
+                fun child(p: JSONObject, k: String) = p.optJSONObject(k) ?: JSONObject().also { p.put(k, it) }
+                val p = child(child(copy, "deviceChatPreferences"), room.profile)
+                p.put("profile", next.encode(true))
+                child(p, "rooms").put(room.sid, next.encode(false))
+            }
+        }
+    }
+
+    @Synchronized
+    fun preferenceSequence(key: SessionKey, index: Int, paired: Boolean): Long? {
+        val row = findProfile(state, key.profileId)?.let { findSession(it, key.sessionId) } ?: return null
+        val entry = row.getJSONArray("entries").optJSONObject(index) ?: return null
+        if (entry.optString("status") != "已完成") return null
+        val seq = index.toLong() + 1
+        return seq.takeIf { !paired || index < row.optInt("preferenceVerified") || entry.optLong("profileTurnSeq") == seq }
+    }
+
+    @Synchronized
+    fun preferenceVerified(key: SessionKey) = historySession(state, key).optInt("preferenceVerified")
+
+    @Synchronized
+    fun lastCompletedSeq(key: SessionKey): Long {
+        val rows = historySession(state,key).getJSONArray("entries")
+        for (i in rows.length() - 1 downTo 0) if (rows.getJSONObject(i).getString("status") == "已完成") return i.toLong() + 1
+        return 0
+    }
+
+    @Synchronized
+    fun markPreferenceVerified(key: SessionKey, room: PreferenceRoom, count: Int) {
+        check(preferenceAuthority(key) == room)
+        if (count > preferenceVerified(key)) persist(requireAtomic = true) { historySession(it, key).put("preferenceVerified", count) }
+    }
+
     private fun profileMetadata(session: JSONObject, remoteProfile: String): JSONObject =
         session.getJSONObject("profileHistory").also {
             check(it.getString("profile") == remoteProfile) { "此会话属于另一份档案授权。" }
@@ -660,7 +725,8 @@ internal class DesktopStore(private val file: Path) {
     }
 
     @Synchronized
-    fun queueDeviceSend(key: SessionKey, question: String, revision: Long, entry: Entry? = null): String {
+    fun queueDeviceSend(key: SessionKey, question: String, revision: Long, entry: Entry? = null,
+                        contextRevision: String? = null): String {
         check(revision >= (appliedDraftRevisions[key] ?: Long.MIN_VALUE)) { "草稿已更新，请重新发送。" }
         val id = UUID.randomUUID().toString()
         persist(requireAtomic = true) { copy ->
@@ -669,6 +735,14 @@ internal class DesktopStore(private val file: Path) {
             check(revision != appliedDraftRevisions[key] || entry != null || readDraft(key).attachments.isEmpty())
             val queue = row.optJSONArray("deviceQueue") ?: JSONArray().also { row.put("deviceQueue", it) }
             val op = JSONObject().put("id", id).put("question", question)
+            val authored = entry?.question ?: question
+            val attachments = entry?.attachmentReferences.orEmpty().map { ref ->
+                if (ref.startsWith("file:", true)) Path.of(URI(ref)).toString() else ref
+            }
+            val saved = readDraft(key)
+            val text = saved.text.takeIf { it.trim() == authored.trim() && saved.attachments.map(Path::toString) == attachments } ?: authored
+            op.put("originalDraft", JSONObject().put("text", text).put("attachments", JSONArray(attachments)))
+            if (contextRevision != null) op.put("contextRevision", contextRevision)
             entry?.let { op.put("entry", entryToJson(it)) }
             queue.put(op)
             row.remove("draft")
@@ -681,8 +755,44 @@ internal class DesktopStore(private val file: Path) {
     fun nextDeviceSend(key: SessionKey): DesktopDevicePending? =
         historySession(state, key).optJSONArray("deviceQueue")?.optJSONObject(0)?.let {
             DesktopDevicePending(it.getString("id"), it.getString("question"), it.optString("method"),
-                it.optString("phase"), it.optJSONObject("entry")?.let(::chatEntryFrom))
+                it.optString("phase"), it.optJSONObject("entry")?.let(::chatEntryFrom), it.opt("contextRevision") as? String)
         }
+
+    @Synchronized
+    fun restoreRejectedDeviceDraft(key: SessionKey, id: String, status: Int) {
+        persist(requireAtomic = true) { copy ->
+            val row = historySession(copy, key)
+            val queue = row.getJSONArray("deviceQueue")
+            val op = queue.getJSONObject(0)
+            check(op.getString("id") == id && op.optString("phase").isEmpty())
+            val entry = op.optJSONObject("entry")?.let(::chatEntryFrom)
+            val original = op.optJSONObject("originalDraft") ?: JSONObject()
+                .put("text", entry?.question ?: op.getString("question")).put("attachments", JSONArray(
+                    entry?.attachmentReferences.orEmpty().map { if (it.startsWith("file:", true)) Path.of(URI(it)).toString() else it }))
+            val existing = row.optJSONObject("draft")
+            val destination = if (existing == null || existing.similar(original)) row
+                else newSession(UUID.randomUUID().toString()).put("manualName", "未发出的草稿").also {
+                    insertSessionAtHead(requireProfile(copy, key.profileId), it)
+                }
+            destination.put("draft", original.put("rejectedRequestId", id).put("rejectedStatus", status))
+            val receipts = row.optJSONObject("deviceRejections") ?: JSONObject().also { row.put("deviceRejections",it) }
+            receipts.put(id,JSONObject().put("status",status).put("draftSession",destination.getString("id")))
+            queue.remove(0)
+        }
+    }
+
+    @Synchronized
+    fun restoredDeviceDraft(key: SessionKey): Pair<String,ComposerDraft>? {
+        val row = findProfile(state,key.profileId)?.let { findSession(it,key.sessionId) } ?: return null
+        return (row.optJSONObject("draft")?.opt("rejectedRequestId") as? String)?.let { it to readDraft(key) }
+    }
+
+    @Synchronized
+    fun acknowledgeRestoredDraft(key: SessionKey, requestId: String) {
+        if (restoredDeviceDraft(key)?.first == requestId) persist(requireAtomic = true) {
+            historySession(it,key).getJSONObject("draft").remove("rejectedRequestId")
+        }
+    }
 
     @Synchronized
     fun hasLegacyProfilePending(key: SessionKey): Boolean =
@@ -714,7 +824,17 @@ internal class DesktopStore(private val file: Path) {
         val profile = findProfile(state, key.profileId) ?: return
         if (findSession(profile, key.sessionId) == null) return
         persist(requireAtomic = true) { copy ->
-            val session = checkNotNull(findSession(requireProfile(copy, key.profileId), key.sessionId))
+            val profile = requireProfile(copy,key.profileId)
+            val session = checkNotNull(findSession(profile, key.sessionId))
+            // An IME edit can predate the recovery but reach disk after it. Keep the
+            // unsent original separately until the editor acknowledges having loaded it.
+            val recovered = session.optJSONObject("draft")
+            val rejectedId = recovered?.opt("rejectedRequestId") as? String
+            if (rejectedId != null && draft != readDraft(key)) {
+                val backup = newSession(UUID.randomUUID().toString()).put("manualName","未发出的草稿").put("draft",recovered)
+                insertSessionAtHead(profile,backup)
+                session.optJSONObject("deviceRejections")?.optJSONObject(rejectedId)?.put("draftSession",backup.getString("id"))
+            }
             if (draft.text.isEmpty() && draft.attachments.isEmpty()) {
                 session.remove("draft")
             } else {

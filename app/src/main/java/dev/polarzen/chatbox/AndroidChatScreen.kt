@@ -3,6 +3,7 @@ package dev.polarzen.chatbox
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.scrollBy
@@ -14,12 +15,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.listSaver
@@ -34,6 +33,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -45,22 +45,35 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import java.util.Calendar
 import java.util.Date
+
+private data class MobilePreviewObservation(
+    val draft: MobileDraft,
+    val through: Long,
+    val revision: String,
+    val conditions: Map<String, Boolean>,
+)
 
 @Composable
 internal fun AndroidChatScreen(
@@ -78,6 +91,11 @@ internal fun AndroidChatScreen(
     draftEvent: Any? = null,
     mediaAvailable: Boolean = true,
     deviceStatus: String? = null,
+    wideRecent: (@Composable () -> Unit)? = null,
+    preferences: ChatPreferenceHandle,
+    connectionEpoch: Any?,
+    previewContext: suspend (ConversationPreferences, List<ContextTurn>, MobileDraft) -> AstrBotContextPreview,
+    sendReviewed: (MobileTurn?, MobileDraft, ConversationPreferences, AstrBotContextPreview) -> Unit,
 ) {
     val base = connections.base
     val scopeId = "${base.length}:$base:${session.id}"
@@ -89,6 +107,49 @@ internal fun AndroidChatScreen(
     var retry by rememberSaveable(scopeId) { mutableStateOf<String?>(null) }
     var mediaNote by rememberSaveable(scopeId) { mutableStateOf("") }
     var recording by remember(scopeId) { mutableStateOf(false) }
+    var editName by rememberSaveable(preferences.identity) { mutableStateOf(false) }
+    var editContext by rememberSaveable(preferences.identity) { mutableStateOf(false) }
+    var previewing by remember(preferences.identity) { mutableStateOf(false) }
+    var previewRetry by remember(preferences.identity) { mutableStateOf<MobileTurn?>(null) }
+    var pinCandidate by remember(preferences.identity) { mutableStateOf<ContextPin?>(null) }
+    val prefs = preferences.value
+    val custom = prefs.recentTurns != null
+    fun submit(turn: MobileTurn? = null) {
+        if (custom) { previewRetry = turn; previewing = true }
+        else if (turn != null) onRetry(turn) else onSend()
+    }
+    fun liveDraft() = session.draft.copy(text = readDraft?.invoke() ?:
+        history.sessions(base).firstOrNull { it.id == session.id }?.draft?.text.orEmpty())
+    var observation by remember(preferences.identity, connectionEpoch, session.turns.lastOrNull(),
+        session.draft.attachments, prefs.recentTurns, prefs.pins) { mutableStateOf<MobilePreviewObservation?>(null) }
+    var previewNotices by remember(observation) { mutableStateOf(emptySet<String>()) }
+    val observed = observation
+    LaunchedEffect(observed, preferences.identity) {
+        if (observed == null || liveDraft() != observed.draft) return@LaunchedEffect
+        for ((kind, active) in observed.conditions) {
+            try {
+                val claimed = preferences.observeNotice(kind, observed.through, active)
+                if (active && claimed && observation == observed && liveDraft() == observed.draft)
+                    previewNotices = previewNotices + kind
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // A later verified preview can arbitrate a notice after reconnection.
+            }
+        }
+    }
+    val remindAfter = prefs.remindAfter
+    var reminder by remember(preferences.identity, remindAfter) { mutableStateOf(false) }
+    val completed = if (remindAfter == null) 0 else completedContextTurns(mobileContextTurns(session, preferences))
+    val reminderDisputed = "remindAfter" in preferences.conflicts
+    LaunchedEffect(preferences.identity, remindAfter, preferences.ready, reminderDisputed, connectionEpoch,
+        remindAfter != null && completed >= remindAfter) {
+        if (remindAfter != null && completed >= remindAfter && preferences.ready && !reminderDisputed) {
+            try { if (preferences.claimReminder(completed)) reminder = true }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { /* The service will arbitrate when the connection returns. */ }
+        }
+    }
     val context = LocalContext.current
     val focus = LocalFocusManager.current
     val screenFocus = remember { FocusRequester() }
@@ -114,9 +175,10 @@ internal fun AndroidChatScreen(
         val wide = maxWidth >= 720.dp
         val compactHeight = maxHeight < 480.dp
         val imeBottom = WindowInsets.ime.only(WindowInsetsSides.Bottom)
-        var sidebarVisible by rememberSaveable { mutableStateOf(onRecent == null) }
+        var sidebarVisible by rememberSaveable { mutableStateOf(true) }
+        var localPanel by rememberSaveable { mutableStateOf(false) }
         val openLocalHistory = {
-            if (wide) sidebarVisible = !sidebarVisible else {
+            if (wide) { localPanel = true; sidebarVisible = true } else {
                 focus.clearFocus()
                 keyboard?.hide()
                 scope.launch { drawer.open() }
@@ -153,16 +215,23 @@ internal fun AndroidChatScreen(
         ) {
             Row(Modifier.fillMaxSize()) {
                 if (wide && sidebarVisible) {
-                    sidebar(Modifier.width(240.dp).fillMaxHeight().windowInsetsPadding(imeBottom), false)
+                    Box(Modifier.width(268.dp).fillMaxHeight().windowInsetsPadding(imeBottom)) {
+                        if (wideRecent != null && !localPanel) wideRecent() else sidebar(Modifier.fillMaxSize(), false)
+                    }
                     VerticalDivider()
                 }
                 Column(Modifier.weight(1f).fillMaxHeight()) {
                     Column(Modifier.weight(1f)) {
                         Box(Modifier.fillMaxWidth().clipToBounds().wrapContentHeight(Alignment.Top, unbounded = true)) {
-                            ChatHeader(connections, session.title, hit?.takeIf { it.side == MobileHistorySide.TITLE },
-                                compactHeight, onRecent == null && wide && sidebarVisible,
-                                onSidebar = onRecent ?: openLocalHistory,
-                                onSearch = ::openSearch, onSettings = onSettings, onAppearance = onAppearance,
+                            ChatHeader(connections, prefs.effectiveName, session.title, hit?.takeIf { it.side == MobileHistorySide.TITLE },
+                                sidebarOpen = wide && sidebarVisible && !localPanel,
+                                onSidebar = {
+                                    if (wide) {
+                                        sidebarVisible = localPanel || !sidebarVisible
+                                        localPanel = false
+                                    } else (onRecent ?: openLocalHistory)()
+                                }, onSearch = ::openSearch, onName = { editName = true },
+                                onContext = { editContext = true }, onSettings = onSettings, onAppearance = onAppearance,
                                 onHeart = onHeart, onDeviceSettings = onDeviceSettings,
                                 onLocalHistory = openLocalHistory.takeIf { onRecent != null && deviceStatus == null },
                                 deviceStatus = deviceStatus)
@@ -171,8 +240,19 @@ internal fun AndroidChatScreen(
                         Box(Modifier.weight(1f)) {
                             readings.SaveableStateProvider(scopeId) {
                                 ChatTimeline(session, busy, readOnly, hit, jumpTurn, onJumpHandled,
-                                    onHitShown = { selectedHit = null }, onCreate = onCreate,
-                                    onRetry = { retry = it.id }, onRetryMedia = onRetryMedia)
+                                    onHitShown = { selectedHit = null },
+                                    onRetry = { if (deviceStatus != null) onRetry(it) else retry = it.id }, onRetryMedia = onRetryMedia,
+                                    retryLabel = if (deviceStatus != null) "核对发送状态" else "重试",
+                                    preferences = preferences, onPin = { pin ->
+                                        if ("pins" in preferences.conflicts || !custom) {
+                                            pinCandidate = pin.takeUnless { "pins" in preferences.conflicts }
+                                            editContext = true
+                                        } else {
+                                            val pins = if (pin in prefs.pins) prefs.pins - pin else prefs.pins + pin
+                                            runCatching { preferences.save(prefs.copy(pins = pins)) }
+                                                .onFailure { mediaNote = it.message ?: "固定消息未保存。" }
+                                        }
+                                    })
                             }
                         }
                         val notice = listOf(note, mediaNote).filter(String::isNotBlank).distinct().joinToString("\n")
@@ -193,6 +273,17 @@ internal fun AndroidChatScreen(
                         }
                     }
                     Column(Modifier.windowInsetsPadding(imeBottom)) {
+                        val visibleNotices = if (previewNotices.isNotEmpty() && observed != null && observed.draft == liveDraft()) previewNotices else emptySet()
+                        val noticeLabel = buildList {
+                            if ("capacity" in visibleNotices) add("模型容量预计不足")
+                            if ("rolling" in visibleNotices) add("下一轮将移出最近范围内的消息")
+                            if (reminder) add("自设轮数提醒 · 已达到 ${remindAfter} 轮")
+                        }.joinToString(" · ")
+                        if (noticeLabel.isNotBlank()) {
+                            val dismiss = { reminder = false; observation = null; previewNotices = emptySet() }
+                            ContextReminderBar(noticeLabel, onAdjust = { dismiss(); editContext = true },
+                                onNew = onCreate, onDismiss = dismiss)
+                        }
                         if (readOnly) {
                             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
@@ -205,7 +296,7 @@ internal fun AndroidChatScreen(
                             AndroidChatComposer(sessionKey = scopeId,
                                 readDraft = readDraft ?: { history.sessions(base).firstOrNull { it.id == session.id }?.draft?.text.orEmpty() },
                                 draftEvent = Triple(draftEvent, session.turns.lastOrNull()?.id, session.draft.text.isEmpty()),
-                                onDraftText = onDraftText, onSend = onSend, sendEnabled = !busy && !readOnly && !recording,
+                                onDraftText = { text -> observation = null; onDraftText(text) }, onSend = { submit() }, sendEnabled = !busy && !readOnly && !recording,
                                 hasAttachments = session.draft.attachments.isNotEmpty(), compact = compactHeight,
                                 onPasteImages = { mediaAvailable && !busy && pasteMobileImages(context, onAddAssets) { mediaNote = it } },
                                 actions = {
@@ -217,6 +308,50 @@ internal fun AndroidChatScreen(
                 }
             }
         }
+    }
+    if (editName) AndroidNameDialog(preferences) { editName = false }
+    if (editContext || previewing) key(preferences.identity) {
+        val turns = mobileContextTurns(session, preferences)
+        val retryTurn = previewRetry.takeIf { previewing }
+        val draft = if (retryTurn != null) MobileDraft(retryTurn.question, retryTurn.sent)
+            else liveDraft()
+        val requestPrefs = if (previewing || custom) prefs else prefs.copy(recentTurns = 0)
+        val requestDraft = if (editContext) MobileDraft(draft.text.ifBlank { "预览" }) else draft
+        val result by key(turns, requestDraft, requestPrefs.recentTurns, requestPrefs.pins, connectionEpoch, editContext,
+            preferences.ready, preferences.contextPending) {
+            produceState<AstrBotContextPreview?>(null) {
+                value = if (requestDraft.attachments.isNotEmpty()) AstrBotContextPreview.unavailable(CUSTOM_CONTEXT_MEDIA_NOTICE)
+                else try { previewContext(requestPrefs, turns, requestDraft) }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (e: Exception) { AstrBotContextPreview.unavailable(e.message ?: CONTEXT_UNAVAILABLE) }
+            }
+        }
+        LaunchedEffect(result, requestPrefs.recentTurns, requestPrefs.pins, requestDraft, turns, retryTurn, preferences.identity) {
+            val returned = result ?: return@LaunchedEffect
+            if (!returned.supported || retryTurn != null || !requestPrefs.sameContext(prefs) || requestDraft != liveDraft() ||
+                requestDraft.text.isBlank() || preferences.contextPending) return@LaunchedEffect
+            val conditions = contextNoticeConditions(returned, turns, prefs)
+            if (conditions.isNotEmpty()) {
+                val through = turns.maxOfOrNull { if (it.status == "complete") it.seq else 0L } ?: 0L
+                observation = MobilePreviewObservation(requestDraft, through, returned.revision, conditions)
+            }
+        }
+        if (previewing) AndroidContextPreview(preferences, draft.text, result,
+            canSend = !busy && !readOnly && custom && preferences.ready && !preferences.contextPending,
+            adjust = { previewing = false; editContext = true },
+            onSend = {
+                val checked = result
+                if (previewing && checked?.canSend == true) {
+                    previewing = false
+                    sendReviewed(retryTurn, draft, requestPrefs, checked)
+                }
+            }, onDismiss = { previewing = false })
+        if (editContext) AndroidContextDialog(preferences, turns, result?.supported == true,
+            capabilityNote = when {
+                result == null -> "正在检查服务能力…"
+                result?.supported == true -> "服务支持自选上下文。发送前可核对实际消息与容量。"
+                else -> result?.reason.orEmpty()
+            }, addPin = pinCandidate, onDismiss = { editContext = false; pinCandidate = null })
     }
     if (search) {
         AndroidHistorySearch(profileSessions, onDismiss = { search = false }) {
@@ -230,66 +365,74 @@ internal fun AndroidChatScreen(
         AlertDialog(onDismissRequest = { retry = null }, title = { Text("重新发送？") },
             text = { Text("上一条可能已经被 AstrBot 接收。请先核对。继续会发送一条新消息，可能重复执行。") },
             confirmButton = { TextButton(enabled = !busy && !readOnly, onClick = {
-                retry = null; onRetry(turn)
+                retry = null; submit(turn)
             }) { Text("确认重发") } },
             dismissButton = { TextButton(onClick = { retry = null }) { Text("取消") } })
     }
 }
 
 @Composable
+private fun ContextReminderBar(label: String, onAdjust: () -> Unit, onNew: () -> Unit, onDismiss: () -> Unit) {
+    var actions by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Box {
+            TextButton(onClick = { actions = true }) { Text("处理") }
+            DropdownMenu(actions, { actions = false }) {
+                DropdownMenuItem(text = { Text("调整上下文") }, onClick = { actions = false; onAdjust() })
+                DropdownMenuItem(text = { Text("新开会话") }, onClick = { actions = false; onNew() })
+            }
+        }
+        IconButton(onClick = onDismiss) { Icon(Icons.Outlined.Close, "稍后处理") }
+    }
+}
+
+@Composable
 private fun ChatHeader(
-    connections: AndroidConnections, title: String, titleHit: MobileHistoryHit?, short: Boolean,
+    connections: AndroidConnections, peerName: String, title: String, titleHit: MobileHistoryHit?,
     sidebarOpen: Boolean, onSidebar: () -> Unit, onSearch: () -> Unit, onSettings: () -> Unit,
-    onAppearance: () -> Unit, onHeart: () -> Unit,
+    onAppearance: () -> Unit, onHeart: () -> Unit, onName: () -> Unit, onContext: () -> Unit,
     onDeviceSettings: (() -> Unit)?, onLocalHistory: (() -> Unit)?, deviceStatus: String?,
 ) {
     var more by remember { mutableStateOf(false) }
-    val annotated = if (titleHit == null) AnnotatedString(title)
-        else mobileHighlightedText(titleHit.excerpt, titleHit.excerptStart, titleHit.query.length)
-    Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onSidebar) {
-                Icon(Icons.Default.Menu, if (sidebarOpen) "收起最近对话" else "打开最近对话")
-            }
-            Column(Modifier.weight(1f)) {
-                if (short && deviceStatus != null) Text(deviceStatus, style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                else Text("Chatbox", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                if (short) Text(annotated, style = MaterialTheme.typography.labelMedium,
-                    maxLines = if (titleHit == null) 1 else 2, overflow = TextOverflow.Ellipsis)
-            }
-            IconButton(onClick = onSearch) { Icon(Icons.Default.Search, "搜索聊天记录") }
-            Box {
-                IconButton(onClick = { more = true }) { Icon(Icons.Default.MoreVert, "更多操作") }
-                DropdownMenu(more, onDismissRequest = { more = false }) {
-                    listOfNotNull(("连接设置" to onSettings).takeIf { deviceStatus == null },
-                        onDeviceSettings?.let { "设备设置" to it },
-                        "窗口外观" to onAppearance, onLocalHistory?.let { "本机历史" to it },
-                        "心率" to onHeart).forEach { (label, action) ->
-                        DropdownMenuItem(text = { Text(label) }, onClick = { more = false; action() })
-                    }
-                }
-            }
+    var details by rememberSaveable { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = onSidebar) {
+            Icon(painterResource(R.drawable.chat_recent), if (sidebarOpen) "收起最近对话" else "打开最近对话")
         }
-        if (!short) {
-            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f).padding(bottom = 6.dp)) {
-                    Text(annotated, maxLines = if (titleHit == null) 1 else 3, overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text(deviceStatus ?: connections.status, style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
-                        overflow = TextOverflow.Ellipsis)
-                }
-                Box(Modifier.weight(.8f), contentAlignment = Alignment.CenterEnd) {
-                    TextButton(onClick = onSettings) {
-                        Text(if (deviceStatus == null) connections.keyName.ifBlank { "连接设置" } else "设备设置",
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
+        Column(Modifier.weight(1f).padding(horizontal = 4.dp)) {
+            Text(peerName, style = MaterialTheme.typography.titleLarge,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (titleHit != null) Text(mobileHighlightedText(titleHit.excerpt, titleHit.excerptStart, titleHit.query.length),
+                style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        Box {
+            IconButton(onClick = { more = true }) { Icon(painterResource(R.drawable.chat_more), "更多操作") }
+            DropdownMenu(more, onDismissRequest = { more = false }) {
+                listOfNotNull(
+                    "修改对方名称" to onName, "上下文" to onContext, "搜索聊天记录" to onSearch, "会话详情" to { details = true },
+                    ("连接设置" to onSettings).takeIf { deviceStatus == null },
+                    onDeviceSettings?.let { "设备设置" to it }, onLocalHistory?.let { "本机历史" to it },
+                    "窗口外观" to onAppearance, "心率" to onHeart,
+                ).forEach { (label, action) ->
+                    DropdownMenuItem(text = { Text(label) }, onClick = { more = false; action() })
                 }
             }
         }
     }
+    if (details) AlertDialog(onDismissRequest = { details = false }, title = { Text("会话详情") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                if (deviceStatus != null) Text(deviceStatus) else {
+                    Text(connections.services.firstOrNull { it.base == connections.base }?.name ?: "本机")
+                    if (connections.base.isNotBlank()) Text(connections.base)
+                    Text(connections.status)
+                    if (connections.keyName.isNotBlank()) Text(connections.keyName)
+                }
+            }
+        }, confirmButton = { TextButton(onClick = { details = false }) { Text("完成") } })
 }
 
 @Composable
@@ -303,10 +446,9 @@ private fun AndroidSessionSidebar(
     val recent = remember(sessions) { sessions.sortedByDescending { it.turns.lastOrNull()?.createdAt ?: 0L } }
     Surface(modifier) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 14.dp)) {
-            Text("最近对话", style = MaterialTheme.typography.titleMedium)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Button(onClick = onCreate, modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(12.dp)) { Text("＋  新建会话") }
+                Text("本机历史", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                IconButton(onClick = onCreate) { Icon(Icons.Outlined.Add, "新建会话") }
                 if (onDismiss != null) TextButton(onClick = onDismiss) { Text("关闭") }
             }
             Spacer(Modifier.height(12.dp))
@@ -327,7 +469,7 @@ private fun AndroidSessionSidebar(
                         }
                         Box {
                             IconButton(onClick = { menu = true }) {
-                                Icon(Icons.Default.MoreVert, "会话 ${item.title} 菜单")
+                                Icon(painterResource(R.drawable.chat_more), "会话 ${item.title} 菜单")
                             }
                             DropdownMenu(menu, onDismissRequest = { menu = false }) {
                                 DropdownMenuItem(text = { Text("重命名") }, onClick = { menu = false; editId = item.id })
@@ -399,7 +541,8 @@ private fun chatReadingSaver(turns: List<MobileTurn>) = listSaver<ChatReading, A
 private fun ChatTimeline(
     session: MobileSession, busy: Boolean, readOnly: Boolean, hit: MobileHistoryHit?,
     jumpTurn: String?, onJumpHandled: () -> Unit, onHitShown: () -> Unit,
-    onCreate: () -> Unit, onRetry: (MobileTurn) -> Unit, onRetryMedia: (MobileTurn, MobileAsset) -> Unit,
+    onRetry: (MobileTurn) -> Unit, onRetryMedia: (MobileTurn, MobileAsset) -> Unit,
+    preferences: ChatPreferenceHandle, onPin: (ContextPin) -> Unit, retryLabel: String,
 ) {
     if (session.turns.isEmpty()) {
         Box(Modifier.fillMaxSize().clipToBounds(), contentAlignment = Alignment.Center) {
@@ -407,7 +550,6 @@ private fun ChatTimeline(
                 Text("开始一段对话", style = MaterialTheme.typography.titleMedium)
                 Text("在下方输入消息。", style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
-                TextButton(onClick = onCreate) { Text("新建会话") }
             }
         }
         if (jumpTurn != null) LaunchedEffect(jumpTurn) { onJumpHandled() }
@@ -480,9 +622,19 @@ private fun ChatTimeline(
                     val user = index % 2 == 0
                     val side = if (user) MobileHistorySide.USER else MobileHistorySide.ASSISTANT
                     val relevantHit = bodyHit?.takeIf { it.turnId == turn.id && it.side == side }
-                    ChatBubble(turn, user, relevantHit, markedTurn == turn.id && !user,
-                        canRetry = !busy && !readOnly, onRetry = { onRetry(turn) },
-                        onRetryMedia = { asset -> onRetryMedia(turn, asset) }, onLine = { targetLine = it })
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        if (user) GroupTime(turn.createdAt, session.turns.getOrNull(index / 2 - 1)?.createdAt)
+                        val pin = preferences.sequenceAt(index / 2)?.takeIf { preferences.ready &&
+                            turn.status == "已完成" && (if (user) turn.question else turn.answer).isNotBlank() }
+                            ?.let { ContextPin(it, if (user) "user" else "assistant") }
+                        ChatBubble(turn, user, relevantHit, markedTurn == turn.id && !user,
+                            peerName = preferences.value.effectiveName, canRetry = !busy && !readOnly,
+                            onRetry = { onRetry(turn) }, retryLabel = retryLabel,
+                            onRetryMedia = { asset -> onRetryMedia(turn, asset) }, onLine = { targetLine = it },
+                            pinAction = pin?.let {
+                                (if (it in preferences.value.pins) "取消固定" else "加入上下文") to { onPin(it) }
+                            })
+                    }
                 }
             }
         }
@@ -497,79 +649,104 @@ private fun ChatTimeline(
 }
 
 @Composable
+private fun GroupTime(now: Long, previous: Long?) {
+    if (now <= 0) return
+    val context = LocalContext.current
+    val label = remember(context, now, previous) {
+        val day = Calendar.getInstance().apply { timeInMillis = now }
+        val prior = previous?.takeIf { it > 0 }?.let { Calendar.getInstance().apply { timeInMillis = it } }
+        val newDay = prior == null || day.get(Calendar.YEAR) != prior.get(Calendar.YEAR) ||
+            day.get(Calendar.DAY_OF_YEAR) != prior.get(Calendar.DAY_OF_YEAR)
+        val time = android.text.format.DateFormat.getTimeFormat(context).format(Date(now))
+        when {
+            newDay -> android.text.format.DateFormat.getDateFormat(context).format(Date(now)) + "  " + time
+            now - previous >= 15 * 60_000L -> time
+            else -> ""
+        }
+    }
+    if (label.isNotEmpty()) Text(label, Modifier.padding(vertical = 8.dp),
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+@Composable
 private fun ChatBubble(
     turn: MobileTurn, user: Boolean, hit: MobileHistoryHit?, marked: Boolean,
     canRetry: Boolean, onRetry: () -> Unit, onRetryMedia: (MobileAsset) -> Unit, onLine: (Float) -> Unit,
+    pinAction: Pair<String, () -> Unit>?, retryLabel: String, peerName: String,
 ) {
     val colors = MaterialTheme.colorScheme
     val source = if (user) turn.question else turn.answer
     val assets = if (user) turn.sent else turn.replies
     val bubble = if (user) colors.primaryContainer else colors.surface
-    val context = LocalContext.current
-    val time = remember(context, turn.createdAt) {
-        if (turn.createdAt <= 0L) "" else android.text.format.DateFormat.getTimeFormat(context).format(Date(turn.createdAt))
-    }
     val clipboard = LocalClipboardManager.current
+    var menu by remember { mutableStateOf(false) }
+    val actions = buildList<Pair<String, () -> Unit>> {
+        if (source.isNotEmpty()) add("复制正文" to { clipboard.setText(AnnotatedString(source)) })
+        pinAction?.let(::add)
+        if (!user && canRetry && turn.status != "已完成") add(retryLabel to onRetry)
+    }
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        Surface(
-            modifier = Modifier.align(if (user) Alignment.CenterEnd else Alignment.CenterStart)
-                .widthIn(max = minOf(760.dp, maxWidth * (if (user) .84f else .90f))),
-            shape = if (user) RoundedCornerShape(18.dp, 18.dp, 5.dp, 18.dp)
-                else RoundedCornerShape(5.dp, 18.dp, 18.dp, 18.dp),
-            color = bubble, contentColor = colors.onSurface,
-            border = when {
-                marked -> BorderStroke(2.dp, colors.primary)
-                !user -> BorderStroke(1.dp, colors.outlineVariant)
-                else -> null
-            },
-        ) {
-            Column(Modifier.padding(horizontal = 13.dp, vertical = 9.dp)) {
-                if (!user) Text("助手", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                if (user && assets.isNotEmpty()) AndroidAssetList(assets)
-                if (source.isNotEmpty()) {
-                    var layout by remember(hit) { mutableStateOf<TextLayoutResult?>(null) }
-                    var top by remember(hit) { mutableStateOf<Float?>(null) }
-                    val offset = hit?.start
-                    val measured = layout
-                    val textTop = top
-                    if (offset != null && measured != null && textTop != null &&
-                        measured.layoutInput.text.text == source && offset in source.indices) {
-                        val line = measured.getLineForOffset(offset)
-                        SideEffect { onLine(textTop + (measured.getLineTop(line) + measured.getLineBottom(line)) / 2f) }
-                    }
-                    SelectionContainer {
+        val limit = minOf(680.dp, maxWidth * (if (user) .84f else .92f))
+        Box(Modifier.align(if (user) Alignment.CenterEnd else Alignment.CenterStart)) {
+            Surface(
+                modifier = Modifier
+                    .widthIn(max = limit).semantics { stateDescription = if (user) "你" else peerName }
+                    .then(if (actions.isEmpty()) Modifier else Modifier
+                        .pointerInput(Unit) { detectTapGestures(onLongPress = { menu = true }) }
+                        .onPreviewKeyEvent {
+                            if (it.type == KeyEventType.KeyDown && (it.key == Key.Enter || it.key == Key.Menu ||
+                                (it.key == Key.F10 && it.isShiftPressed))) { menu = true; true } else false
+                        }.focusable()
+                        .semantics(mergeDescendants = true) {
+                            onLongClick("消息操作") { menu = true; true }
+                            customActions = actions.map { (label, action) ->
+                                CustomAccessibilityAction(label) { action(); true }
+                            }
+                        }),
+                shape = if (user) RoundedCornerShape(18.dp, 18.dp, 5.dp, 18.dp)
+                    else RoundedCornerShape(5.dp, 18.dp, 18.dp, 18.dp),
+                color = bubble, contentColor = colors.onSurface,
+                border = if (marked) BorderStroke(2.dp, colors.primary) else null,
+            ) {
+                Column(Modifier.padding(horizontal = 13.dp, vertical = 9.dp)) {
+                    if (user && assets.isNotEmpty()) AndroidAssetList(assets)
+                    if (source.isNotEmpty()) {
+                        var layout by remember(hit) { mutableStateOf<TextLayoutResult?>(null) }
+                        var top by remember(hit) { mutableStateOf<Float?>(null) }
+                        val offset = hit?.start
+                        val measured = layout
+                        val textTop = top
+                        if (offset != null && measured != null && textTop != null &&
+                            measured.layoutInput.text.text == source && offset in source.indices) {
+                            val line = measured.getLineForOffset(offset)
+                            SideEffect { onLine(textTop + (measured.getLineTop(line) + measured.getLineBottom(line)) / 2f) }
+                        }
                         Text(if (hit == null) AnnotatedString(source)
-                            else mobileHighlightedText(source, hit.start, hit.query.length),
-                            modifier = if (hit == null) Modifier else Modifier.onGloballyPositioned {
-                                top = it.positionInRoot().y
-                            }, style = MaterialTheme.typography.bodyMedium,
-                            onTextLayout = { if (hit != null) layout = it })
+                                else mobileHighlightedText(source, hit.start, hit.query.length),
+                                modifier = if (hit == null) Modifier else Modifier.onGloballyPositioned {
+                                    top = it.positionInRoot().y
+                                }, style = MaterialTheme.typography.bodyMedium,
+                                onTextLayout = { if (hit != null) layout = it })
                     }
-                }
-                if (!user) {
-                    for (asset in assets) key(asset) {
-                        AndroidAssetList(listOf(asset))
-                        val missing = remember(asset.path) { asset.path.isBlank() || !File(asset.path).isFile }
-                        if (missing && !asset.remoteId.isNullOrBlank()) {
-                            TextButton(enabled = canRetry, onClick = { onRetryMedia(asset) }) {
-                                Text(if (asset.kind == "audio") "重试获取语音" else "重试获取图片")
+                    if (!user) {
+                        for (asset in assets) key(asset) {
+                            AndroidAssetList(listOf(asset))
+                            val missing = remember(asset.path) { asset.path.isBlank() || !File(asset.path).isFile }
+                            if (missing && !asset.remoteId.isNullOrBlank()) {
+                                TextButton(enabled = canRetry, onClick = { onRetryMedia(asset) }) {
+                                    Text(if (asset.kind == "audio") "重试获取语音" else "重试获取图片")
+                                }
                             }
                         }
                     }
-                }
-                if (!user && turn.status != "已完成") {
-                    Text(turn.status, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (user && time.isNotEmpty()) {
-                        Text(time, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                        Spacer(Modifier.width(6.dp))
+                    if (!user && turn.status != "已完成") {
+                        Text(turn.status, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
                     }
-                    if (source.isNotEmpty()) TextButton(onClick = { clipboard.setText(AnnotatedString(source)) },
-                        contentPadding = PaddingValues(horizontal = 4.dp)) {
-                        Text("复制正文", style = MaterialTheme.typography.labelSmall)
-                    }
-                    if (!user && canRetry && turn.status != "已完成") TextButton(onClick = onRetry) { Text("重试") }
+                }
+            }
+            DropdownMenu(menu, { menu = false }) {
+                actions.forEach { (label, action) ->
+                    DropdownMenuItem(text = { Text(label) }, onClick = { menu = false; action() })
                 }
             }
         }

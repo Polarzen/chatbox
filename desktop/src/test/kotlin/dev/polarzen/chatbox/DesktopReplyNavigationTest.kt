@@ -61,7 +61,7 @@ class DesktopReplyNavigationTest {
     }
 
     @Test
-    fun olderMediaReplyStaysVisibleBelowAResizedQuestionAndNewTurnsResumeFollowing() {
+    fun olderMediaReplyStaysVisibleWhenQuestionResizesOrNewTurnArrives() {
         val question = mutableStateOf("question line\n".repeat(45))
         val count = mutableStateOf(12)
         val request = mutableStateOf<ReplyTurnNavigation?>(null)
@@ -98,6 +98,9 @@ class DesktopReplyNavigationTest {
         rule.runOnIdle { request.value = ReplyTurnNavigation(2L, 2) }
         picture.assertIsDisplayed()
         rule.runOnIdle { count.value++ }
+        picture.assertIsDisplayed()
+        assertEquals(anchoredY, picture.fetchSemanticsNode().positionInRoot.y, 2f)
+        rule.onNodeWithTag("return-to-latest").performClick()
         rule.onNodeWithTag("message-assistant-12").assertIsDisplayed()
     }
 }

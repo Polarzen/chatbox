@@ -56,7 +56,7 @@ class ChatUrlStyleTest {
         val user = "See https://example.test/token!"
         val answer = "🙂见 https://split.test/path。结束"
         val split = answer.indexOf("lit.test")
-        val parts = listOf("助手：" + answer.substring(0, split), answer.substring(split))
+        val parts = listOf(answer.substring(0, split), answer.substring(split))
         val images = ReplyImageCache(temp.newFolder("images").toPath())
         val audio = ReplyAudioCache(temp.newFolder("audio").toPath())
         val clipboard = object : ClipboardManager {

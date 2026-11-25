@@ -20,7 +20,8 @@ internal data class DesktopDeviceRecent(val key: SessionKey, val title: String, 
 internal data class DesktopDeviceUpstream(val profileId: String, val name: String, val base: String)
 internal data class DesktopDeviceSessionState(val sid: String, val remote: Boolean, val reason: String, val rename: Boolean, val pending: Int,
     val authorityProfile: String = "")
-internal data class DesktopDevicePending(val id: String, val question: String, val method: String, val phase: String, val entry: Entry?)
+internal data class DesktopDevicePending(val id: String, val question: String, val method: String, val phase: String,
+                                       val entry: Entry?, val contextRevision: String? = null)
 
 internal class DesktopDeviceMediaTarget(val address: String, val token: String, val username: String,
     val sid: String, val allowLoopbackHttp: Boolean)
@@ -37,6 +38,7 @@ internal class DesktopDeviceSync(
 ) {
     private val api = SharedDeviceTransport(allowLoopback = true)
     private val routes = mutableMapOf<String, VerifiedRoute>()
+    private var preferenceRevision by mutableStateOf(0L)
     private var issues by mutableStateOf<Map<String, String>>(emptyMap())
     private var sessionIssues by mutableStateOf<Map<SessionKey, String>>(emptyMap())
     var enabled by mutableStateOf(store.deviceOwner() != null)
@@ -59,6 +61,65 @@ internal class DesktopDeviceSync(
         private set
 
     private fun native(p: Profile) = !p.offlineOnly && p.kind != "shared" && p.kind != "device"
+
+    fun preferences(key: SessionKey): ChatPreferenceHandle {
+        preferenceRevision
+        revision
+        val exists = store.hasSession(key)
+        val paired = exists && manages(key.profileId)
+        val authority = if (paired) store.preferenceAuthority(key) else null
+        val owner = if (paired) store.deviceOwner() else null
+        val ready = exists && (!paired || authority != null)
+        fun valid() = ready && store.hasSession(key) &&
+            manages(key.profileId) == paired && (!paired || store.deviceOwner() == owner && store.preferenceAuthority(key) == authority)
+        val snapshot = when {
+            !ready -> PreferenceJournal()
+            authority != null -> store.deviceJournal(authority)
+            else -> store.directJournal(key)
+        }
+        val identity = JSONArray(listOf(if (paired) "device" else "direct", owner?.first,
+            authority?.profile ?: key.profileId, authority?.sid ?: key.sessionId)).toString()
+        return preferenceHandle(identity, snapshot, paired, ready,
+            { index -> if (ready) store.preferenceSequence(key, index, paired) else null }, ::valid, { edit ->
+                val next = if (authority == null) store.directJournal(key, edit) else store.deviceJournal(authority, edit)
+                preferenceRevision++
+                next
+            }, { threshold ->
+                var claimed = false
+                if (authority != null) action {
+                    if (valid()) {
+                        val b = owner(host("local"))
+                        syncPreferenceRoom(api, b, authority) { store.deviceJournal(authority, it) }
+                        if (store.deviceJournal(authority).value.remindAfter == threshold)
+                            claimed = api.claimContextReminder(b, authority.profile, authority.sid, threshold)
+                    }
+                }
+                claimed
+            }, { kind, through, active ->
+                var claimed = false
+                if (authority != null) action {
+                    val current = store.deviceJournal(authority)
+                    if (valid() && !current.contextPending && current.value.recentTurns == snapshot.value.recentTurns &&
+                        current.value.pins == snapshot.value.pins) {
+                        claimed = api.observeContextNotice(owner(host("local")),authority.profile,authority.sid,kind,through,active)
+                    }
+                }
+                claimed
+            }, { store.lastCompletedSeq(key) })
+    }
+
+    suspend fun previewContext(key: SessionKey, question: String): AstrBotContextPreview = withContext(Dispatchers.IO) {
+        store.profileRequests.withLock {
+            val room = store.preferenceAuthority(key)
+            if (room == null || !manages(key.profileId))
+                return@withLock AstrBotContextPreview.unavailable("此会话尚未与设备服务对账。")
+            val b = owner(host("local"))
+            val local = store.deviceJournal(room)
+            if (local.contextPending)
+                return@withLock AstrBotContextPreview.unavailable("上下文设置尚未同步，请先核对其他设备的修改。")
+            api.contextPreview(b, room.profile, room.sid, question)
+        }
+    }
 
     fun manages(profileId: String): Boolean = synchronized(store) {
         val p = store.profile(profileId) ?: return false
@@ -292,7 +353,20 @@ internal class DesktopDeviceSync(
     }
 
     private suspend fun synchronize(b: DeviceBinding, mediaId: String? = null, execute: (suspend (DesktopDeviceMediaTarget) -> Entry)? = null) {
-        val known = api.profiles(b).associateBy { it.profile }.toMutableMap()
+        val known = try { api.profiles(b) } catch (e: SharedHttpFailure) {
+            if (e.status !in setOf(401,403)) throw e
+            var recovered = 0
+            for (p in store.profiles) for (s in store.sessions(p.id)) {
+                val key = SessionKey(p.id,s.id)
+                while (true) {
+                    val op = store.nextDeviceSend(key)?.takeIf { it.method.isEmpty() } ?: break
+                    store.restoreRejectedDeviceDraft(key,op.id,e.status)
+                    recovered++
+                }
+            }
+            if (recovered != 0) error("设备授权已被拒绝，已将 ${recovered} 条尚未派发的消息恢复为草稿。")
+            throw e
+        }.associateBy { it.profile }.toMutableMap()
         val byRemote = mutableMapOf<String, String>()
         val profileErrors = mutableMapOf<String, String>()
         val candidates = mutableListOf<DesktopDeviceUpstream>()
@@ -442,11 +516,44 @@ internal class DesktopDeviceSync(
                 errors[key] = explain(e)
             }
         }
+        val active = store.profile(store.activeProfileId)?.let { SessionKey(it.id, it.currentSession) }
+        val focusedRoom = active?.let(store::preferenceAuthority)
+        val unresolved = errors.keys.mapNotNull(store::preferenceAuthority).toSet()
+        for ((profile, sid) in remoteRows.keys) {
+            val room = PreferenceRoom(profile, sid)
+            if (profile to sid in removed || profile !in byRemote || room in unresolved) continue
+            val journal = store.deviceJournal(room)
+            if (room != focusedRoom && !journal.pending) continue
+            try {
+                syncPreferenceRoom(api, b, room) { store.deviceJournal(room, it) }
+                if (room == focusedRoom) verifyPreferencePrefix(b, active, room)
+            } catch (e: Exception) {
+                propagate(e)
+                if (pendingIssue.isEmpty()) pendingIssue = "对话设置暂未同步。" + explain(e)
+            }
+        }
         sessionIssues = errors
         devices = api.devices(b)
         val outstanding = store.profiles.sumOf { p -> store.sessions(p.id).sumOf { store.deviceSessionState(SessionKey(p.id, it.id)).pending } }
         notice = (profileErrors.values + errors.values + listOf(pendingIssue).filter(String::isNotEmpty)).distinct().take(3).joinToString(" ").ifEmpty {
             if (outstanding > 0) "有 ${outstanding} 轮文字或媒体正在排队或核对。" else "已同步设备会话。"
+        }
+    }
+
+    private suspend fun verifyPreferencePrefix(b: DeviceBinding, key: SessionKey, room: PreferenceRoom) {
+        val localProfile = store.deviceProfile(key.profileId)?.profile ?: return
+        val prefix = store.profileHistoryPosition(key, localProfile).prefix
+        var count = store.preferenceVerified(key)
+        while (count < prefix) {
+            val local = store.profileSeedPage(key, localProfile, count, minOf(50, prefix - count))
+            val page = api.turns(b, room.profile, room.sid, count.toLong(), local.size)
+            val matches = local.zip(page.turns).takeWhile { (l, r) ->
+                l.question == r.question && l.answer == r.answer && l.status == r.status
+            }.size
+            if (page.turns.take(matches).withIndex().any { (offset, t) -> t.seq != count.toLong() + offset + 1 }) return
+            count += matches
+            store.markPreferenceVerified(key, room, count)
+            if (matches < local.size) return
         }
     }
 
@@ -496,12 +603,15 @@ internal class DesktopDeviceSync(
         return true
     }
 
-    suspend fun send(key: SessionKey, question: String, draftRevision: Long): Boolean = withContext(Dispatchers.IO) {
+    suspend fun send(key: SessionKey, question: String, draftRevision: Long, contextRevision: String? = null): Boolean = withContext(Dispatchers.IO) {
         try {
             check(manages(key.profileId) && reason(key).isEmpty()) { reason(key).ifBlank { "此档案尚未启用设备共享。" } }
             check(question.isNotBlank() && question.toByteArray(Charsets.UTF_8).size <= 64 * 1024) { "请输入不超过 64 KiB 的文字。" }
             check(!Regex("^/task(?:\\s|$)").containsMatchIn(question.trimStart())) { "鲸鱼任务需在本机专用入口执行。" }
-            store.queueDeviceSend(key, question, draftRevision)
+            val settings = store.preferenceAuthority(key)?.let { store.deviceJournal(it) }
+            check(settings?.contextPending != true) { "上下文设置尚未同步，请先核对。" }
+            check((settings?.value?.recentTurns != null) == (contextRevision != null) && contextRevision?.isBlank() != true) { CONTEXT_CHANGED }
+            store.queueDeviceSend(key, question, draftRevision, contextRevision = contextRevision)
             notice = "消息已保存，正在等待同步。"
             revision++
             true
@@ -518,6 +628,11 @@ internal class DesktopDeviceSync(
             val p = checkNotNull(store.profile(key.profileId))
             check(manages(p.id) && native(p)) { "请在原设备上发送此档案的媒体。" }
             check(reason(key).isEmpty()) { reason(key) }
+            store.preferenceAuthority(key)?.let { room ->
+                val settings = store.deviceJournal(room)
+                check(!settings.contextPending) { "上下文设置尚未同步，请先核对。" }
+                check(settings.value.recentTurns == null) { CUSTOM_CONTEXT_MEDIA_NOTICE }
+            }
             val question = desktopSharedSeedTurn(entry).question
             check(entry.attachmentReferences.isNotEmpty() && question.toByteArray(Charsets.UTF_8).size <= 64 * 1024)
             val id = store.queueDeviceSend(key, question, draftRevision, entry)
@@ -546,16 +661,34 @@ internal class DesktopDeviceSync(
                     else -> "start"
                 }.also { store.markDeviceSend(key, pending.id, it) }
             }
-            val previous = if (pending.method.isNotEmpty()) existing(b, pending.id) else null
-            val op = if (method == "media" && pending.phase.isEmpty()) {
-                // A repeat verifies the reservation type and destination. Its dispatch flag reports
-                // reservation creation only. The durable source-device claim gates native execution.
-                api.beginMedia(b, profile, sid, pending.id, pending.question)
-            } else previous ?: when (method) {
-                "media" -> error("找不到原媒体操作，已保存本机结果和原编号。")
-                "start" -> api.start(b, profile, sid, pending.id, pending.question)
-                "send" -> api.send(b, profile, sid, pending.id, pending.question)
-                else -> error("本机待发操作类型无效。")
+            val op = try {
+                val previous = if (pending.method.isNotEmpty()) existing(b, pending.id) else null
+                if (method == "media" && pending.phase.isEmpty()) {
+                    // The durable native claim gates upload after the service reserves the ID.
+                    api.beginMedia(b, profile, sid, pending.id, pending.question)
+                } else previous ?: when (method) {
+                    "media" -> error("找不到原媒体操作，已保存本机结果和原编号。")
+                    "start" -> api.start(b, profile, sid, pending.id, pending.question)
+                    "send" -> api.send(b, profile, sid, pending.id, pending.question, pending.contextRevision)
+                    else -> error("本机待发操作类型无效。")
+                }
+            } catch (_: DeviceContextAwaiting) {
+                return
+            } catch (e: SharedHttpFailure) {
+                if (e.conflict == SharedConflict.CONTEXT_REJECTED && pending.contextRevision != null) {
+                    store.restoreRejectedDeviceDraft(key, pending.id, e.status)
+                    error("上游已确认本次未派发。请核对草稿并重新预览。")
+                }
+                if (pending.method.isEmpty() && method == "send" && e.status == 409 && e.conflict == SharedConflict.OTHER &&
+                    (pending.contextRevision != null || api.chatPreferences(b,profile,sid).recentTurns != null)) {
+                    store.restoreRejectedDeviceDraft(key,pending.id,e.status)
+                    error("上下文已更改，消息已恢复为草稿。请重新打开草稿并预览。")
+                }
+                // Only a rejection of the first submission proves this ID was never
+                // accepted. A failed lookup or retry after a lost reply proves neither.
+                if (pending.method.isNotEmpty() || e.status !in setOf(400,401,403,404,413,422)) throw e
+                store.restoreRejectedDeviceDraft(key,pending.id,e.status)
+                error("设备服务拒绝发送（HTTP ${e.status}），已把原文和附件恢复为草稿。")
             }
             check(op.profile == profile && op.sid == sid && op.turn.id == pending.id && op.turn.question == pending.question) {
                 "设备发送回执与本机操作不一致。"
@@ -648,6 +781,7 @@ internal class DesktopDeviceSync(
             401, 403 -> "服务未确认此操作的授权，原记录及待发编号已保留。"
             409 -> when (e.conflict) {
                 SharedConflict.RUNNING -> "另一台设备正在生成回复。完成后会按原发送编号继续。"
+                SharedConflict.CONTEXT_REJECTED -> "上游已确认本次未派发，请核对草稿并重新预览。"
                 SharedConflict.UNRESOLVED -> "上一轮的上游执行结果未知，请先在 AstrBot 核对，待发编号已保留。"
                 SharedConflict.OTHER -> "服务未确认会话来源或操作状态，待发编号已保留。"
             }

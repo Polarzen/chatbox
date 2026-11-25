@@ -23,6 +23,7 @@ internal data class DesktopShellSettings(
     val hotkey: DesktopHotkey = DesktopHotkey.DEFAULT,
     val closeToTray: Boolean = false,
     val notifyReplies: Boolean = true,
+    val recentPanelPinned: Boolean = false,
 )
 
 internal class DesktopShellSettingsStore(private val dataDir: Path) {
@@ -42,6 +43,7 @@ internal class DesktopShellSettingsStore(private val dataDir: Path) {
             hotkey = (json.opt("hotkey") as? String)?.let { DesktopHotkey.parse(it) } ?: defaults.hotkey,
             closeToTray = json.opt("closeToTray") as? Boolean ?: defaults.closeToTray,
             notifyReplies = json.opt("notifyReplies") as? Boolean ?: defaults.notifyReplies,
+            recentPanelPinned = json.optBoolean("recentPanelPinned", false),
         )
     }
 
@@ -51,6 +53,7 @@ internal class DesktopShellSettingsStore(private val dataDir: Path) {
             .put("hotkey", settings.hotkey.toString())
             .put("closeToTray", settings.closeToTray)
             .put("notifyReplies", settings.notifyReplies)
+            .put("recentPanelPinned", settings.recentPanelPinned)
         Files.createDirectories(dataDir)
         val temp = Files.createTempFile(dataDir, "shell-", ".tmp")
         try {

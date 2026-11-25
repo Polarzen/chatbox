@@ -2,6 +2,10 @@
 
 Chatbox 是连接 AstrBot 的 Windows 与 Android 聊天客户端。两端配对一次，即可从「最近对话」查看历史、新建会话并继续聊天，也可选择仅在本机使用。
 
+## 0.1.21 聊天窗口候选分支
+
+本候选版从正式版 0.1.19 开发，0.1.20 手环原型独立维护。常规聊天沿用原服务；需要自选模型参考的历史时，请先核对 AstrBot 4.29.4 配套适配。[候选版升级与双端复验](docs/CHAT_WINDOW_CONTEXT.md)
+
 ## 下载 0.1.19
 
 [Windows 安装包（MSI）](https://github.com/Polarzen/chatbox/releases/download/v0.1.19/Chatbox-0.1.19.msi) · [Android 安装包（APK）](https://github.com/Polarzen/chatbox/releases/download/v0.1.19/Chatbox-0.1.19.apk) · [SHA-256 校验文件](https://github.com/Polarzen/chatbox/releases/download/v0.1.19/SHA256SUMS.txt) · [发布说明](https://github.com/Polarzen/chatbox/releases/tag/v0.1.19)

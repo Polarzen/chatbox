@@ -23,11 +23,11 @@ private fun DeviceForm(title: String, onBack: (() -> Unit)?, content: @Composabl
 }
 
 @Composable
-internal fun AndroidDeviceWelcome(connect: () -> Unit, useLocal: () -> Unit) {
+internal fun AndroidDeviceWelcome(connect: () -> Unit, newLocal: () -> Unit) {
     DeviceForm("欢迎使用 Chatbox", null) {
         Text("连接自己的电脑，即可在两台设备上接着聊。也可以先在手机上使用，稍后再连接。")
         Button(onClick = connect) { Text("连接我的电脑") }
-        OutlinedButton(onClick = useLocal) { Text("仅在本机使用") }
+        OutlinedButton(onClick = newLocal) { Text("新建本机会话") }
     }
 }
 

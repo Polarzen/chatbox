@@ -1,2 +1,3 @@
 /astrbot_plugin_chatbox_draw/main.py -text
 /patches/astrbot_plugin_chatbox_draw-3B151B3E-to-native.patch text eol=lf
+/patches/astrbot-v4.29.4-chatbox-context.patch text eol=lf

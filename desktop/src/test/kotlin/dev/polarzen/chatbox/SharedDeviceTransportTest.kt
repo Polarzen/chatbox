@@ -16,6 +16,54 @@ import javax.crypto.spec.SecretKeySpec
 class SharedDeviceTransportTest {
     private val transport = SharedDeviceTransport(allowLoopback = true)
 
+    @Test fun settingsUseScopedCompareAndSetAndReadTheServersReminderClaim() = runBlocking {
+        val http = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val saved = DeviceBinding.create("http://127.0.0.1:${http.address.port}", "service", owner = true)
+        val profile = "中文 +"
+        val sid = "会话&1"
+        val initial = ConversationPreferences(profileName = "默认")
+        val desired = initial.copy(peerName = "小白", remindAfter = 2)
+        val received = CopyOnWriteArrayList<JSONObject>()
+        val query = CopyOnWriteArrayList<String>()
+        http.createContext("/v1/device/") { ex ->
+            val reply = if (ex.requestMethod == "GET") {
+                query.addAll(ex.requestURI.rawQuery.split("&").map { URLDecoder.decode(it, "UTF-8") })
+                initial.toJson()
+            } else {
+                received.add(JSONObject(ex.requestBody.reader(Charsets.UTF_8).use { it.readText() }))
+                when (ex.requestURI.path.substringAfterLast('/')) {
+                    "claim-context-reminder" -> JSONObject().put("claimed", false)
+                    "context-notice" -> JSONObject().put("claimed", received.last().getBoolean("active"))
+                    else -> desired.toJson()
+                }
+            }
+            val bytes = reply.toString().toByteArray()
+            ex.sendResponseHeaders(200, bytes.size.toLong())
+            ex.responseBody.use { it.write(bytes) }
+        }
+        http.start()
+        try {
+            assertEquals(initial, transport.chatPreferences(saved, profile, sid))
+            assertEquals(listOf("profile=$profile", "sid=$sid"), query)
+            assertEquals(desired, transport.updateChatPreferences(saved, profile, sid, initial, desired))
+            assertFalse(transport.claimContextReminder(saved, profile, sid, 2))
+            val through = Int.MAX_VALUE.toLong() + 7
+            assertTrue(transport.observeContextNotice(saved, profile, sid, "rolling", through, true))
+            assertFalse(transport.observeContextNotice(saved, profile, sid, "capacity", through, false))
+            assertTrue(received.all { it.getString("profile") == profile && it.getString("sid") == sid })
+            val expected = received[0].getJSONObject("expected")
+            assertEquals(setOf("peerName", "remindAfter"), expected.keys().asSequence().toSet())
+            assertTrue(expected.isNull("peerName") && expected.isNull("remindAfter"))
+            assertEquals("小白", received[0].getJSONObject("changes").getString("peerName"))
+            assertEquals(2, received[1].getInt("threshold"))
+            assertEquals("rolling", received[2].getString("kind"))
+            assertEquals(through, received[2].getLong("through"))
+            assertEquals("capacity", received[3].getString("kind"))
+        } finally {
+            http.stop(0)
+        }
+    }
+
     @Test fun signedAddressChangeChecksBothEndpointsBeforeBearer() = runBlocking {
         Endpoint().use { old ->
             Endpoint().use { next ->

@@ -23,4 +23,15 @@ class AndroidRecentProfileTest {
         val duplicateSource = phone.copy(profile = "c", originDevice = "phone2")
         assertNull(defaultDeviceProfile(listOf(phone, duplicateSource), null, phone.base, phone.username))
     }
+
+    @Test fun restoresOwnerAndIdBeforeFallingBackToVisibleHistory() {
+        val local = AndroidDeviceRow("local:server", "local-room", "主题", 6, "本机", "", "server", "")
+        val remote = AndroidDeviceRow("profile-a", "shared", "主题", 5, "电脑", "", null, "")
+        val namesake = remote.copy(profile = "profile-b")
+        val rows = listOf(local, namesake, remote)
+        assertEquals(remote, initialChatRow(rows, "device", "profile-a", "shared", false, "server", "local-room"))
+        assertEquals(local, initialChatRow(rows, "device", "gone", "shared", false, "server", "local-room"))
+        assertEquals("empty-draft", initialChatRow(rows, "local", "", "empty-draft", true, "", "empty-draft")?.sid)
+        assertNull(initialChatRow(emptyList(), "local", "gone", "deleted", false, "", "new"))
+    }
 }

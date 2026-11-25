@@ -7,6 +7,7 @@ import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.rightClick
 import androidx.compose.ui.test.doubleClick
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
@@ -46,8 +47,9 @@ class DesktopMessageCopyTest {
         val previous = clipboard.getContents(null)
         try {
             for ((role, body) in listOf("user" to entry.question, "assistant" to entry.answer)) {
-                val bubble = hasAnyAncestor(hasTestTag("message-$role-0"))
-                rule.onNode(hasText("复制正文") and bubble).performClick()
+                if (role == "user") rule.onNodeWithTag("message-$role-0").performMouseInput { rightClick() }
+                else rule.onNodeWithTag("message-menu-$role-0").performClick()
+                rule.onNodeWithText("复制正文").performClick()
                 rule.waitForIdle()
                 assertEquals(body, clipboard.getData(DataFlavor.stringFlavor))
 
@@ -77,9 +79,11 @@ class DesktopMessageCopyTest {
         val button = rule.onNodeWithText("复制正文")
         val message = rule.onNodeWithText("first second")
         val notice = rule.onNodeWithText("剪贴板占用中，请再试一次。")
+        rule.onNodeWithTag("message-menu-user-0").performClick()
         button.performClick()
         notice.assertIsDisplayed()
         rule.runOnIdle { occupied = false }
+        rule.onNodeWithTag("message-menu-user-0").performClick()
         button.performClick()
         notice.assertDoesNotExist()
         assertEquals("first second", copied?.text)
@@ -112,7 +116,7 @@ class DesktopMessageCopyTest {
         }
         val bubble = rule.onNodeWithTag("message-assistant-0")
         val origin = bubble.fetchSemanticsNode().boundsInRoot.topLeft
-        val first = rule.onNodeWithText("助手：alpha").fetchSemanticsNode().boundsInRoot
+        val first = rule.onNodeWithText("alpha").fetchSemanticsNode().boundsInRoot
         val last = rule.onNodeWithText("omega").fetchSemanticsNode().boundsInRoot
         val clipboard = Toolkit.getDefaultToolkit().systemClipboard
         val previous = clipboard.getContents(null)
@@ -125,7 +129,7 @@ class DesktopMessageCopyTest {
             }
             bubble.performKeyInput { withKeyDown(Key.CtrlLeft) { pressKey(Key.C) } }
             rule.waitForIdle()
-            assertEquals("助手：alphaomega", clipboard.getData(DataFlavor.stringFlavor))
+            assertEquals("alphaomega", clipboard.getData(DataFlavor.stringFlavor))
         } finally {
             restoreClipboard(clipboard, previous)
         }

@@ -21,13 +21,14 @@ internal data class DeviceQueued(val key: DeviceRoomKey, val id: String, val que
                                 val original: String?, val local: DeviceLocalKey?, val start: Boolean,
                                 val media: Boolean, val revision: Long, val dispatched: Boolean = false,
                                 val authored: String = original ?: question, val mediaKeyId: String? = null,
-                                val nativePrompt: String? = null, val finalStatus: String? = null, val finalAnswer: String? = null)
+                                val nativePrompt: String? = null, val finalStatus: String? = null, val finalAnswer: String? = null,
+                                val contextRevision: String? = null)
 internal data class DeviceRoomDraft(val key: DeviceRoomKey, val text: String, val created: Long)
 
 /** The only device-wide grant and its complete remote cache live in this database. Native history
  * and both legacy grants are independent. An interrupted invalidation resumes before cache reads. */
 internal class AndroidDeviceStore(context: Context, name: String = "device-sync.db") :
-    SQLiteOpenHelper(context.applicationContext, name, null, 4), Closeable {
+    SQLiteOpenHelper(context.applicationContext, name, null, 6), Closeable {
     private val alias = "chatbox.device.$name"
     private val cipher = AndroidSharedCipher(alias, name.toByteArray(Charsets.UTF_8))
     private val prefs = context.getSharedPreferences("device-sync-cleanup", Context.MODE_PRIVATE)
@@ -42,6 +43,7 @@ internal class AndroidDeviceStore(context: Context, name: String = "device-sync.
     }
 
     override fun onCreate(db: SQLiteDatabase) {
+        createPreferenceStorage(db)
         db.execSQL("CREATE TABLE grant_state(slot INTEGER PRIMARY KEY CHECK(slot=1),credential BLOB NOT NULL,confirmed INTEGER NOT NULL)")
         db.execSQL("CREATE TABLE profile(id TEXT PRIMARY KEY,source TEXT,base TEXT,username TEXT,name TEXT,origin TEXT,upstream TEXT,available INTEGER)")
         db.execSQL("CREATE TABLE directory(profile TEXT,sid TEXT,title TEXT,activity INTEGER,total INTEGER,imported INTEGER,reason TEXT,origin TEXT,PRIMARY KEY(profile,sid))")
@@ -49,7 +51,7 @@ internal class AndroidDeviceStore(context: Context, name: String = "device-sync.
         db.execSQL("CREATE TABLE local_link(base TEXT,nativeSid TEXT,profile TEXT,sid TEXT,imported INTEGER,title TEXT,legacyAlias INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(base,nativeSid))")
         db.execSQL("""CREATE TABLE outbox(profile TEXT,sid TEXT,id TEXT UNIQUE,question TEXT,original TEXT,base TEXT,
             nativeSid TEXT,start INTEGER,media INTEGER,revision INTEGER,dispatched INTEGER,authored TEXT,
-            mediaKeyId TEXT,nativePrompt TEXT,finalStatus TEXT,finalAnswer TEXT,PRIMARY KEY(profile,sid))""")
+            mediaKeyId TEXT,nativePrompt TEXT,finalStatus TEXT,finalAnswer TEXT,contextRevision TEXT,PRIMARY KEY(profile,sid))""")
         db.execSQL("CREATE TABLE recovery(id TEXT PRIMARY KEY,text TEXT NOT NULL)")
         db.execSQL("CREATE TABLE draft(profile TEXT,sid TEXT,text TEXT,created INTEGER,PRIMARY KEY(profile,sid))")
         db.execSQL("CREATE TABLE hidden(profile TEXT,sid TEXT,PRIMARY KEY(profile,sid))")
@@ -60,7 +62,10 @@ internal class AndroidDeviceStore(context: Context, name: String = "device-sync.
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        check(oldVersion in 1..3 && newVersion == 4)
+        check(oldVersion in 1..5 && newVersion == 6)
+        createPreferenceStorage(db)
+        db.execSQL("ALTER TABLE outbox ADD COLUMN contextRevision TEXT")
+        if (oldVersion >= 4) return
         db.execSQL("CREATE TABLE IF NOT EXISTS retired(profile TEXT,sid TEXT,PRIMARY KEY(profile,sid))")
         db.execSQL("CREATE TABLE IF NOT EXISTS trusted_address(address TEXT PRIMARY KEY)")
         db.execSQL("CREATE TABLE IF NOT EXISTS page_cursor(profile TEXT,sid TEXT,seq INTEGER,PRIMARY KEY(profile,sid))")
@@ -127,7 +132,7 @@ internal class AndroidDeviceStore(context: Context, name: String = "device-sync.
                     if (!op.media && !originalStillInHistory && op.authored.isNotBlank() && drafts[op.key]?.text != op.authored)
                         recover(db,op.id,op.authored)
                 }
-                for (table in listOf("grant_state","profile","directory","body","local_link","outbox","draft","hidden","retired","local_operation","page_cursor","trusted_address"))
+                for (table in listOf("grant_state","profile","directory","body","local_link","outbox","draft","hidden","retired","local_operation","page_cursor","trusted_address","chat_preference"))
                     db.delete(table, null, null)
             }
         } finally {
@@ -140,6 +145,18 @@ internal class AndroidDeviceStore(context: Context, name: String = "device-sync.
         DeviceProfile(it.getString(0), it.getString(1), it.getString(2), it.getString(3), it.getString(4),
             it.getString(5), it.getString(6), it.getInt(7) != 0)
     }
+
+    @Synchronized fun preferenceJournal(room: PreferenceRoom) = readPreferenceStorage(readableDatabase, room)
+
+    @Synchronized fun preferenceJournal(room: PreferenceRoom, edit: (PreferenceJournal) -> PreferenceJournal) =
+        editPreferenceStorage(writableDatabase, room, edit)
+
+    fun pendingPreferenceRooms(): Set<PreferenceRoom> = query("SELECT profile,sid,record FROM chat_preference") { c ->
+        val room = PreferenceRoom(c.getString(0), c.getString(1))
+        val record = c.getString(2)
+        val journal = if (room.sid.isEmpty()) PreferenceJournal.decode(record, null) else PreferenceJournal.decode(null, record)
+        room.takeIf { journal.pending }
+    }.filterNotNull().toSet()
 
     fun directory() = query("SELECT * FROM directory") {
         DeviceSession(it.getString(0), it.getString(1), it.getString(2), it.getLong(3), it.getInt(4),
@@ -158,6 +175,8 @@ internal class AndroidDeviceStore(context: Context, name: String = "device-sync.
             saveEntry(db,it)
         }
         db.execSQL("DELETE FROM retired WHERE EXISTS(SELECT 1 FROM directory WHERE profile=retired.profile AND sid=retired.sid)")
+        db.execSQL("""DELETE FROM chat_preference WHERE EXISTS(SELECT 1 FROM retired r
+            WHERE r.profile=chat_preference.profile AND r.sid=chat_preference.sid)""")
         // Only an entire revision may retire a cached remote body.
         db.execSQL("""DELETE FROM body WHERE NOT EXISTS(SELECT 1 FROM directory d
             WHERE d.profile=body.profile AND d.sid=body.sid) AND NOT EXISTS(SELECT 1 FROM outbox o
@@ -187,19 +206,19 @@ internal class AndroidDeviceStore(context: Context, name: String = "device-sync.
     }
 
     fun pending() = query("""SELECT profile,sid,id,question,original,base,nativeSid,start,media,revision,dispatched,
-        COALESCE(authored,original,question),mediaKeyId,nativePrompt,finalStatus,${smallSqlText("finalAnswer")} FROM outbox""") {
+        COALESCE(authored,original,question),mediaKeyId,nativePrompt,finalStatus,${smallSqlText("finalAnswer")},contextRevision FROM outbox""") {
         DeviceQueued(DeviceRoomKey(it.getString(0), it.getString(1)), it.getString(2), it.getString(3),
             it.getString(4), if (it.isNull(5)) null else DeviceLocalKey(it.getString(5), it.getString(6)),
             it.getInt(7) != 0, it.getInt(8) != 0, it.getLong(9), it.getInt(10) != 0,it.getString(11),
             it.getString(12),it.getString(13),it.getString(14),if (it.isNull(14)) null else
-                it.fullSqlText(readableDatabase,15,"finalAnswer","outbox","id=?",arrayOf(it.getString(2))))
+                it.fullSqlText(readableDatabase,15,"finalAnswer","outbox","id=?",arrayOf(it.getString(2))), it.getString(16))
     }
 
     fun begin(op: DeviceQueued) = transaction { db ->
         with(op) {
             db.execSQL("""INSERT INTO outbox(profile,sid,id,question,original,base,nativeSid,start,media,revision,dispatched,
-                authored,mediaKeyId,nativePrompt) VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,?)""", arrayOf(key.profile, key.sid, id,
-                question, original, local?.base, local?.sid, if (start) 1 else 0, if (media) 1 else 0, revision,authored,mediaKeyId,nativePrompt))
+                authored,mediaKeyId,nativePrompt,contextRevision) VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)""", arrayOf(key.profile, key.sid, id,
+                question, original, local?.base, local?.sid, if (start) 1 else 0, if (media) 1 else 0, revision,authored,mediaKeyId,nativePrompt,contextRevision))
             if (local != null) db.execSQL("INSERT INTO local_operation VALUES(?,?,?)", arrayOf(local.base,local.sid,id))
         }
     }

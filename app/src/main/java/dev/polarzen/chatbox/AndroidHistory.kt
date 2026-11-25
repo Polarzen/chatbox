@@ -62,10 +62,11 @@ internal class AndroidHistory(context: Context) : AutoCloseable {
         Thread(job, "chatbox-draft-writer").apply { isDaemon = true }
     }.apply { removeOnCancelPolicy = true }
     private var scheduled: ScheduledFuture<*>? = null
-    private val helper = object : SQLiteOpenHelper(context.applicationContext, "mobile-history.db", null, 2) {
+    private val helper = object : SQLiteOpenHelper(context.applicationContext, "mobile-history.db", null, 3) {
         override fun onConfigure(db: SQLiteDatabase) = db.setForeignKeyConstraintsEnabled(true)
 
         override fun onCreate(db: SQLiteDatabase) {
+            createPreferenceStorage(db)
             db.execSQL("CREATE TABLE profiles (base TEXT PRIMARY KEY, selected TEXT)")
             db.execSQL("""CREATE TABLE sessions (
                 base TEXT NOT NULL REFERENCES profiles(base), id TEXT NOT NULL, sharedBase TEXT NOT NULL,
@@ -78,8 +79,9 @@ internal class AndroidHistory(context: Context) : AutoCloseable {
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            check(oldVersion == 1 && newVersion == 2)
-            db.execSQL("ALTER TABLE sessions ADD COLUMN draftRevision INTEGER NOT NULL DEFAULT 0")
+            check(oldVersion in 1..2 && newVersion == 3)
+            if (oldVersion == 1) db.execSQL("ALTER TABLE sessions ADD COLUMN draftRevision INTEGER NOT NULL DEFAULT 0")
+            createPreferenceStorage(db)
         }
     }
 
@@ -202,6 +204,12 @@ internal class AndroidHistory(context: Context) : AutoCloseable {
         return if (edits.isEmpty()) saved else saved.map { withEdits(key,it) }
     }
 
+    @Synchronized fun preferenceJournal(base: String, sid: String) =
+        readPreferenceStorage(helper.readableDatabase, PreferenceRoom(normalizeBase(base), sid))
+
+    @Synchronized fun preferenceJournal(base: String, sid: String, edit: (PreferenceJournal) -> PreferenceJournal) =
+        editPreferenceStorage(helper.writableDatabase, PreferenceRoom(normalizeBase(base), sid), edit)
+
     @Synchronized fun selected(base: String): MobileSession {
         val profile = view(normalizeBase(base)).value
         return profile.sessions.firstOrNull { it.id == profile.selected }?.let { withEdits(normalizeBase(base),it) } ?: create(base)
@@ -264,6 +272,7 @@ internal class AndroidHistory(context: Context) : AutoCloseable {
         transaction { db ->
             db.execSQL("UPDATE profiles SET selected=? WHERE base=?", arrayOf(next, key))
             db.delete("sessions", "base=? AND id=?", arrayOf(key, id))
+            db.delete("chat_preference", "profile=? AND sid=?", arrayOf(key, id))
         }
         profile.value = ProfileView(next, remaining)
         removeUnreferenced(removed.draft.attachments + removed.turns.flatMap { it.sent + it.replies })

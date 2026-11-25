@@ -34,7 +34,7 @@ internal fun desktopRecentRows(
 
 internal suspend fun sendDeviceDraft(
     sync: DesktopDeviceSync, key: SessionKey, editor: SessionEditor, composer: DesktopComposerSession,
-    store: DesktopStore, images: ReplyImageCache, audio: ReplyAudioCache, notice: (String?) -> Unit,
+    store: DesktopStore, images: ReplyImageCache, audio: ReplyAudioCache, contextRevision: String? = null, notice: (String?) -> Unit,
 ) {
     val serial = editor.editSerial
     var locked = false
@@ -50,7 +50,8 @@ internal suspend fun sendDeviceDraft(
         editor.commitInProgress = true
         locked = true
         notice(null)
-        val accepted = if (draft.attachments.isEmpty()) sync.send(key, question, revision) else {
+        val accepted = if (draft.attachments.isEmpty()) sync.send(key, question, revision, contextRevision) else {
+            if (contextRevision != null) { notice(CUSTOM_CONTEXT_MEDIA_NOTICE); return }
             val error = withContext(Dispatchers.IO) { attachmentProblem(draft.attachments, store.managedMediaDirectory) }
             if (error != null) { notice(error); return }
             val entry = Entry(question, "", "待发送", attachmentReference = draft.attachments.first().toString(),

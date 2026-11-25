@@ -327,8 +327,11 @@ class DesktopUiAcceptanceTest {
         render()
         awaitConnected()
         val oldSession = fixture.getProperty("session.a")
+        openRecentPinned()
         val newSessionButton = rule.onNodeWithTag("new-session-button")
         newSessionButton.performClick()
+        advanceUiAnimations()
+        rule.onNodeWithTag("confirm-new-conversation").performClick()
         val currentAfterNew = store.profile(profileA)!!.currentSession
         assertFalse("New session has a distinct server session UUID", currentAfterNew == oldSession)
         val question = "延迟 fixture response while switching session"
@@ -466,6 +469,7 @@ class DesktopUiAcceptanceTest {
                 rule.onNodeWithTag(tag, useUnmergedTree = true).assertDoesNotExist()
             }
         }
+        openRecentPinned()
         rule.onNodeWithText("还没有对话").assertIsDisplayed()
         assertControlsAbsent()
         val history = List(20) { index ->
@@ -498,6 +502,7 @@ class DesktopUiAcceptanceTest {
         render()
         awaitConnected()
 
+        openRecentPinned()
         val duplicateSessions = store.sessions(profileA).filter { it.title == "重复标题" }
         assertEquals("Long history contains duplicate visible titles", 44, duplicateSessions.size)
         val scrolledSession = duplicateSessions[35].id
@@ -728,6 +733,8 @@ class DesktopUiAcceptanceTest {
         }
         fun retryLast() {
             val index = store.sessionContent(profileA, key.sessionId).entries.lastIndex
+            clickSemanticsTag("message-menu-assistant-$index")
+            advanceUiAnimations()
             awaitUi("manual retry available for the failed recording") { isDisplayed("retry-message-$index") }
             clickSemanticsTag("retry-message-$index")
             advanceUiAnimations()
@@ -779,7 +786,10 @@ class DesktopUiAcceptanceTest {
         createV015Profiles(withLegacyKey = true)
         render()
         awaitConnected()
+        openRecentPinned()
         rule.onNodeWithTag("new-session-button").performClick()
+        advanceUiAnimations()
+        rule.onNodeWithTag("confirm-new-conversation").performClick()
         val question = "fixture:voice-reply"
         sendText(question)
         waitUntil("completed voice reply", 15_000) { entryForCurrentSession(question)?.status == "已完成" }
@@ -788,7 +798,7 @@ class DesktopUiAcceptanceTest {
         fun assertReplyOrder() {
             waitUntil("play control between the two reply text blocks", 10_000) {
                 rule.mainClock.advanceTimeByFrame()
-                val before = rule.onNodeWithText("助手：语音前文").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+                val before = rule.onNodeWithText("语音前文").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
                 val button = play.assertIsDisplayed().assertIsEnabled().fetchSemanticsNode().boundsInRoot
                 val after = rule.onNodeWithText("语音后文").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
                 before.center.y < button.center.y && button.center.y < after.center.y
@@ -860,7 +870,7 @@ class DesktopUiAcceptanceTest {
             advanceUiAnimations()
             clickSemanticsTag("close-sidebar-button")
             advanceUiAnimations()
-            rule.onNodeWithText(name).assertIsDisplayed()
+            assertEquals(name, store.sessions(profileA).single { it.id == session }.title)
             assertEquals(anchor.top, paragraphBox(middle).top, 2f)
 
             val digits = middle.toString().padStart(3, '0')
@@ -1299,7 +1309,7 @@ class DesktopUiAcceptanceTest {
     }
 
     private fun connectedStatusText(): String = runCatching {
-        rule.onNodeWithTag("connection-control-status").fetchSemanticsNode().config.toString()
+        rule.onNodeWithTag("rail-settings").fetchSemanticsNode().config.toString()
     }.getOrDefault("").let { semantics -> if (semantics.contains("已连接")) "已连接" else "" }
 
     private fun waitForKeyList(profile: String) {
@@ -1315,6 +1325,7 @@ class DesktopUiAcceptanceTest {
             else clickSemanticsTag("connection-control-key-$activeId", useUnmergedTree = true)
             advanceUiAnimations()
         }
+        if (!isDisplayed("connection-control-status")) { clickSemanticsTag("rail-settings"); advanceUiAnimations() }
         waitUntil("connection settings status control visible", 5_000) { isDisplayed("connection-control-status") }
         clickSemanticsTag("connection-control-status")
         advanceUiAnimations()
@@ -1380,7 +1391,17 @@ class DesktopUiAcceptanceTest {
         waitUntil("profile selection", 10_000) { DesktopStore(historyFile).activeProfileId == expectedProfile }
     }
 
+    private fun openRecentPinned() {
+        if (isDisplayed("close-settings")) { clickSemanticsTag("close-settings"); advanceUiAnimations() }
+        if (!isDisplayed("new-session-button")) {
+            clickSemanticsTag("sidebar-toggle")
+            advanceUiAnimations()
+            if (isDisplayed("pin-sidebar")) { clickSemanticsTag("pin-sidebar"); advanceUiAnimations() }
+        }
+    }
+
     private fun selectSession(sessionId: String) {
+        openRecentPinned()
         sessionRow(sessionId).performClick()
     }
 
@@ -1568,6 +1589,7 @@ class DesktopUiAcceptanceTest {
     }
 
     private fun openKeyMenu() {
+        if (!isDisplayed("connection-control-key-button")) { clickSemanticsTag("rail-settings"); advanceUiAnimations() }
         clickSemanticsTag("connection-control-key-button")
         advanceUiAnimations()
         waitUntil("key dropdown visible", 5_000) {

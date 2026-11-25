@@ -28,6 +28,7 @@ class DesktopResponsiveHeaderTest {
     @get:Rule val files = TemporaryFolder()
 
     private fun render(initialWidth: Dp, density: Density) = mutableStateOf(initialWidth).also { width ->
+        ui.mainClock.autoAdvance = false
         val dir = files.root.toPath()
         val store = DesktopStore(dir.resolve("history.json"))
         val keys = NamedKeys(dir, DesktopCredentials(dir.resolve("credentials")))
@@ -44,53 +45,41 @@ class DesktopResponsiveHeaderTest {
                 }
             }
         }
+        ui.mainClock.advanceTimeBy(150)
     }
 
     @Test
-    fun headerReflowsAcrossSidebarAndWindowWidthChangesWithLiveControls() {
-        // The open 232 dp sidebar leaves the conversation pane exactly 639 dp wide.
-        val width = render(871.dp, Density(1f))
-        val draft = "Unsent draft before resizing"
+    fun compactRailOverlayAndPinnedPanelPreserveDraftAcrossWindowSizes() {
+        val width = render(900.dp, Density(1f))
+        val draft = "调整窗口时保留的草稿"
         ui.onNodeWithTag("composer-field").performTextInput(draft)
-        assertHeader(compact = true)
-        ui.onNodeWithTag("sidebar-toggle").performClick()
-        assertHeader(compact = false)
-        ui.onNodeWithTag("sidebar-toggle").performClick()
-        assertHeader(compact = true)
-
-        ui.onNodeWithTag("appearance-open").performClick()
-        ui.onNodeWithTag("appearance-menu").assertIsDisplayed()
-        for (windowWidth in listOf(872.dp, 871.dp)) {
-            ui.runOnIdle { width.value = windowWidth }
-            assertHeader(compact = windowWidth == 871.dp)
-            ui.onNodeWithTag("appearance-menu").assertIsDisplayed()
-            assertEquals(draft, ui.onNodeWithTag("composer-field").fetchSemanticsNode()
-                .config[SemanticsProperties.EditableText].text)
-        }
+        fun chatLeft() = ui.onNodeWithTag("partner-name").fetchSemanticsNode().boundsInRoot.left
+        val start = chatLeft()
+        assertEquals(52f, ui.onNodeWithTag("navigation-rail").fetchSemanticsNode().boundsInRoot.width, 1f)
+        ui.onNodeWithTag("sidebar-toggle").performClick().also { ui.mainClock.advanceTimeBy(150) }
+        ui.onNodeWithTag("new-session-button").assertIsDisplayed()
+        assertEquals(start, chatLeft(), 1f)
+        ui.onNodeWithTag("pin-sidebar").performClick().also { ui.mainClock.advanceTimeBy(150) }
+        assertTrue(chatLeft() > start + 200f)
+        ui.runOnIdle { width.value = 600.dp }
+        ui.mainClock.advanceTimeBy(150)
+        ui.onNodeWithTag("sidebar-toggle").performClick().also { ui.mainClock.advanceTimeBy(150) }
+        ui.onNodeWithTag("new-session-button").assertIsDisplayed()
+        assertEquals(start, chatLeft(), 1f)
+        ui.onNodeWithTag("close-sidebar-button").performClick().also { ui.mainClock.advanceTimeBy(150) }
+        assertEquals(draft, ui.onNodeWithTag("composer-field").fetchSemanticsNode()
+            .config[SemanticsProperties.EditableText].text)
     }
 
     @Test
-    fun firstWidePaneAt125PercentScaleKeepsShortConnectionLabel() {
+    fun searchAndSettingsRemainReachableAt125Percent() {
         render(640.dp, Density(1.25f))
-        assertHeader(compact = false)
-        ui.onNodeWithTag("connection-control-status").assertTextEquals("未连")
-        val toggle = ui.onNodeWithTag("sidebar-toggle").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
-        val title = ui.onNodeWithText("新会话").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
-        val actions = ui.onNodeWithTag("history-search-open").fetchSemanticsNode().boundsInRoot
-        assertTrue("The title should fit between the toggle and actions",
-            title.width > 0 && title.left >= toggle.right && title.right <= actions.left)
-    }
-
-    private fun assertHeader(compact: Boolean) {
-        val toggle = ui.onNodeWithTag("sidebar-toggle").fetchSemanticsNode().boundsInRoot
-        for (tag in listOf("history-search-open", "appearance-pin", "appearance-open",
-            "connection-control-status", "connection-control-key-button")) {
-            val control = ui.onNodeWithTag(tag).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
-            if (compact) {
-                assertTrue("$tag should occupy the second header row", control.top >= toggle.bottom)
-            } else {
-                assertTrue("$tag should share the sidebar toggle's row", control.center.y in toggle.top..toggle.bottom)
-            }
-        }
+        ui.onNodeWithTag("history-search-open").performClick().also { ui.mainClock.advanceTimeBy(150) }
+        ui.onNodeWithTag("history-search-query").assertIsDisplayed()
+        ui.onNodeWithTag("history-search-cancel").performClick().also { ui.mainClock.advanceTimeBy(150) }
+        ui.onNodeWithTag("rail-settings").performClick().also { ui.mainClock.advanceTimeBy(150) }
+        ui.onNodeWithTag("connection-control-status").assertIsDisplayed()
+        ui.onNodeWithTag("appearance-open").performClick().also { ui.mainClock.advanceTimeBy(150) }
+        ui.onNodeWithTag("appearance-menu").assertIsDisplayed()
     }
 }

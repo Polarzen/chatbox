@@ -13,7 +13,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.Saver
@@ -213,7 +213,7 @@ internal fun AndroidChatComposer(
             )
         }
         FilledIconButton(onClick = ::submit, enabled = canSend(), modifier = Modifier.size(48.dp)) {
-            Icon(Icons.AutoMirrored.Filled.Send, "发送", Modifier.size(22.dp))
+            Icon(Icons.AutoMirrored.Outlined.Send, "发送", Modifier.size(22.dp))
         }
     }
 }

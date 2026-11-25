@@ -46,6 +46,7 @@ class MainActivity : ComponentActivity() {
     private var receivedIntentWhileLoading = false
     private var restoreProfile: String? = null
     private var restoreSid: String? = null
+    private var confirmNew by mutableStateOf(false)
     private var chooseProfile by mutableStateOf(false)
     private var heartOpen by mutableStateOf(false)
     private var images by mutableStateOf<List<Uri>>(emptyList())
@@ -74,9 +75,10 @@ class MainActivity : ComponentActivity() {
             restoreProfile = savedInstanceState.getString("deviceProfile")
             restoreSid = savedInstanceState.getString("deviceSid")
             chooseProfile = savedInstanceState.getBoolean("chooseProfile")
+            confirmNew = savedInstanceState.getBoolean("confirmNew")
         }
         lifecycleScope.launch {
-            val (loaded, entry) = withContext(Dispatchers.IO) {
+            val (loaded, entry, destination) = withContext(Dispatchers.IO) {
                 // Decide before opening a database. Remember an unfinished first run across restarts.
                 val mode = entryPrefs.getString("start", null) ?: run {
                     val legacy = getDatabasePath("mobile-history.db").isFile ||
@@ -86,16 +88,31 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 val state = AndroidAppState.get(applicationContext)
+                val lastSid = entryPrefs.getString("chatSid", null)
+                val lastOwner = entryPrefs.getString("chatOwner", null)
+                val kind = entryPrefs.getString("chatKind", null)
+                val localAvailable = kind == "local" && lastOwner != null && lastSid != null &&
+                    (lastOwner.isEmpty() || state.connections.services.any { it.base == lastOwner }) &&
+                    state.history.sessions(lastOwner).any { it.id == lastSid }
+                val target = if (savedPage != null || mode == "welcome") null else {
+                    val rows = if (localAvailable) emptyList() else androidRecentRows(state)
+                    val base = state.connections.base
+                    val currentSid = if (rows.any { it.nativeBase == base }) state.history.selected(base).id else ""
+                    initialChatRow(rows, kind, lastOwner, lastSid, localAvailable, base, currentSid)
+                }
                 val established = state.device.bound
                 val initial = when (mode) {
                     "welcome" -> if (established) ChatPage.RECENT else ChatPage.WELCOME
                     "upgrade" -> ChatPage.CHAT
                     else -> ChatPage.RECENT
                 }
-                state to initial
+                Triple(state, initial, target)
             }
             app = loaded
-            if (savedPage == null) page = entry
+            if (savedPage == null) {
+                page = entry
+                if (destination != null) openDevice(destination)
+            }
             if (entryPrefs.getString("start", null) == "upgrade") completeWelcome()
             ready = true
             if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) startForegroundWork()
@@ -131,6 +148,7 @@ class MainActivity : ComponentActivity() {
         outState.putString("deviceProfile", if (ready) app.device.current?.profile ?: restoreProfile else restoreProfile)
         outState.putString("deviceSid", if (ready) app.device.current?.sid ?: restoreSid else restoreSid)
         outState.putBoolean("chooseProfile", chooseProfile)
+        outState.putBoolean("confirmNew", confirmNew)
         outState.putBoolean("heart", heartOpen)
         outState.putStringArrayList("images", ArrayList(images.map(Uri::toString)))
         outState.putString("jumpTurn", jumpTurn)
@@ -270,19 +288,31 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun rememberChat(kind: String, owner: String, sid: String) {
+        entryPrefs.edit().putString("chatKind", kind).putString("chatOwner", owner).putString("chatSid", sid).apply()
+    }
+
+    private fun enterChat(target: ChatPage) {
+        navigation.clear()
+        navigation.add(ChatPage.RECENT)
+        page = target
+        jumpTurn = null
+    }
+
     private fun openDevice(row: AndroidDeviceRow) {
         val d = app.device
         val native = row.nativeBase
         if ((!d.bound || row.profile.startsWith("phone-only:")) && native != null) {
             if (!app.connections.selectOffline(native)) return
             app.history.select(native, row.sid)
-            go(ChatPage.CHAT)
+            d.closeChat()
+            enterChat(ChatPage.CHAT)
         } else {
             entryPrefs.edit().putString("lastProfile", row.profile).apply()
             restoreProfile = row.profile
             restoreSid = row.sid
             d.open(row)
-            go(ChatPage.DEVICE_CHAT)
+            enterChat(ChatPage.DEVICE_CHAT)
         }
     }
 
@@ -292,20 +322,19 @@ class MainActivity : ComponentActivity() {
         app.device.newChat(profile)
         restoreProfile = profile.profile
         restoreSid = app.device.current?.sid
-        go(ChatPage.DEVICE_CHAT)
+        enterChat(ChatPage.DEVICE_CHAT)
     }
 
     private fun newNativeChat(base: String) {
         if (!app.connections.selectOffline(base)) return
-        val history = app.history
-        val selected = history.selected(base)
-        if (selected.turns.isNotEmpty() || selected.draft != MobileDraft() || app.legacyStorage(selected).hasState()) {
-            history.create(base)
-        }
+        app.history.create(base)
         jumpTurn = null
         chooseProfile = false
-        go(ChatPage.CHAT)
+        app.device.closeChat()
+        enterChat(ChatPage.CHAT)
     }
+
+    private fun requestNewChat() { confirmNew = true }
 
     private fun newChat() {
         val d = app.device
@@ -334,10 +363,10 @@ class MainActivity : ComponentActivity() {
         BackHandler(page != ChatPage.RECENT && page != ChatPage.WELCOME, onBack = closePage)
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             when (page) {
-                ChatPage.WELCOME -> AndroidDeviceWelcome({ go(ChatPage.PAIR) }, { completeWelcome(); recent() })
+                ChatPage.WELCOME -> AndroidDeviceWelcome({ go(ChatPage.PAIR) }, { completeWelcome(); newNativeChat("") })
                 ChatPage.PAIR -> AndroidDevicePairing(device, app.pairingScope, closePage) { completeWelcome(); recent() }
                 ChatPage.RECENT -> screens.SaveableStateProvider("recent") {
-                    AndroidRecentScreen(app, ::openDevice, ::newChat) { go(ChatPage.DEVICE_SETTINGS) }
+                    AndroidRecentScreen(app, ::openDevice, ::requestNewChat) { go(ChatPage.DEVICE_SETTINGS) }
                 }
                 ChatPage.DEVICE_SETTINGS -> AndroidDeviceSettings(device, app.pairingScope,
                     { go(ChatPage.PAIR) }, { go(ChatPage.CONNECTIONS) }, { go(ChatPage.APPEARANCE) }, closePage)
@@ -370,6 +399,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        if (confirmNew) AlertDialog(onDismissRequest = { confirmNew = false },
+            title = { Text("新开会话？") },
+            text = { Text("原会话和草稿会保留，可从最近对话返回。") },
+            confirmButton = { TextButton(onClick = { confirmNew = false; newChat() }) { Text("新开会话") } },
+            dismissButton = { TextButton(onClick = { confirmNew = false }) { Text("取消") } })
         if (heartOpen) AndroidHeartRatePanel(heart) { heartOpen = false }
         if (chooseProfile) {
             if (device.bound) DeviceProfileChooser(device.profiles.filter { it.available }, ::newDeviceChat,
@@ -392,6 +426,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @Composable private fun RecentPane(active: (AndroidDeviceRow) -> Boolean) {
+        AndroidRecentScreen(app, ::openDevice, ::requestNewChat, active, Modifier.fillMaxSize()) {
+            go(ChatPage.DEVICE_SETTINGS)
+        }
+    }
+
     @Composable private fun NativeChat() {
         val history = app.history
         val connections = app.connections
@@ -401,6 +441,7 @@ class MainActivity : ComponentActivity() {
         val device = app.device
         val busy = app.delivery.busy(base, session.id) || device.nativeBusy(base, session.id)
         LaunchedEffect(base, session.id, device.bound) {
+            rememberChat("local", base, session.id)
             if (device.bound) device.focusNative(base, session.id)
         }
         val shown = if (device.bound) device.nativeChat(base, session) else session
@@ -413,7 +454,7 @@ class MainActivity : ComponentActivity() {
                 .filter(String::isNotBlank).joinToString("\n"), jumpTurn,
             onJumpHandled = { jumpTurn = null },
             onSelect = { jumpTurn = null; history.select(base, it) },
-            onCreate = ::newChat,
+            onCreate = ::requestNewChat,
             onRename = { id, name -> history.rename(base, id, name) },
             onDelete = { id ->
                 history.delete(base, id)
@@ -429,12 +470,20 @@ class MainActivity : ComponentActivity() {
             onAppearance = { go(ChatPage.APPEARANCE) },
             onHeart = { heartOpen = true },
             onRecent = ::recent, onDeviceSettings = { go(ChatPage.DEVICE_SETTINGS) },
+            wideRecent = { RecentPane { it.nativeBase == base && it.sid == session.id } },
+            preferences = device.preferences(base, session.id),
+            connectionEpoch = Triple(connections.keyId, device.online, device.bound),
+            previewContext = { prefs, turns, draft -> app.previewContext(base, session, prefs, turns, draft, heart.live) },
+            sendReviewed = { retry, draft, prefs, preview ->
+                if (app.sendReviewed(base, session, retry, draft, prefs, preview)) requestNotifications(onFirstSend = true)
+            },
             draftEvent = device.draftEvent)
     }
 
     @Composable private fun DeviceChat(row: AndroidDeviceRow, session: MobileSession) {
         val device = app.device
         val native = row.nativeBase
+        LaunchedEffect(row.profile, row.sid) { rememberChat("device", row.profile, row.sid) }
         val connection = when {
             !device.bound -> "设备尚未验证"
             device.online -> "电脑已连接"
@@ -445,14 +494,14 @@ class MainActivity : ComponentActivity() {
         val delivery = when {
             !device.online && device.busy -> "待同步 · 恢复连接后将核对此次发送"
             device.busy -> "正在发送或等待回复"
-            !device.online -> "草稿保存在手机"
+            !device.online && row.reason.isBlank() -> "电脑未连接，草稿保存在手机"
             else -> ""
         }
         val hasLegacyRoom = remember(native, session.id) { native != null && app.legacyStorage(session).hasState() }
         val readOnly = native != null && hasLegacyRoom && !device.managesLegacyNative(native, session.id)
         AndroidChatScreen(app.history, app.connections, session, listOf(session),
             device.busy || (row.reason.isNotBlank() && !readOnly), readOnly, listOf(row.reason, delivery, device.notice).filter { it.isNotBlank() }.joinToString("\n"),
-            null, onJumpHandled = {}, onSelect = {}, onCreate = ::newChat,
+            null, onJumpHandled = {}, onSelect = {}, onCreate = ::requestNewChat,
             onRename = { _, _ -> message("请在会话所属设备中重命名。") },
             onDelete = { message("请在最近对话菜单中选择仅在本机隐藏。") },
             onDraftText = device::editDraft, onRemoveAsset = device::removeAsset,
@@ -460,12 +509,18 @@ class MainActivity : ComponentActivity() {
                 // A picker or clipboard import may finish after the user opened a different row.
                 if (native != null) app.history.addAssets(native, session.id, assets)
             }, onSend = { if (device.send(heart.live)) requestNotifications(onFirstSend = true) },
-            onRetry = { message("将按原发送编号自动核对。") }, onRetryMedia = device::retryMedia,
+            onRetry = { lifecycleScope.launch { device.refresh() } }, onRetryMedia = device::retryMedia,
             onSettings = { go(ChatPage.DEVICE_SETTINGS) }, onAppearance = { go(ChatPage.APPEARANCE) },
             onHeart = { heartOpen = true },
             onRecent = ::recent, onDeviceSettings = { go(ChatPage.DEVICE_SETTINGS) },
             readDraft = { device.chat?.draft?.text.orEmpty() }, draftEvent = device.draftEvent,
             mediaAvailable = native != null,
+            preferences = device.preferences(row), connectionEpoch = device.online,
+            previewContext = { _, _, draft -> device.previewContext(row, heart.live.appendTo(draft.text.trim())) },
+            sendReviewed = { retry, draft, prefs, preview ->
+                if (device.sendReviewed(row, draft, prefs, preview, consume = retry == null)) requestNotifications(onFirstSend = true)
+            },
+            wideRecent = { RecentPane { it.profile == row.profile && it.sid == row.sid } },
             deviceStatus = listOf(connection, row.source).filter(String::isNotBlank).joinToString(" · "))
     }
 

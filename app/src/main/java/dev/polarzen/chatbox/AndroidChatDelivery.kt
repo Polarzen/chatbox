@@ -16,6 +16,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import org.json.JSONObject
 import java.io.File
 import java.net.ConnectException
 import java.net.SocketTimeoutException
@@ -62,7 +63,8 @@ internal class AndroidChatDelivery(
     fun send(base: String, session: String, token: String, user: String, draft: MobileDraft,
              heart: LiveHeartRate?, consumeDraft: Boolean = true, turnId: String = UUID.randomUUID().toString(),
              prepared: Boolean = false, networkQuestion: String? = null,
-             onFinished: (() -> Unit)? = null, onNote: (String) -> Unit) {
+             onFinished: (() -> Unit)? = null, context: JSONObject? = null, contextRevision: String? = null,
+             onNote: (String) -> Unit) {
         val address = AndroidHistory.normalizeBase(base)
         val key = address to session
         if (active[key] == true) return
@@ -74,19 +76,55 @@ internal class AndroidChatDelivery(
             onNote(issue)
             return
         }
+        if (context != null && assets.isNotEmpty()) {
+            onNote(CUSTOM_CONTEXT_MEDIA_NOTICE)
+            return
+        }
+        if ((context == null) != (contextRevision == null) || contextRevision?.isBlank() == true) {
+            onNote(CONTEXT_CHANGED)
+            return
+        }
         val initial = MobileTurn(turnId, question, sent = assets)
+        val contextSnapshot = context?.let { JSONObject(it.toString()) }
+        val customQuestion = networkQuestion ?: heart?.appendTo(question) ?: question
+        val draftRevision: Long?
         try {
-            history.begin(address, session, initial, consumeDraft, prepared)
+            if (contextSnapshot == null) {
+                history.begin(address, session, initial, consumeDraft, prepared)
+                draftRevision = null
+            } else {
+                history.flushDrafts()
+                draftRevision = history.sessions(address).single { it.id == session }.draftRevision
+            }
         } catch (_: Exception) {
             onNote("无法保存本地会话，消息未发送。")
             return
         }
         transfer(key, "chatbox-local-send", onNote, onFinished) {
+            if (contextSnapshot != null) {
+                val preview = previewAstrBotContext(address, secret, user, session, customQuestion, contextSnapshot)
+                if (!preview.canSend) return@transfer preview.reason.ifBlank { CONTEXT_UNAVAILABLE }
+                if (preview.revision != contextRevision) return@transfer CONTEXT_CHANGED
+                // Persist the operation before dispatch. Only an accepted stream can consume its draft.
+                history.begin(address, session, initial, consumeDraft = false)
+            }
             val reply = MobileReplyDelivery(initial) { history.update(address, session, it) }
             val failure = try {
                 val image = { id: String?, _: Int -> reply.media("image", id) }
                 val audio = { id: String?, _: Int -> reply.media("audio", id) }
-                if (assets.isEmpty()) {
+                if (contextSnapshot != null) {
+                    sendAstrBotContext(address, secret, user, session, customQuestion, contextSnapshot,
+                        requireNotNull(contextRevision), turnId, onReplyImage = image, onReplyAudio = audio,
+                        onEvent = { event ->
+                            if (event == AstrBotTransportEvent.StreamReady && consumeDraft) synchronized(history) {
+                                history.flushDrafts()
+                                val current = history.sessions(address).find { it.id == session }
+                                if (current?.draftRevision == draftRevision && current?.draft == draft)
+                                    history.draft(address, session, MobileDraft())
+                            }
+                            reply.event(event)
+                        }, onText = reply::text)
+                } else if (assets.isEmpty()) {
                     sendToAstrBot(address, secret, user, session, question, heart, onReplyImage = image,
                         onReplyAudio = audio, onEvent = reply::event, onText = reply::text)
                 } else {
@@ -327,6 +365,7 @@ internal class MobileReplyDelivery(initial: MobileTurn, private val save: (Mobil
 }
 
 private val safeProtocolErrors = setOf(
+    CONTEXT_CHANGED, CONTEXT_UNAVAILABLE,
     "密钥无效或已撤销。", "权限不足，请检查聊天权限。", "缺少文件上传权限，请为 API 密钥启用 file 权限。",
     "找不到文件上传接口，请检查 AstrBot 版本和服务地址。", "找不到对话接口，请检查 AstrBot 版本和服务地址。",
     "服务返回重定向，请直接填写最终服务地址。", "服务未返回对话事件流，请检查接口地址。",
@@ -341,7 +380,7 @@ private val safeProtocolErrors = setOf(
         "${label}上传失败，请检查文件权限和 API 密钥的文件权限。", "${label}上传成功响应中缺少附件编号。")
 }
 private val safeHttpError = Regex("(?:(?:图片|语音)(?:上传|下载)失败，)?服务器返回 HTTP [1-5][0-9]{2}。")
-private val rejectedChatErrors = setOf("密钥无效或已撤销。", "权限不足，请检查聊天权限。",
+private val rejectedChatErrors = setOf(CONTEXT_CHANGED, CONTEXT_UNAVAILABLE, "密钥无效或已撤销。", "权限不足，请检查聊天权限。",
     "找不到对话接口，请检查 AstrBot 版本和服务地址。", "服务返回重定向，请直接填写最终服务地址。")
 private val rejectedChatHttp = Regex("服务器返回 HTTP 4[0-9]{2}。")
 

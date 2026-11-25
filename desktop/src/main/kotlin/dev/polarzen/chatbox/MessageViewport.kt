@@ -25,6 +25,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -72,12 +74,22 @@ internal fun MessageViewport(
     navigation: SearchHitNavigation? = null,
     replyNavigation: ReplyTurnNavigation? = null,
     content: LazyListScope.() -> Unit,
-) = key(profileId, session) {
+) {
+    val viewports = rememberSaveableStateHolder()
+    viewports.SaveableStateProvider("${profileId.length}:$profileId$session") {
+        SessionViewport(entryCount, modifier, navigation, replyNavigation, content)
+    }
+}
+
+@Composable
+private fun SessionViewport(
+    entryCount: Int, modifier: Modifier, navigation: SearchHitNavigation?,
+    replyNavigation: ReplyTurnNavigation?, content: LazyListScope.() -> Unit,
+) {
     val state = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    // Appending a turn starts following the new reply. Edits inside an existing turn
-    // (including late image measurements) keep the reader's current preference.
-    var following by remember(entryCount) { mutableStateOf(true) }
+    // A new or streaming reply follows the reader only while they are at the tail.
+    var following by rememberSaveable { mutableStateOf(true) }
     var viewportCenterInRoot by remember { mutableStateOf<Float?>(null) }
     val countAtClick = remember(navigation) { entryCount }
     val search = remember(navigation) { navigation?.let(::SearchHitPresentation) }
@@ -188,7 +200,7 @@ internal fun MessageViewport(
                     .nestedScroll(scrollObserver).testTag("message-region"),
                 state = state,
                 contentPadding = PaddingValues(horizontal = 22.dp, vertical = 20.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
                 content = content,
             )
         }

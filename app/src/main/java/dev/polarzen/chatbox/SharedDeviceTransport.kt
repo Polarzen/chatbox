@@ -42,6 +42,7 @@ internal data class DeviceSession(
 )
 internal data class DeviceDirectory(val sessions: List<DeviceSession>, val more: Boolean, val revision: String)
 internal data class DeviceOperation(val profile: String, val sid: String, val turn: SharedTurn, val dispatch: Boolean = false)
+internal class DeviceContextAwaiting : Exception()
 
 internal class SharedDeviceTransport(private val allowLoopback: Boolean) {
     private val http = SharedChatTransport(allowLoopback)
@@ -243,7 +244,46 @@ internal class SharedDeviceTransport(private val allowLoopback: Boolean) {
     suspend fun turn(binding: DeviceBinding, profile: String, sid: String, id: String): SharedTurn =
         SharedTurn.read(request(binding, "turn?${query(profile, sid)}&id=${encode(id)}")).also { require(it.id == id) }
 
+    suspend fun chatPreferences(binding: DeviceBinding, profile: String, sid: String): ConversationPreferences =
+        readChatPreferences(request(binding, "chat-preferences?${query(profile, sid)}"))
+
+    suspend fun updateChatPreferences(
+        binding: DeviceBinding, profile: String, sid: String,
+        expected: ConversationPreferences, desired: ConversationPreferences,
+    ): ConversationPreferences {
+        val diff = conversationPreferenceChanges(expected, desired)
+        if (diff.changes.length() == 0) return chatPreferences(binding, profile, sid)
+        val body = target(profile, sid).put("expected", diff.expected).put("changes", diff.changes)
+        return readChatPreferences(request(binding, "chat-preferences", body))
+    }
+
+    private fun readChatPreferences(json: JSONObject): ConversationPreferences {
+        require(listOf("profileName", "peerName", "recentTurns", "pins", "remindAfter").all(json::has))
+        return ConversationPreferences.fromJson(json)
+    }
+
+    suspend fun claimContextReminder(binding: DeviceBinding, profile: String, sid: String, threshold: Int): Boolean {
+        require(threshold in 1..10000)
+        val result = request(binding, "claim-context-reminder", target(profile, sid).put("threshold", threshold))
+        return result.get("claimed").let { require(it is Boolean); it }
+    }
+
+    suspend fun observeContextNotice(
+        binding: DeviceBinding, profile: String, sid: String, kind: String, through: Long, active: Boolean,
+    ): Boolean {
+        require(kind == "capacity" || kind == "rolling")
+        require(through >= 0)
+        val body = target(profile, sid).put("kind", kind).put("through", through).put("active", active)
+        val claimed = request(binding, "context-notice", body).get("claimed")
+        require(claimed is Boolean)
+        return claimed
+    }
+
     private fun readOperation(r: JSONObject, id: String): DeviceOperation {
+        if (r.optString("contextState") == "pending") {
+            require(r.getString("id") == id && r.getString("profile").isNotEmpty() && r.getString("sid").isNotEmpty())
+            throw DeviceContextAwaiting()
+        }
         val turn = SharedTurn.read(r.getJSONObject("turn"))
         require(turn.id == id)
         return DeviceOperation(r.getString("profile"), r.getString("sid"), turn)
@@ -251,9 +291,13 @@ internal class SharedDeviceTransport(private val allowLoopback: Boolean) {
 
     private suspend fun submit(
         binding: DeviceBinding, path: String, profile: String, sid: String, id: String, question: String,
+        revision: String? = null,
     ): DeviceOperation {
         val body = target(profile, sid).put("id", id).put("question", question)
+        if (revision != null) body.put("revision", revision)
         val r = request(binding, path, body)
+        if (r.has("contextState")) require(revision != null && path == "send" && r.getString("profile") == profile &&
+            r.getString("sid") == sid && r.getString("question") == question)
         val op = readOperation(r, id).also {
             require(it.profile == profile && it.sid == sid && it.turn.question == question)
         }
@@ -266,8 +310,13 @@ internal class SharedDeviceTransport(private val allowLoopback: Boolean) {
     suspend fun start(binding: DeviceBinding, profile: String, sid: String, id: String, question: String) =
         submit(binding, "start", profile, sid, id, question)
 
-    suspend fun send(binding: DeviceBinding, profile: String, sid: String, id: String, question: String) =
-        submit(binding, "send", profile, sid, id, question)
+    suspend fun contextPreview(binding: DeviceBinding, profile: String, sid: String, question: String): AstrBotContextPreview =
+        AstrBotContextPreview.read(request(binding, "context-preview", target(profile, sid).put("question", question)))
+            .copy(networkMessage = question)
+
+    suspend fun send(binding: DeviceBinding, profile: String, sid: String, id: String, question: String,
+                     revision: String? = null) =
+        submit(binding, "send", profile, sid, id, question, revision)
 
     suspend fun beginMedia(binding: DeviceBinding, profile: String, sid: String, id: String, question: String) =
         submit(binding, "media-begin", profile, sid, id, question)
