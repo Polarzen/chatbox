@@ -1,21 +1,81 @@
-name: Chat Box release packaging
+name: Publish Chat Box 0.1.23
 on:
   push:
     branches: ['release/chat-box-0.1.23']
     paths: ['.github/workflows/branding-release.yml']
 permissions:
-  contents: read
+  actions: read
+  pull-requests: read
+  contents: write
 jobs:
-  signing-tool:
+  publish:
     runs-on: ubuntu-24.04
+    env:
+      SOURCE: 'db9f55d5694f37c789d70c70d56a5481707ce8aa'
+      TESTED_HEAD: '63d5996271e4421151397468fcc22dddb598739c'
+      VERIFIED_RUN: '45640398531'
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
-      - name: Retrieve the signer used by the Android SDK on this runner
+      - name: Check verified source revision
         run: |
-          jar="$ANDROID_HOME/build-tools/35.0.0/lib/apksigner.jar"
-          cp "$jar" apksigner.jar
-          sha256sum apksigner.jar
-      - uses: actions/upload-artifact@v4
+          set -euo pipefail
+          gh api "repos/$GH_REPO/actions/runs/$VERIFIED_RUN" |
+            jq -e --arg sha "$TESTED_HEAD" '.head_sha == $sha and .conclusion == "success" and .event == "pull_request" and .head_repository.full_name == "Polarzen/chatbox"'
+          tested_tree=$(gh api "repos/$GH_REPO/git/commits/$TESTED_HEAD" --jq .tree.sha)
+          source_tree=$(gh api "repos/$GH_REPO/git/commits/$SOURCE" --jq .tree.sha)
+          test "$source_tree" = "$tested_tree"
+          gh api "repos/$GH_REPO/pulls/11" |
+            jq -e --arg head "$TESTED_HEAD" --arg source "$SOURCE" '.merged and .base.ref == "main" and .head.sha == $head and .merge_commit_sha == $source' 
+      - uses: actions/checkout@v4
         with:
-          name: Android-SDK-35-apksigner
-          path: apksigner.jar
-          retention-days: 1
+          ref: ${{ env.SOURCE }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: Chatbox-Windows-MSI
+          run-id: ${{ env.VERIFIED_RUN }}
+          github-token: ${{ github.token }}
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: Chat-Box-Android-Unsigned
+          run-id: ${{ env.VERIFIED_RUN }}
+          github-token: ${{ github.token }}
+          path: unsigned
+      - name: Apply the offline signature and verify both APK certificates
+        run: |
+          set -euo pipefail
+          echo '31d8393ec685abd1ad447fc74cfb81a55577c0f83ddb000a74ef6e4724740a93  unsigned/app-release-unsigned.apk' | sha256sum --check
+          gh api "repos/$GH_REPO/git/blobs/15e9357d0fcba5ddf51f7b51a391e31371a9df72" --jq .content | base64 -d > "$RUNNER_TEMP/signature.zst"
+          zstd -q -d --patch-from=unsigned/app-release-unsigned.apk "$RUNNER_TEMP/signature.zst" -o dist/Chatbox-0.1.23.apk
+          echo '2dffa00d8552a9abddf2a6e4765a22721a192b840b1deba9441f79484829877b  dist/Chatbox-0.1.23.apk' | sha256sum --check
+          gh release download v0.1.22 --pattern 'Chatbox-0.1.21.apk' --dir "$RUNNER_TEMP/old"
+          sdk="$ANDROID_HOME/build-tools/35.0.0"
+          "$sdk/zipalign" -c 4 dist/Chatbox-0.1.23.apk
+          for apk in "$RUNNER_TEMP/old/Chatbox-0.1.21.apk" dist/Chatbox-0.1.23.apk; do
+            "$sdk/apksigner" verify --verbose --print-certs "$apk" > "$RUNNER_TEMP/certs"
+            grep -Fx 'Signer #1 certificate SHA-256 digest: 5977f586a953c6a5065e84772cde75426de4e951467a31dadaf354aaa56c1e6b' "$RUNNER_TEMP/certs"
+            test "$(grep -c 'certificate SHA-256 digest:' "$RUNNER_TEMP/certs")" -eq 1
+          done
+          "$sdk/aapt2" dump badging dist/Chatbox-0.1.23.apk > "$RUNNER_TEMP/badging"
+          grep -F "package: name='dev.polarzen.chatbox' versionCode='23' versionName='0.1.23'" "$RUNNER_TEMP/badging"
+          grep -Fx "application-label:'Chat Box'" "$RUNNER_TEMP/badging"
+      - name: Publish verified MSI, APK, installation guide and checksums
+        run: |
+          set -euo pipefail
+          cp docs/Chatbox-Install-Guide.zh-CN.md dist/
+          cd dist
+          sha256sum Chatbox-0.1.23.apk Chatbox-0.1.23.msi Chatbox-Install-Guide.zh-CN.md > SHA256SUMS.txt
+          tag=v0.1.23
+          if gh release view "$tag" --json isDraft,targetCommitish > "$RUNNER_TEMP/draft.json"; then
+            jq -e --arg sha "$SOURCE" '.isDraft and .targetCommitish == $sha' "$RUNNER_TEMP/draft.json"
+          else
+            gh release create "$tag" --draft --target "$SOURCE" --title "Chat Box 0.1.23" \
+              --notes "Windows 和 Android 应用名称统一为 **Chat Box**，使用深紫底双色气泡图标。Windows 版更新了开始菜单、窗口、任务栏和托盘图标；Android 版支持自适应与单色主题图标。旧版用户可保留原应用覆盖升级。"
+          fi
+          gh release upload "$tag" Chatbox-0.1.23.apk Chatbox-0.1.23.msi Chatbox-Install-Guide.zh-CN.md SHA256SUMS.txt --clobber
+          gh release download "$tag" --dir "$RUNNER_TEMP/recheck"
+          cmp SHA256SUMS.txt "$RUNNER_TEMP/recheck/SHA256SUMS.txt"
+          (cd "$RUNNER_TEMP/recheck" && sha256sum -c SHA256SUMS.txt)
+          gh release edit "$tag" --draft=false --latest
