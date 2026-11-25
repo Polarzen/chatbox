@@ -49,6 +49,11 @@ jobs:
             [void][Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$tokens, [ref]$parseErrors)
             if ($parseErrors.Count -ne 0) { throw "$($script.Name): $($parseErrors -join [Environment]::NewLine)" }
           }
+      - name: Check uninstall safety with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP ('chatbox-uninstall-regression-preflight-' + [Guid]::NewGuid().ToString('N'))
+          & .\desktop\test-uninstall-safety.ps1 -EvidenceDirectory $evidence
       - name: Verify WiX and run tests, smoke checks and MSI packaging
         shell: pwsh
         run: |
@@ -87,8 +92,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: Chatbox-Windows-MSI-Upgrade-Logs
-          path: ${{ runner.temp }}/chatbox-upgrade-regression-*/*.log
+          name: Chatbox-Windows-Build-Diagnostics
+          path: |
+            ${{ runner.temp }}/chatbox-upgrade-regression-*/*.log
+            ${{ runner.temp }}/chatbox-uninstall-regression-preflight-*/**/*.log
+            ${{ runner.temp }}/chatbox-uninstall-regression-preflight-*/**/*.json
+            ${{ runner.temp }}/chatbox-uninstall-regression-preflight-*/**/*.txt
           retention-days: 7
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4

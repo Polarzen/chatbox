@@ -292,7 +292,9 @@ function Stop-ChatBoxLocalServices {
                 Assert-ChatBoxNoReparsePath $temporary
                 [IO.File]::WriteAllText($temporary, ($config | ConvertTo-Json -Depth 16), [Text.UTF8Encoding]::new($false))
                 Assert-ChatBoxNoReparsePath $configPath
-                [IO.File]::Replace($temporary, $configPath, $null)
+                # Windows PowerShell 5.1 converts $null for a .NET string to "".
+                # File.Replace needs a real CLR null when no backup path is requested.
+                [IO.File]::Replace($temporary, $configPath, [NullString]::Value)
             }
             finally { if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) } }
             if ($null -ne $config.PSObject.Properties['generation']) {
