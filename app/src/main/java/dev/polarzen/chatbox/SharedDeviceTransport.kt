@@ -38,7 +38,7 @@ internal data class DeviceProfile(
 )
 internal data class DeviceSession(
     val profile: String, val sid: String, val title: String, val activity: Long, val total: Int,
-    val imported: Int, val reason: String, val originDevice: String,
+    val imported: Int, val reason: String, val originDevice: String, val inboxStatus: String = "",
 )
 internal data class DeviceDirectory(val sessions: List<DeviceSession>, val more: Boolean, val revision: String)
 internal data class DeviceOperation(val profile: String, val sid: String, val turn: SharedTurn, val dispatch: Boolean = false)
@@ -219,7 +219,7 @@ internal class SharedDeviceTransport(private val allowLoopback: Boolean) {
 
     private fun readSession(r: JSONObject) = DeviceSession(
         r.getString("profile"), r.getString("sid"), r.getString("title"), r.getLong("activity"),
-        r.getInt("total"), r.getInt("imported"), r.getString("reason"), r.getString("originDevice"),
+        r.getInt("total"), r.getInt("imported"), r.getString("reason"), r.getString("originDevice"), r.optString("inboxStatus"),
     )
 
     suspend fun sessions(

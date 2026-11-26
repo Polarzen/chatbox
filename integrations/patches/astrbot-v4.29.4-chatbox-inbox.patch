@@ -1,0 +1,188 @@
+diff --git a/astrbot/core/db/sqlite.py b/astrbot/core/db/sqlite.py
+index c8f7326..1dd21bd 100644
+--- a/astrbot/core/db/sqlite.py
++++ b/astrbot/core/db/sqlite.py
+@@ -43,6 +43,7 @@ from astrbot.core.db.po import (
+ from astrbot.core.db.po import (
+     Stats as DeprecatedStats,
+ )
++from astrbot.core.db.webchat_inbox import CREATE_INBOX_INDEX
+ from astrbot.core.sentinels import NOT_GIVEN
+ 
+ TxResult = T.TypeVar("TxResult")
+@@ -91,6 +92,7 @@ class SQLiteDatabase(BaseDatabase):
+             await conn.execute(text("PRAGMA cache_size=20000"))
+             await conn.execute(text("PRAGMA temp_store=MEMORY"))
+             await conn.execute(text("PRAGMA mmap_size=134217728"))
++            await conn.execute(text(CREATE_INBOX_INDEX))
+             await conn.execute(text("PRAGMA optimize"))
+             # 确保 personas 表有 folder_id、sort_order、skills 列（前向兼容）
+             await self._ensure_persona_folder_columns(conn)
+diff --git a/astrbot/core/db/webchat_inbox.py b/astrbot/core/db/webchat_inbox.py
+new file mode 100644
+index 0000000..f39bae9
+--- /dev/null
++++ b/astrbot/core/db/webchat_inbox.py
+@@ -0,0 +1,97 @@
++"""Read Chat Box's private WebChat deliveries from their original history rows."""
++
++import json
++import re
++from pathlib import Path
++
++# Both the index and the reader use this predicate so an idle poll seeks into
++# only the marked rows, even for a session with a long ordinary chat history.
++PASSIVE = """
++    platform_id = 'webchat' AND sender_id = 'bot'
++    AND CASE WHEN json_valid(content)
++             THEN json_extract(content, '$.chatbox_delivery') END = 'passive_v1'
++"""
++CREATE_INBOX_INDEX = f"""
++    CREATE INDEX IF NOT EXISTS ix_chatbox_passive_room_id
++    ON platform_message_history (user_id, id) WHERE {PASSIVE}
++"""
++# A left join distinguishes an owned, empty inbox from an unknown private room
++# in the same database snapshot. Only marked rows can leave that room.
++READ_INBOX = f"""
++    SELECT m.id, m.content FROM platform_sessions AS s
++    LEFT JOIN (SELECT id, user_id, content FROM platform_message_history
++               WHERE {PASSIVE} AND id > :after) AS m ON m.user_id = s.session_id
++    WHERE s.session_id = :sid AND s.platform_id = 'webchat' AND s.is_group = 0
++        AND s.creator = :creator
++    ORDER BY m.id LIMIT :size
++"""
++MAX_GRANTS = 64 * 1024
++MAX_TEXT = 256 * 1024
++MAX_PAGE = 768 * 1024
++TRUNCATED = "…〔内容过长，完整消息保存在 AstrBot〕"
++MEDIA = {"image": "〔图片〕", "record": "〔语音〕", "video": "〔视频〕",
++         "file": "〔文件〕", "actionrow": "〔交互按钮〕"}
++
++
++def allows(grants_file: Path, key_id: str | None, username: str) -> bool:
++    if not key_id or not re.fullmatch(r"chatbox_[0-9a-f]{32}", username):
++        return False
++    try:
++        with grants_file.open("rb") as handle:
++            raw = handle.read(MAX_GRANTS + 1)
++        if len(raw) > MAX_GRANTS:
++            return False
++        grants = json.loads(raw.decode("utf-8-sig"))
++        users = grants.get(key_id) if isinstance(grants, dict) else None
++        return isinstance(users, list) and username in users
++    except (OSError, UnicodeError, ValueError, RecursionError):
++        return False
++
++
++def _json_size(value) -> int:
++    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
++
++
++def _message_text(content) -> str:
++    parts = json.loads(content).get("message", [])
++    text = "".join(
++        part["text"] if part.get("type") == "plain" and isinstance(part.get("text"), str)
++        else MEDIA.get(part.get("type"), "")
++        for part in parts if isinstance(part, dict)
++    )
++    # Replace lone surrogates before serializing a response. Never expose
++    # attachment paths, callback data or arbitrary serialized component fields.
++    text = text.encode("utf-8", "replace").decode()
++    if not text.strip():
++        return "〔消息〕"
++    if _json_size(text[:MAX_TEXT + 1]) <= MAX_TEXT and len(text) <= MAX_TEXT:
++        return text
++    low, high = 0, min(len(text), MAX_TEXT)
++    while low < high:
++        middle = (low + high + 1) // 2
++        if _json_size(text[:middle] + TRUNCATED) <= MAX_TEXT:
++            low = middle
++        else:
++            high = middle - 1
++    return text[:low] + TRUNCATED
++
++
++def inbox_page(rows, limit: int):
++    if not rows:
++        return None  # Unknown, foreign or non-private room.
++    messages = []
++    size = 128  # Response envelope.
++    more = False
++    for row_id, content in rows:
++        if row_id is None:
++            break  # Owned room with no matching deliveries.
++        if len(messages) == limit:
++            more = True
++            break
++        message = {"id": row_id, "text": _message_text(content)}
++        size += _json_size(message) + 1
++        if size > MAX_PAGE:
++            more = True
++            break
++        messages.append(message)
++    return {"messages": messages, "more": more}
+diff --git a/astrbot/core/platform/sources/webchat/webchat_adapter.py b/astrbot/core/platform/sources/webchat/webchat_adapter.py
+index 79ec122..053dfb9 100644
+--- a/astrbot/core/platform/sources/webchat/webchat_adapter.py
++++ b/astrbot/core/platform/sources/webchat/webchat_adapter.py
+@@ -149,7 +149,7 @@ class WebChatAdapter(Platform):
+         await db_helper.insert_platform_message_history(
+             platform_id="webchat",
+             user_id=conversation_id,
+-            content={"type": "bot", "message": message_parts},
++            content={"type": "bot", "message": message_parts, "chatbox_delivery": "passive_v1"},
+             sender_id="bot",
+             sender_name="bot",
+         )
+diff --git a/astrbot/dashboard/api/open_api.py b/astrbot/dashboard/api/open_api.py
+index 1262f8f..058065e 100644
+--- a/astrbot/dashboard/api/open_api.py
++++ b/astrbot/dashboard/api/open_api.py
+@@ -1,5 +1,7 @@
+ from __future__ import annotations
+ 
++import asyncio
++from pathlib import Path
+ from typing import Any
+ 
+ from fastapi import APIRouter, Depends, File, Query, Request, UploadFile, WebSocket
+@@ -19,6 +21,11 @@ from astrbot.dashboard.services.open_api_service import (
+     OpenApiWebSocketChatBridge,
+ )
+ 
++from sqlalchemy import text
++
++from astrbot.core.db.webchat_inbox import READ_INBOX, allows, inbox_page
++from astrbot.core.utils.astrbot_path import get_astrbot_data_path
++
+ from .auth import AuthContext, ScopeDependency
+ from .multipart import UploadFileAdapter
+ 
+@@ -333,3 +340,27 @@ async def list_im_bots(
+     service: OpenApiService = Depends(get_service),
+ ):
+     return ok(service.get_bots())
++
++
++@router.get("/chatbox/inbox", openapi_extra={"x-astrbot-scope": "chat"})
++async def chatbox_inbox(
++    request: Request,
++    username: str = Query(..., max_length=100),
++    session_id: str = Query(..., min_length=1, max_length=100),
++    after: int = Query(0, ge=0, le=9223372036854775807),
++    limit: int = Query(50, ge=1, le=50),
++    auth: AuthContext = Depends(require_chat_scope),
++):
++    grants = Path(get_astrbot_data_path()) / "chatbox-inbox-grants.json"
++    if auth.via != "api_key" or not await asyncio.to_thread(
++        allows, grants, auth.api_key_id, username
++    ):
++        raise ApiError("Chat Box inbox permission required", status_code=403)
++    async with request.app.state.db.get_db() as db:
++        result = await db.execute(text(READ_INBOX), {
++            "sid": session_id, "creator": username, "after": after, "size": limit + 1,
++        })
++        page = inbox_page(result.all(), limit)
++    if page is None:
++        raise ApiError("Chat Box inbox permission required", status_code=403)
++    return JSONResponse(ok(page), headers={"Cache-Control": "no-store"})

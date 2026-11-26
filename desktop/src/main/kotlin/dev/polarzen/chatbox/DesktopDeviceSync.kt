@@ -1,10 +1,12 @@
 package dev.polarzen.chatbox
 
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -31,6 +33,13 @@ internal typealias DesktopThemeState = SharedThemeState
 private class DeviceHostFailure(val code: String) : Exception()
 internal data class DeviceActionFailure(val message: String, val hostCode: String?)
 internal data class HostStatus(val local: String, val gateway: String, val phone: String, val mode: String, val error: String)
+private data class DesktopLiveRoom(val profile: String, val sid: String, val turn: SharedTurn)
+
+internal fun desktopLiveChat(stored: Chat, turn: SharedTurn?): Chat {
+    if (turn == null || turn.status != "running" || turn.seq != stored.entries.size.toLong() + 1L) return stored
+    return stored.copy(entries = stored.entries + Entry(turn.question, turn.answer, "发送中"))
+}
+
 private data class VerifiedRoute(val base: String, val keyId: String, val availableKeys: KeyList, val upstream: String)
 
 /** Owner of device sharing for one Windows history. The host owns the secret; history stores
@@ -48,7 +57,34 @@ internal class DesktopDeviceSync(
             value?.attach(owner?.first, owner?.second)
             field = value
         }
+    private val live = mutableStateMapOf<SessionKey, DesktopLiveRoom>()
+    val receivedReplies = Channel<ReplyDestination>(Channel.CONFLATED)
+
+    fun liveTurn(key: SessionKey): SharedTurn? = live[key]?.turn
+
+    /** Only the watched running room needs sub-second updates. Keep the process/identity
+     * verification for the local endpoint and never submit an outgoing message from this path. */
+    suspend fun refreshLive(key: SessionKey) = withContext(Dispatchers.IO) {
+        if (!store.profileRequests.tryLock()) return@withContext
+        try {
+            val room = live[key] ?: return@withContext
+            if (enabled && store.hasSession(key)) {
+                pull(owner(host("local")), key, room.profile, room.sid, 0L)
+            } else live.remove(key)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            live.remove(key)
+            // The regular refresh will rediscover a running room when the connection is restored.
+        } finally {
+            store.profileRequests.unlock()
+        }
+    }
+
     private val routes = mutableMapOf<String, VerifiedRoute>()
+    private var inboxNotices by mutableStateOf<Map<PreferenceRoom, String>>(emptyMap())
+    fun inboxNotice(key: SessionKey): String = store.preferenceAuthority(key)?.let { inboxNotices[it] }.orEmpty()
+
     private var preferenceRevision by mutableStateOf(0L)
     private var issues by mutableStateOf<Map<String, String>>(emptyMap())
     private var sessionIssues by mutableStateOf<Map<SessionKey, String>>(emptyMap())
@@ -388,7 +424,6 @@ internal class DesktopDeviceSync(
             if (recovered != 0) error("设备授权已被拒绝，已将 ${recovered} 条尚未派发的消息恢复为草稿。")
             throw e
         }.associateBy { it.profile }.toMutableMap()
-        val themeIssue = themeState?.synchronize(api, b).orEmpty()
         val byRemote = mutableMapOf<String, String>()
         val profileErrors = mutableMapOf<String, String>()
         val candidates = mutableListOf<DesktopDeviceUpstream>()
@@ -439,6 +474,11 @@ internal class DesktopDeviceSync(
             for (sid in store.legacyHiddenSessions(id)) removed.add(profile to sid)
         }
         val remoteRows = directory(b).associateBy { it.profile to it.sid }
+        inboxNotices = remoteRows.values.mapNotNull { session ->
+            val username = known[session.profile]?.username ?: return@mapNotNull null
+            val hint = inboxSetupNotice(session.inboxStatus, username)
+            if (hint.isEmpty()) null else PreferenceRoom(session.profile, session.sid) to hint
+        }.toMap()
         val errors = mutableMapOf<SessionKey, String>()
         var pendingIssue = ""
         val touched = mutableSetOf<Pair<String, String>>()
@@ -555,6 +595,7 @@ internal class DesktopDeviceSync(
             }
         }
         sessionIssues = errors
+        val themeIssue = themeState?.synchronize(api, b).orEmpty()
         devices = api.devices(b)
         val outstanding = store.profiles.sumOf { p -> store.sessions(p.id).sumOf { store.deviceSessionState(SessionKey(p.id, it.id)).pending } }
         notice = (profileErrors.values + errors.values + listOf(pendingIssue, themeIssue).filter(String::isNotEmpty)).distinct().take(3).joinToString(" ").ifEmpty {
@@ -600,8 +641,21 @@ internal class DesktopDeviceSync(
         var after = store.profileHistoryPosition(key, localScope).after
         do {
             val page = api.turns(b, profile, sid, after)
-            store.mergeProfilePage(key, localScope, page.turns, activity)
-            if (page.turns.any { it.status == "running" }) return
+            val pending = store.nextDeviceSend(key)?.id
+            if (store.mergeProfilePage(key, localScope, page.turns, activity)) {
+                revision++
+                val through = store.profileHistoryPosition(key, localScope).after
+                page.turns.lastOrNull { it.seq in (after + 1)..through && it.status == "complete" &&
+                    it.answer.isNotBlank() && (it.question.isEmpty() || it.id == pending) }?.let {
+                    receivedReplies.trySend(ReplyDestination(key, (it.seq - 1).toInt()))
+                }
+            }
+            val running = page.turns.firstOrNull { it.status == "running" }
+            if (running != null) {
+                live[key] = DesktopLiveRoom(profile, sid, running)
+                return
+            }
+            live.remove(key)
             if (page.more) check(page.turns.isNotEmpty() && page.turns.last().seq > after)
             after = store.profileHistoryPosition(key, localScope).after
             if (after < (page.turns.lastOrNull()?.seq ?: after)) return

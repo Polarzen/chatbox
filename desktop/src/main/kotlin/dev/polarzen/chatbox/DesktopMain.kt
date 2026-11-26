@@ -1,5 +1,6 @@
 package dev.polarzen.chatbox
 
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.AlertDialog
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.DropdownMenu
@@ -267,6 +268,35 @@ internal fun DesktopScreen(
             }
         }
     }
+    fun notifyReceived(destination: ReplyDestination) {
+        val key = destination.key
+        val permit = captureNotification(destination) { scope.isActive && !closingNow() && key !in deletedSessionKeys }
+        if (permit != null) scope.launch(Dispatchers.IO) { permit.show() }
+    }
+    val liveDeviceTurn = if (deviceManaged) deviceSync?.liveTurn(currentKey) else null
+    LaunchedEffect(deviceSync, currentKey, liveDeviceTurn?.id) {
+        if (deviceSync != null && liveDeviceTurn != null) {
+            while (isActive) {
+                delay(800L)
+                deviceSync.refreshLive(currentKey)
+            }
+        }
+    }
+    LaunchedEffect(deviceSync) {
+        if (deviceSync != null) for (message in deviceSync.receivedReplies) {
+            if (message.key !in deletedSessionKeys) notifyReceived(message)
+        }
+    }
+    val inboxTarget = if (!deviceManaged && connection.connected && !connection.verifying && !closeRequested)
+        connection.snapshot() else null
+    val inboxIssue = rememberDesktopInbox(store, inboxTarget, currentKey, mayReceive = { key ->
+        !closingNow() && key !in deletedSessionKeys && key !in unsavedReplies && sending?.key != key &&
+            preparing == null && deviceSync?.manages(key.profileId) != true
+    }, onReceived = { destination ->
+        if (destination.key !in unsavedReplies) chats.remove(destination.key)
+        sessionsRevision.intValue++
+        notifyReceived(destination)
+    })
     val whaleGeneration = if (profileId.startsWith("launcher:") && connection.connected &&
         !connection.verifying && !closeRequested
     ) connection.snapshot()?.bindingGeneration else null
@@ -292,7 +322,7 @@ internal fun DesktopScreen(
             runCatching { store.sessionContent(profileId, selectedSessionId) }.getOrDefault(Chat(selectedSessionId))
         } else Chat("")
     }
-    val chat = sending?.takeIf { it.key == currentKey }?.visibleChat(storedChat) ?: storedChat
+    val chat = sending?.takeIf { it.key == currentKey }?.visibleChat(storedChat) ?: desktopLiveChat(storedChat, liveDeviceTurn)
     val loadedDraft = remember(composer, currentKey) { runCatching { composer.open(currentKey) } }
     DisposableEffect(composer, currentKey) {
         onDispose { composer.leave(currentKey) }
@@ -848,14 +878,16 @@ internal fun DesktopScreen(
                     attachmentReferences = references,
                 )
                 val pending = withContext(Dispatchers.IO) {
-                    val stored = current ?: store.sessionContent(targetKey.profileId, targetKey.sessionId)
-                    val updated = stored.copy(entries = stored.entries + entry)
-                    if (retryEntry == null && approved == null) store.commitDraft(targetKey, revision, updated)
-                    else {
-                        if (retryEntry == null) store.saveDraft(targetKey, revision, committed)
-                        store.saveSessionContent(targetKey.profileId, updated)
+                    synchronized(store) {
+                        val stored = current ?: store.sessionContent(targetKey.profileId, targetKey.sessionId)
+                        val updated = stored.copy(entries = stored.entries + entry)
+                        if (retryEntry == null && approved == null) store.commitDraft(targetKey, revision, updated)
+                        else {
+                            if (retryEntry == null) store.saveDraft(targetKey, revision, committed)
+                            store.saveSessionContent(targetKey.profileId, updated)
+                        }
+                        updated
                     }
-                    updated
                 }
                 if (targetKey in deletedSessionKeys) return@launch
                 if (retryEntry == null && approved == null) composer.consumed(targetKey, revision)
@@ -1067,6 +1099,8 @@ internal fun DesktopScreen(
                 if (details) AlertDialog(onDismissRequest = { details = false }, title = { Text("服务档案与连接") },
                     text = { Column {
                         Text(selectedProfile?.address?.ifBlank { selectedProfile.id } ?: "尚未选择服务档案")
+                        val deliveryNotice = if (deviceManaged) deviceSync.inboxNotice(currentKey) else inboxIssue
+                        if (deliveryNotice.isNotEmpty()) SelectionContainer { Text(deliveryNotice) }
                         DesktopConnectionControls(connection,
                             deviceStatus = deviceSync?.takeIf { deviceManaged }?.notice,
                             onDeviceSetup = null)

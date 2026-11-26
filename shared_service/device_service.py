@@ -10,10 +10,10 @@ from urllib.parse import urlsplit
 
 if __package__:
     from . import service as core
-    from . import chat_preferences, device_theme
+    from . import chat_preferences, device_theme, device_inbox
 else:
     import service as core
-    import chat_preferences, device_theme
+    import chat_preferences, device_theme, device_inbox
 
 
 def migrate_device(db):
@@ -54,6 +54,7 @@ def migrate_device(db):
         db.execute(statement)
     if "unverified" not in {r[1] for r in db.execute("PRAGMA table_info(device_session_state)")}:
         db.execute("ALTER TABLE device_session_state ADD COLUMN unverified INTEGER NOT NULL DEFAULT 0")
+    device_inbox.migrate(db)
     device_theme.migrate(db)
     chat_preferences.migrate(db)
 
@@ -153,12 +154,13 @@ def tombstone(db, profile, sid):
         raise core.ApiError(409, "会话已移除。")
 
 
-SESSION_SELECT = """SELECT s.*,COALESCE(d.origin,c.origin) AS origin,
+SESSION_SELECT = """SELECT s.*,COALESCE(d.origin,c.origin) AS origin, COALESCE(i.status,'') AS inbox_status,
                     CASE WHEN s.ready=1 THEN COALESCE((SELECT MAX(seq) FROM turns t WHERE t.room=s.room),0)
                          ELSE s.imported END AS visible_count
                     FROM profile_sessions s JOIN device_catalog c ON c.profile=s.profile
                     JOIN device_members m ON m.id=c.origin
                     LEFT JOIN device_session_state d ON d.profile=s.profile AND d.sid=s.sid
+                    LEFT JOIN device_inbox_state i ON i.room=s.room
                     WHERE s.removed=0 AND COALESCE(d.removed,0)=0 AND """
 
 
@@ -173,7 +175,7 @@ def session_row(db, device, profile, sid):
 def session_json(row):
     return dict(profile=row["profile"], sid=row["sid"], title=row["title"], activity=row["activity"],
                 total=max(row["total"], row["visible_count"]), imported=row["visible_count"],
-                reason=row["reason"], originDevice=row["origin"])
+                reason=row["reason"], originDevice=row["origin"], inboxStatus=row["inbox_status"])
 
 
 CONTEXT_REJECTED = "上游已确认本次上下文未派发，请重新预览。"
@@ -254,6 +256,7 @@ class DeviceApi:
         self.service = service
         self.path = service.path
         self.routes = service.routes
+        self.inbox = None
 
     def read(self, action, token, params):
         with core.database(self.path) as db:
@@ -295,6 +298,8 @@ class DeviceApi:
                 rows = db.execute(SESSION_SELECT + SCOPE + " AND (s.total>0 OR visible_count>0) "
                                   "ORDER BY s.activity DESC,s.profile,s.sid LIMIT ? OFFSET ?",
                                   (*scope(device), limit+1, offset)).fetchall()
+                if not offset and rows and self.inbox:
+                    self.inbox.wake(token)
                 return dict(revision=revision, more=len(rows)>limit, sessions=[session_json(r) for r in rows[:limit]])
             if action not in ("turn", "turns"):
                 raise core.ApiError(404, "接口不存在。")
@@ -312,7 +317,10 @@ class DeviceApi:
                 after = core.number(params, "after", 0, 0, 2**63-1)
                 limit = core.number(params, "limit", 50, 1, 100)
                 rows = db.execute(query + " AND seq>? ORDER BY seq LIMIT ?", (*args, after, limit+1))
-                return core.turn_page(rows, limit)
+                result = core.turn_page(rows, limit)
+                if entry["ready"] and self.inbox:
+                    self.inbox.wake(token, (profile, sid))
+                return result
             identifier = core.request_id(params["id"][0])
             row = db.execute(query + " AND id=?", (*args, identifier)).fetchone()
             if not row and entry["ready"]:

@@ -12,6 +12,16 @@ import java.util.UUID
 internal data class AstrBotInboxMessage(val id: Long, val text: String)
 internal data class AstrBotInboxPage(val messages: List<AstrBotInboxMessage>, val more: Boolean)
 
+internal class AstrBotInboxDenied : IOException("主动收件未获授权，请检查 AstrBot 上的密钥和会话归属授权。")
+
+internal fun inboxSetupNotice(status: String, username: String): String = when (status) {
+    "unsupported" -> "当前 AstrBot 尚未安装 Chat Box 主动收件适配。"
+    "denied" -> "主动收件未获授权。请在 AstrBot 上为此 API Key 授权" +
+        (if (username.isBlank()) "当前会话所属的 Chat Box 用户。" else "用户 $username。")
+    "unavailable" -> "主动收件暂时未连接，恢复后会继续接收。"
+    else -> ""
+}
+
 internal fun inboxTurnId(session: String, id: Long): String =
     UUID.nameUUIDFromBytes("chatbox-inbox-v1:${session.lowercase(Locale.ROOT)}:$id".toByteArray(Charsets.UTF_8)).toString()
 
@@ -38,7 +48,7 @@ internal suspend fun fetchAstrBotInbox(
         conn.setRequestProperty("ngrok-skip-browser-warning", "1")
         when (val status = conn.responseCode) {
             404, 405, 501 -> return@withContext null
-            401, 403 -> throw IOException("主动收件未获授权，请检查 AstrBot 上的密钥和会话归属授权。")
+            401, 403 -> throw AstrBotInboxDenied()
             200 -> Unit
             else -> throw IOException("主动收件暂时不可用（HTTP $status）。")
         }

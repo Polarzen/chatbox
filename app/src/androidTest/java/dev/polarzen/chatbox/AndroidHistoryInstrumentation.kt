@@ -37,6 +37,7 @@ class AndroidHistoryInstrumentation : Instrumentation() {
                 verifyHistory(fixture)
                 AndroidHistory(fixture).use { AndroidDeviceStoreChecks.verify(host,it) }
                 verifyDraftRevision(fixture)
+                verifyInbox(fixture)
             } finally {
                 host.deleteDatabase(testPrefix + "mobile-history.db")
                 host.deleteSharedPreferences(testPrefix + "personal_chat")
@@ -174,6 +175,31 @@ class AndroidHistoryInstrumentation : Instrumentation() {
                 outside.delete()
                 pending.delete()
             }
+        }
+    }
+
+    private fun verifyInbox(fixture: Context) {
+        val base = "https://inbox-test.invalid"
+        val message = AstrBotInboxMessage(21L, "独立提醒")
+        val sid = AndroidHistory(fixture).use { h ->
+            val session = h.create(base).id
+            h.draftText(base, session, "仍在编辑")
+            val other = h.create(base).id
+            h.receiveInbox(base, session, 0, listOf(message, message.copy(id = 26)))
+            h.receiveInbox(base, session, 0, listOf(message))
+            check(h.selected(base).id == other && h.selected(base).turns.isEmpty())
+            check(h.sessions(base).single { it.id == session }.draft.text == "仍在编辑")
+            session
+        }
+        AndroidHistory(fixture).use { h ->
+            check(h.inboxCursor(base, sid) == 26L)
+            h.receiveInbox(base, sid, 26, listOf(message.copy(id = 29)))
+            val turns = h.sessions(base).single { it.id == sid }.turns
+            check(turns.map { it.id } == listOf(21L, 26L, 29L).map { inboxTurnId(sid, it) })
+            check(turns.all { it.question.isEmpty() && it.answer == "独立提醒" && it.status == "已完成" })
+            h.delete(base, sid)
+            h.receiveInbox(base, sid, 29, listOf(message.copy(id = 34)))
+            check(h.inboxCursor(base, sid) == null && h.sessions(base).none { it.id == sid })
         }
     }
 

@@ -4,10 +4,16 @@ import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -335,8 +341,24 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
     }
     val busy get() = current?.let { isBusy(it) } ?: false
     private fun isBusy(row: AndroidDeviceRow): Boolean = pending.any { it.key == row.key || (it.local != null && it.local == localKey(row)) } ||
-        bodies[row.key]?.lastOrNull()?.status == "running" || localKey(row)?.let { app.delivery.busy(it.base,it.sid) } == true
+        bodies[row.key]?.any { it.status == "running" } == true || localKey(row)?.let { app.delivery.busy(it.base,it.sid) } == true
     fun nativeBusy(base: String, sid: String) = localSession(DeviceLocalKey(base,sid))?.let { isBusy(nativeRow(base,it)) } == true
+    fun nativeInboxNotice(base: String, sid: String) = inboxNotice(canonical(DeviceLocalKey(base, sid)))
+    fun inboxNotice(row: AndroidDeviceRow) = inboxNotice(row.key)
+    private fun inboxNotice(key: DeviceRoomKey): String {
+        if (!bound || !online) return ""
+        val status = directory.find { it.key == key }?.inboxStatus.orEmpty()
+        return inboxSetupNotice(status, profiles.find { it.profile == key.profile }?.username.orEmpty())
+    }
+
+    fun usesPairedInbox(base: String, sid: String): Boolean {
+        if (!bound) return false
+        val key = canonical(DeviceLocalKey(base, sid))
+        if (key in retired) return true
+        return profiles.any { it.profile == key.profile && it.available } &&
+            directory.any { it.key == key && it.reason.isEmpty() }
+    }
+
     fun managesLegacyNative(base: String, sid: String): Boolean {
         val k = DeviceLocalKey(base,sid)
         return bound && k in legacyReady &&
@@ -509,6 +531,35 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
                 else -> "设备同步暂未完成，请检查网络、服务地址和证书。"
             }
         } finally { syncing = false }
+    }
+
+    private fun runningVisibleRooms() = visibleKeys().filter { key ->
+        bodies[key].orEmpty().any { it.status == "running" }
+    }
+
+    /** While the user watches a reply, read its body without round trips for settings and the directory. */
+    suspend fun pollForeground() {
+        var nextMaintenance = 0L
+        while (currentCoroutineContext().isActive) {
+            val running = runningVisibleRooms()
+            val b = binding
+            if (b != null && bound && online && running.isNotEmpty() &&
+                SystemClock.elapsedRealtime() < nextMaintenance) {
+                if (!lock.isLocked) action {
+                    var changed = false
+                    for (key in running) if (syncBody(b, key)) changed = true
+                    if (changed) readBodies()
+                }
+                delay(800L)
+            } else {
+                refresh()
+                nextMaintenance = SystemClock.elapsedRealtime() + 15_000L
+                // Wake as soon as an accepted operation becomes visible, even midway through an idle wait.
+                if (bound && online) {
+                    withTimeoutOrNull(5_000L) { snapshotFlow { runningVisibleRooms().isNotEmpty() }.first { it } }
+                } else delay(5_000L)
+            }
+        }
     }
 
     suspend fun refresh() {

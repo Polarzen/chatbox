@@ -2,12 +2,19 @@ package dev.polarzen.chatbox
 
 import android.content.Context
 import android.net.Uri
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -23,6 +30,9 @@ internal class AndroidAppState private constructor(private val app: Context) {
     val pairingScope: CoroutineScope get() = scope
     val device by lazy { AndroidDeviceSync(app, this, scope) }
     private var devicePoll: Job? = null
+    private var inboxPoll: Job? = null
+    var inboxNotice by mutableStateOf("")
+        private set
     private val notes = mutableStateMapOf<Pair<String, String>, String>()
     private var startedActivities = 0
 
@@ -37,8 +47,9 @@ internal class AndroidAppState private constructor(private val app: Context) {
     fun activityStarted() {
         if (startedActivities++ == 0) {
             delivery.setForeground(true)
+            if (inboxPoll?.isActive != true) inboxPoll = scope.launch { pollNativeInbox() }
             if (devicePoll?.isActive != true) devicePoll = scope.launch {
-                while (isActive) { device.refresh(); delay(5000L) }
+                device.pollForeground()
             }
         }
     }
@@ -47,8 +58,71 @@ internal class AndroidAppState private constructor(private val app: Context) {
         if (--startedActivities == 0 && !changingConfiguration) {
             delivery.setForeground(false)
             devicePoll?.cancel()
+            inboxPoll?.cancel()
             history.flushDrafts()
             device.flushDrafts()
+        }
+    }
+
+    private suspend fun pollNativeInbox() {
+        snapshotFlow {
+            // A paired room is received through the device service with the original upstream identity.
+            if (device.pendingJoin || connections.base.isBlank()) null
+            else connections.token()?.let { connections.base to it }
+        }.collectLatest { target ->
+            inboxNotice = ""
+            if (target == null) return@collectLatest
+            val (base, token) = target
+            var nextOther = 0
+            while (currentCoroutineContext().isActive) {
+                var interval = 5_000L
+                try {
+                    val sessions = history.sessions(base).filter {
+                        it.turns.isNotEmpty() && !device.usesPairedInbox(base, it.id)
+                    }
+                    val rooms = if (sessions.isEmpty()) emptyList() else {
+                        val selected = history.selected(base).id
+                        val others = sessions.filterNot { it.id == selected }
+                        val other = if (others.isEmpty()) null else {
+                            nextOther %= others.size
+                            others[nextOther++]
+                        }
+                        listOfNotNull(sessions.find { it.id == selected }, other)
+                    }
+                    var notice = ""
+                    for (room in rooms) {
+                        if (legacyStorage(room).hasState()) continue
+                        val after = withContext(Dispatchers.IO) { history.inboxCursor(base, room.id) } ?: continue
+                        val page = try { fetchAstrBotInbox(base, token, history.user, room.id, after) }
+                        catch (e: CancellationException) { throw e }
+                        catch (_: AstrBotInboxDenied) {
+                            notice = inboxSetupNotice("denied", history.user)
+                            interval = 30_000L
+                            continue
+                        }
+                        catch (_: Exception) {
+                            notice = "部分会话的主动消息暂未同步，请检查连接和 AstrBot 收件权限。"
+                            interval = 12_000L
+                            continue
+                        }
+                        if (connections.base != base || connections.token() != token || device.pendingJoin) break
+                        if (device.usesPairedInbox(base, room.id)) continue
+                        if (page == null) {
+                            notice = inboxSetupNotice("unsupported", history.user)
+                            interval = 120_000L
+                            break
+                        }
+                        withContext(Dispatchers.IO) { history.receiveInbox(base, room.id, after, page.messages) }
+                        if (page.more) interval = 800L
+                    }
+                    inboxNotice = notice
+                } catch (e: CancellationException) { throw e }
+                catch (_: Exception) {
+                    inboxNotice = "主动消息暂未同步，恢复连接后将继续接收。"
+                    interval = 12_000L
+                }
+                delay(interval)
+            }
         }
     }
 

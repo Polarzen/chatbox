@@ -62,7 +62,7 @@ internal class AndroidHistory(context: Context) : AutoCloseable {
         Thread(job, "chatbox-draft-writer").apply { isDaemon = true }
     }.apply { removeOnCancelPolicy = true }
     private var scheduled: ScheduledFuture<*>? = null
-    private val helper = object : SQLiteOpenHelper(context.applicationContext, "mobile-history.db", null, 3) {
+    private val helper = object : SQLiteOpenHelper(context.applicationContext, "mobile-history.db", null, 4) {
         override fun onConfigure(db: SQLiteDatabase) = db.setForeignKeyConstraintsEnabled(true)
 
         override fun onCreate(db: SQLiteDatabase) {
@@ -70,6 +70,7 @@ internal class AndroidHistory(context: Context) : AutoCloseable {
             db.execSQL("CREATE TABLE profiles (base TEXT PRIMARY KEY, selected TEXT)")
             db.execSQL("""CREATE TABLE sessions (
                 base TEXT NOT NULL REFERENCES profiles(base), id TEXT NOT NULL, sharedBase TEXT NOT NULL,
+                inboxAfter INTEGER NOT NULL DEFAULT 0,
                 manualName TEXT, draftText TEXT NOT NULL DEFAULT '', draftAssets TEXT NOT NULL DEFAULT '[]', draftRevision INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(base, id))""")
             db.execSQL("""CREATE TABLE turns (
@@ -79,9 +80,10 @@ internal class AndroidHistory(context: Context) : AutoCloseable {
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            check(oldVersion in 1..2 && newVersion == 3)
+            check(oldVersion in 1..3 && newVersion == 4)
             if (oldVersion == 1) db.execSQL("ALTER TABLE sessions ADD COLUMN draftRevision INTEGER NOT NULL DEFAULT 0")
-            createPreferenceStorage(db)
+            if (oldVersion < 3) createPreferenceStorage(db)
+            db.execSQL("ALTER TABLE sessions ADD COLUMN inboxAfter INTEGER NOT NULL DEFAULT 0")
         }
     }
 
@@ -202,6 +204,34 @@ internal class AndroidHistory(context: Context) : AutoCloseable {
         val key = normalizeBase(base)
         val saved = view(key).value.sessions
         return if (edits.isEmpty()) saved else saved.map { withEdits(key,it) }
+    }
+
+    @Synchronized fun inboxCursor(base: String, sid: String): Long? =
+        helper.readableDatabase.rawQuery("SELECT inboxAfter FROM sessions WHERE base=? AND id=?",
+            arrayOf(normalizeBase(base), sid)).use { if (it.moveToFirst()) it.getLong(0) else null }
+
+    /** Commit messages and their high-water mark together. An old page cannot resurrect a deleted session. */
+    @Synchronized fun receiveInbox(base: String, sid: String, after: Long, messages: List<AstrBotInboxMessage>) {
+        if (messages.isEmpty()) return
+        val key = normalizeBase(base)
+        val profile = view(key)
+        val session = profile.value.sessions.firstOrNull { it.id == sid } ?: return
+        if (inboxCursor(key, sid) != after) return
+        var cursor = after
+        val known = session.turns.mapTo(mutableSetOf()) { it.id }
+        val added = buildList {
+            for (message in messages) {
+                require(message.id > cursor && message.text.isNotBlank())
+                cursor = message.id
+                val id = inboxTurnId(sid, message.id)
+                if (known.add(id)) add(MobileTurn(id, "", message.text, "已完成"))
+            }
+        }
+        transaction { db ->
+            added.forEach { insertTurn(db, key, sid, it) }
+            db.execSQL("UPDATE sessions SET inboxAfter=? WHERE base=? AND id=?", arrayOf(cursor, key, sid))
+        }
+        if (added.isNotEmpty()) profile.replace(session.copy(turns = session.turns + added))
     }
 
     @Synchronized fun preferenceJournal(base: String, sid: String) =

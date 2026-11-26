@@ -6,6 +6,8 @@ on:
       - 'desktop/**'
       - 'app/**'
       - 'shared_service/**'
+      - 'integrations/**/*inbox*'
+      - 'integrations/*INBOX*'
       - 'build.gradle.kts'
       - 'settings.gradle.kts'
       - 'gradle.properties'
@@ -18,6 +20,8 @@ on:
       - 'desktop/**'
       - 'app/**'
       - 'shared_service/**'
+      - 'integrations/**/*inbox*'
+      - 'integrations/*INBOX*'
       - 'build.gradle.kts'
       - 'settings.gradle.kts'
       - 'gradle.properties'
@@ -151,6 +155,37 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+      - name: Check out the supported AstrBot server version
+        uses: actions/checkout@v4
+        with:
+          repository: AstrBotDevs/AstrBot
+          ref: 61335414433db721b3f7ecc93f90deafe0a59d78
+          path: upstream-inbox-test
+          persist-credentials: false
+      - name: Verify the inbox adapter on stock and context-enabled AstrBot
+        working-directory: upstream-inbox-test
+        shell: bash
+        run: |
+          patch="$GITHUB_WORKSPACE/integrations/patches/astrbot-v4.29.4-chatbox-inbox.patch"
+          context="$GITHUB_WORKSPACE/integrations/patches/astrbot-v4.29.4-chatbox-context.patch"
+          tests="$GITHUB_WORKSPACE/integrations/tests/test_chatbox_inbox.py"
+          git apply --check "$patch"
+          git apply "$patch"
+          python3 -B "$tests" -v
+          git apply --reverse "$patch"
+          git apply "$context"
+          git apply "$patch"
+          python3 -B "$tests" -v
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Chatbox-AstrBot-4.29.4-Inbox
+          path: |
+            integrations/ASTRBOT_INBOX_4.29.4.md
+            integrations/configure_chatbox_inbox.py
+            integrations/patches/astrbot-v4.29.4-chatbox-inbox.patch
+            integrations/tests/test_chatbox_inbox.py
+          retention-days: 7
+          if-no-files-found: error
       - name: Test the shared device service
         run: python3 -m unittest discover -s shared_service/tests
       - name: Test Android debug and release variants and assemble both APKs

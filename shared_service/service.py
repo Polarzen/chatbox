@@ -33,6 +33,7 @@ MAX_BODY = 8 * 1024 * 1024
 MAX_HISTORY = 10000
 MAX_QUESTION = 64 * 1024
 MAX_REPLY = 4 * 1024 * 1024
+REPLY_WRITE_INTERVAL = 0.1
 CODE_LIFETIME = 600
 TURN_FIELDS = "seq, id, question, answer, status"
 
@@ -499,27 +500,35 @@ class Service:
             raise ApiError(503, "服务正在停止，请查询该轮结果。")
         return 202, result
 
-    def finish(self, room, turn_id, status, needs_review):
+    def finish(self, room, turn_id, status, needs_review, *, answer=None):
         with database(self.path, write=True) as db:
-            if db.execute("UPDATE turns SET status=?,needs_review=? WHERE room=? AND id=? AND status='running'",
-                          (status, needs_review, room, turn_id)).rowcount:
+            if db.execute("UPDATE turns SET status=?,needs_review=?,answer=COALESCE(?,answer) "
+                          "WHERE room=? AND id=? AND status='running'",
+                          (status, needs_review, answer, room, turn_id)).rowcount:
                 if status == "complete" or needs_review:
                     db.execute("UPDATE profile_sessions SET fresh=0 WHERE room=? AND fresh=1", (room,))
                 profile_activity(db, room)
 
     def generate(self, room, turn_id, username, session, question, *, legacy=False, context=None, revision=None):
-        last_answer = ""
+        latest_answer = stored_answer = ""
+        next_write = None
 
         def publish(answer):
-            nonlocal last_answer
-            if answer == last_answer:
+            nonlocal latest_answer, stored_answer, next_write
+            if answer != latest_answer:
+                if len(answer.encode("utf-8")) > MAX_REPLY:
+                    raise ValueError("回复超过大小限制")
+                latest_answer = answer
+            if answer == stored_answer:
                 return
-            if len(answer.encode("utf-8")) > MAX_REPLY:
-                raise ValueError("回复超过大小限制")
+            now = time.monotonic()
+            if next_write is not None and now < next_write:
+                return
             with database(self.path, write=True) as db:
                 db.execute("UPDATE turns SET answer=? WHERE room=? AND id=? AND status='running'",
                            (answer, room, turn_id))
-            last_answer = answer
+            stored_answer = answer
+            next_write = now + REPLY_WRITE_INTERVAL
 
         status = "unknown"
         needs_review = True
@@ -555,7 +564,9 @@ class Service:
             if context is not None and needs_review:
                 # A lost response may follow provider execution. Preserve the operation, block automatic replays.
                 accept_context()
-            self.finish(room, turn_id, status, needs_review)
+            # Publish the last valid snapshot and its outcome in one transaction, even after EOF/error.
+            self.finish(room, turn_id, status, needs_review,
+                        answer=latest_answer if latest_answer != stored_answer else None)
 
 
 def profile_code(db, profile):
@@ -1046,9 +1057,10 @@ def open_server(path, key, port=8765, *, device_only=False):
     if not Path(path).is_file():
         raise ApiError(400, "请先通过 init 初始化数据库。")
     with serving_lock(path), ThreadPoolExecutor(max_workers=8) as workers:
-        with Server(("127.0.0.1", port), Handler) as server:
+        with ThreadPoolExecutor(max_workers=1) as inbox_workers, Server(("127.0.0.1", port), Handler) as server:
             server.allowed_routes = (DEVICE_READ | DEVICE_WRITE) if device_only else (READ_ROUTES | WRITE_ROUTES)
             server.service = Service(path, key, workers)
+            server.service.devices.inbox = device_api_module().device_inbox.DeviceInbox(server.service.devices, inbox_workers)
             yield server
 
 

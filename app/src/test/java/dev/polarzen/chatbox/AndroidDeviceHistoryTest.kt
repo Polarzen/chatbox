@@ -71,6 +71,31 @@ class AndroidDeviceHistoryTest {
         assertTrue(pc.turns.all { it.sent.isEmpty() && it.replies.isEmpty() })
     }
 
+    @Test fun openDeviceRoomDisplaysPartialAnswerBeforeCompletion() {
+        val partial = SharedTurn(1, "id", "问题", "第一段", "running")
+        val current = deviceMerge(null, row, listOf(partial), "")
+        assertEquals("第一段", current.turns.single().answer)
+        assertEquals("回复中", current.turns.single().status)
+        val complete = deviceMerge(null, row, listOf(partial.copy(answer = "第一段第二段", status = "complete")), "")
+        assertEquals("第一段第二段", complete.turns.single().answer)
+        assertEquals("已完成", complete.turns.single().status)
+    }
+
+    @Test fun pairingShowsOneCopyOfAnAlreadyReceivedAssistantMessage() {
+        val first = inboxTurnId(row.sid, 41)
+        val later = inboxTurnId(row.sid, 55)
+        val known = MobileTurn(first, "", "又到时间啦", "已完成")
+        val draft = MobileDraft("还没发送")
+        val native = MobileSession(row.sid, turns = listOf(known), draft = draft)
+        val records = listOf(SharedTurn(1, first, "", known.answer, "complete"),
+            SharedTurn(2, later, "", known.answer, "complete"))
+        val merged = deviceMerge(native, row, records, "")
+        assertEquals(listOf(first, later), merged.turns.map { it.id })
+        assertEquals(listOf("", ""), merged.turns.map { it.question })
+        assertEquals(listOf(known.answer, known.answer), merged.turns.map { it.answer })
+        assertEquals(draft, merged.draft)
+    }
+
     @Test fun boundedImportMakesForwardProgressForLargeMultibyteReplies() {
         val record = ProfileImportTurn("id","","虎".repeat(600_000),"complete")
         val records = listOf(record,record.copy(id = "other"))
