@@ -15,6 +15,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
@@ -98,8 +99,19 @@ internal val desktopPalette: DesktopPalette
     @Composable get() = LocalDesktopPalette.current
 
 @Composable
-internal fun DesktopTheme(dark: Boolean, content: @Composable () -> Unit) {
-    val palette = if (dark) darkDesktopPalette else lightDesktopPalette
+internal fun DesktopTheme(dark: Boolean, theme: ChatTheme = ChatTheme(dark = dark), content: @Composable () -> Unit) {
+    val base = if (dark) darkDesktopPalette else lightDesktopPalette
+    val palette = remember(dark, theme.accent) {
+        if (theme.accent == null) base else {
+            val custom = chatThemeColors(theme)
+            val raw = Color(0xff000000.toInt() or theme.accent.drop(1).toInt(16))
+            base.copy(canvas = lerp(if (dark) Color(0xff18181b) else Color(0xfff9f9fa), raw, .09f),
+                panel = lerp(if (dark) Color(0xff202025) else Color.White, raw, .045f),
+                line = lerp(base.line, raw, .18f),
+                accent = custom.accent, onAccent = custom.onAccent,
+                accentSurface = custom.accentSurface, selection = custom.selection)
+        }
+    }
     val colors = if (dark) darkColors() else lightColors()
     MaterialTheme(colors = colors.copy(
         primary = palette.accent, primaryVariant = palette.accent, secondary = palette.accent,
@@ -109,6 +121,7 @@ internal fun DesktopTheme(dark: Boolean, content: @Composable () -> Unit) {
     )) {
         CompositionLocalProvider(
             LocalDesktopPalette provides palette,
+            LocalChatTheme provides theme,
             LocalTextSelectionColors provides TextSelectionColors(palette.accent, palette.selection),
             content = content,
         )

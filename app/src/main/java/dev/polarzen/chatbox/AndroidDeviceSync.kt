@@ -245,6 +245,7 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
                 confirmed = ready
                 if (ready) loadCache()
             }
+            if (confirmed) app.themes.attach(binding?.instance, binding?.device) else app.themes.attach(null, null)
             store.restoreDrafts(history)
             history.recoverUnqueuedMedia(pending.filter { it.media }.map { it.id }.toSet())
         } catch (_: Exception) {
@@ -455,10 +456,11 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
         confirm(b)
         synchronize(b)
     }
-    private fun confirm(b: DeviceBinding) {
+    private suspend fun confirm(b: DeviceBinding) {
         store.saveGrant(b,true)
         trustedAddresses = trustedAddresses + b.address
         confirmed = true
+        withContext(Dispatchers.IO) { app.themes.attach(b.instance, b.device) }
         online = true
     }
     suspend fun changeAddress(address: String) = action {
@@ -470,7 +472,7 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
         online = true
     }
     suspend fun disconnect() = lock.withLock { clear("已断开此设备。") }
-    private fun clear(message: String = "") {
+    private suspend fun clear(message: String = "") {
         val held = pending.filter { it.media }
         binding = null; confirmed = false; online = false; selection = null; profiles = emptyList()
         directory = emptyList(); pending = emptyList(); links = emptyList(); drafts = emptyMap()
@@ -479,6 +481,7 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
         cancelPreview()
         storageIssue = true
         try {
+            withContext(Dispatchers.IO) { app.themes.attach(null, null) }
             store.forget(history)
             store.restoreDrafts(history)
             storageIssue = false
@@ -521,6 +524,8 @@ internal class AndroidDeviceSync(private val context: Context, private val app: 
 
     private suspend fun synchronize(b: DeviceBinding) {
         var ps = api.profiles(b)
+        val themeIssue = app.themes.synchronize(api, b)
+        if (themeIssue.isNotEmpty()) notice = themeIssue
         val published = ps.toMutableList()
         for (base in withContext(Dispatchers.IO) { publishableBases() }) {
             val current = published.singleOrNull { it.originDevice == b.device && it.sourceId == sourceId(base) &&
