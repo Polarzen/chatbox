@@ -80,5 +80,3 @@ private fun encodeWallpaper(bitmap: Bitmap): ByteArray {
     }
     throw IOException("图片过大，请选择较小的图片。")
 }
-
-private const val THEME_IMAGE_EDGE = 1600

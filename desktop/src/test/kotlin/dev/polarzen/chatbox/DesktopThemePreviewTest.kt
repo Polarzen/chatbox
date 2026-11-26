@@ -12,7 +12,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
-import java.awt.Frame
 
 class DesktopThemePreviewTest {
     @get:Rule val ui = createComposeRule()
@@ -21,28 +20,23 @@ class DesktopThemePreviewTest {
     @Test fun previewIsLocalUntilAppliedAndCancelLeavesTheSavedThemeAlone() {
         val state = SharedThemeState(temp.root.toPath(), ChatTheme())
         val open = mutableStateOf(true)
-        val frame = Frame()
-        try {
-            ui.setContent {
-                DesktopTheme(state.theme.dark, state.theme) {
-                    if (open.value) DesktopThemeEditor(state, frame) { open.value = false }
-                }
+        ui.setContent {
+            DesktopTheme(state.theme.dark, state.theme) {
+                if (open.value) DesktopThemeEditor(state, null) { open.value = false }
             }
-            ui.onNodeWithText("色值 #RRGGBB").performTextReplacement("#147D70")
-            ui.onNodeWithTag("theme-preview").performScrollTo().assertIsDisplayed()
-            ui.runOnIdle { assertEquals(ChatTheme(), state.theme) }
-            ui.onNodeWithText("取消").performClick()
-            ui.runOnIdle {
-                assertEquals(ChatTheme(), state.theme)
-                open.value = true
-            }
-            ui.onNodeWithText("色值 #RRGGBB").performTextReplacement("#147D70")
-            ui.onNodeWithText("应用").performClick()
-            ui.waitUntil(5_000) { !open.value }
-            assertEquals("#147D70", state.theme.accent)
-            assertEquals(state.theme, SharedThemeState(temp.root.toPath(), ChatTheme()).theme)
-        } finally {
-            frame.dispose()
         }
+        ui.onNodeWithText("色值 #RRGGBB").performTextReplacement("#147D70")
+        ui.onNodeWithTag("theme-preview").performScrollTo().assertIsDisplayed()
+        ui.runOnIdle { assertEquals(ChatTheme(), state.theme) }
+        ui.onNodeWithText("取消").performClick()
+        ui.runOnIdle {
+            assertEquals(ChatTheme(), state.theme)
+            open.value = true
+        }
+        ui.onNodeWithText("色值 #RRGGBB").performTextReplacement("#147D70")
+        ui.onNodeWithText("应用").performClick()
+        ui.waitUntil(5_000) { !open.value }
+        assertEquals("#147D70", state.theme.accent)
+        assertEquals(state.theme, SharedThemeState(temp.root.toPath(), ChatTheme()).theme)
     }
 }

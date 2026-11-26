@@ -28,7 +28,7 @@ internal class AndroidAppState private constructor(private val app: Context) {
 
     val themes = SharedThemeState(app.filesDir.toPath(), ChatTheme(dark = prefs.getBoolean("appearance.dark", false)))
     val appearance: ChatTheme get() = themes.theme
-    fun setAppearance(value: ChatTheme) = themes.setTheme(value)
+    fun setAppearance(value: ChatTheme) = themes.applyTheme(value)
 
     var notificationPermissionAsked: Boolean
         get() = prefs.getBoolean("notification.permission.asked", false)

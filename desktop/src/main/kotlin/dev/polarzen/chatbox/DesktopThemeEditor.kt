@@ -25,7 +25,7 @@ import kotlin.math.roundToInt
 @Composable
 internal fun DesktopThemeEditor(
     state: DesktopThemeState,
-    window: Window,
+    window: Window?,
     onDismiss: () -> Unit,
 ) {
     DesktopModalGuard()
@@ -107,7 +107,7 @@ internal fun DesktopThemeEditor(
                         synchronized(state) {
                             if (state.theme != original && state.theme != selected)
                                 throw IOException("另一台设备已修改主题，请关闭后重新打开。")
-                            state.setTheme(selected)
+                            state.applyTheme(selected)
                         }
                     }
                     onDismiss()

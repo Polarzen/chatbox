@@ -63,7 +63,7 @@ internal class SharedThemeState(dataDir: Path, legacy: ChatTheme) {
     }
 
     @Synchronized
-    fun setTheme(value: ChatTheme) {
+    fun applyTheme(value: ChatTheme) {
         if (theme == value) return
         save(if (journal.authority == null) journal.copy(personal = value, paired = value)
              else journal.copy(paired = value, pending = true))

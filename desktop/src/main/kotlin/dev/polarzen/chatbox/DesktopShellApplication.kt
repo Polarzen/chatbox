@@ -423,7 +423,7 @@ private fun runPrimaryWindow(
                                         try {
                                             withContext(Dispatchers.IO) {
                                                 synchronized(chatThemeState) {
-                                                    chatThemeState.setTheme(chatThemeState.theme.copy(dark = updated.dark))
+                                                    chatThemeState.applyTheme(chatThemeState.theme.copy(dark = updated.dark))
                                                 }
                                             }
                                         } catch (e: IOException) { shellError = "无法保存主题设置。" }
