@@ -84,7 +84,7 @@ internal class AndroidChatTransferService : Service() {
         private const val CHANNEL = "chat_transfers"
         private const val PROGRESS_ID = 2
         private const val GENERATION = "generation"
-        // Accessed by UI/service callbacks on the main thread. Workers only wait on the future.
+        // Accessed by UI/service callbacks on the main thread.
         private var current: Start? = null
 
         fun request(context: Context): CompletableFuture<Boolean> {

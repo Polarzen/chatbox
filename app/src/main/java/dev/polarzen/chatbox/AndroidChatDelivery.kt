@@ -164,12 +164,17 @@ internal class AndroidChatDelivery(
     private fun transfer(key: Pair<String, String>, name: String, onNote: (String) -> Unit,
                          onFinished: (() -> Unit)? = null, work: () -> String) {
         active[key] = true
-        val ready = AndroidChatTransferService.request(app)
         onNote("")
+        var finished = false // Read and written only on the main thread.
+        AndroidChatTransferService.request(app).thenAccept { promoted ->
+            if (!promoted) main.post {
+                if (!finished) onNote("系统未允许后台传输，请保持 Chat Box 在前台。")
+            }
+        }
         thread(name = name, isDaemon = true) {
-            if (!ready.join()) main.post { onNote("系统未允许后台传输，请保持 Chat Box 在前台。") }
             val note = try { work() } catch (_: Exception) { STORAGE_FAILURE }
             main.post {
+                finished = true
                 active.remove(key)
                 if (active.isEmpty()) AndroidChatTransferService.finish()
                 onNote(note)

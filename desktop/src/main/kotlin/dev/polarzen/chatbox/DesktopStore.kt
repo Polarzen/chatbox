@@ -21,6 +21,7 @@ internal data class Entry(
     val replyAttachments: List<ReplyAttachment> = emptyList(),
     val attachmentReferences: List<String> = attachmentReference?.let(::listOf) ?: emptyList(),
     val sentAt: Long? = null,
+    val inboxId: Long? = null,
 )
 
 internal data class Chat(val session: String, val entries: List<Entry> = emptyList())
@@ -471,9 +472,11 @@ internal class DesktopStore(private val file: Path) {
         var bytes = envelope.toString().toByteArray(Charsets.UTF_8).size.toLong()
         return buildList {
             for (index in start until minOf(prefix.toLong(), start.toLong() + limit).toInt()) {
-                val id = UUID.nameUUIDFromBytes(JSONArray(listOf("profile-history-v1", username, key.profileId, key.sessionId, index))
+                val entry = chatEntryFrom(entries.getJSONObject(index))
+                val id = entry.inboxId?.let { inboxTurnId(key.sessionId, it) }
+                    ?: UUID.nameUUIDFromBytes(JSONArray(listOf("profile-history-v1", username, key.profileId, key.sessionId, index))
                     .toString().toByteArray(Charsets.UTF_8)).toString()
-                val turn = desktopSharedSeedTurn(chatEntryFrom(entries.getJSONObject(index)))
+                val turn = desktopSharedSeedTurn(entry)
                 val size = if (turn.question.length.toLong() + turn.answer.length > MAX_IMPORT_BYTES) MAX_IMPORT_BYTES + 1
                     else JSONObject().put("id", id).put("question", turn.question).put("answer", turn.answer)
                         .put("status", turn.status).toString().toByteArray(Charsets.UTF_8).size
@@ -966,6 +969,37 @@ internal class DesktopStore(private val file: Path) {
         }
     }
 
+    @Synchronized
+    fun inboxCursor(key: SessionKey): Long? {
+        val profile = findProfile(state, key.profileId) ?: return null
+        val session = findSession(profile, key.sessionId) ?: return null
+        val entries = session.getJSONArray("entries")
+        if (profile.optBoolean("offlineOnly") || hasSyncedHistory(session) || entries.length() == 0 ||
+            entries.getJSONObject(entries.length() - 1).optString("status") == "发送中") return null
+        return session.optLong("inboxAfter")
+    }
+
+    /** The cursor moves in the same atomic file replacement as the received messages. */
+    @Synchronized
+    fun appendInbox(key: SessionKey, after: Long, messages: List<AstrBotInboxMessage>): ReplyDestination? {
+        if (messages.isEmpty() || inboxCursor(key) != after) return null
+        var cursor = after
+        val seenAt = System.currentTimeMillis()
+        var index = -1
+        persist(requireAtomic = true) { copy ->
+            val session = historySession(copy, key)
+            val entries = session.getJSONArray("entries")
+            for (message in messages) {
+                require(message.id > cursor && message.text.isNotBlank())
+                entries.put(entryToJson(Entry("", message.text, "已完成", sentAt = seenAt, inboxId = message.id)))
+                cursor = message.id
+            }
+            session.put("inboxAfter", cursor).put("lastActivityAt", seenAt)
+            index = entries.length() - 1
+        }
+        return ReplyDestination(key, index)
+    }
+
     /** Returns a session snapshot without changing selection or recency. */
     @Synchronized
     fun sessionContent(profileId: String, sessionId: String): Chat {
@@ -1093,6 +1127,7 @@ internal class DesktopStore(private val file: Path) {
             (entry.attachmentReference ?: references.firstOrNull())?.let { row.put("attachmentReference", it) }
             entry.attachmentDisplayName?.let { row.put("attachmentDisplayName", it) }
             entry.sentAt?.let { row.put("sentAt", it) }
+            entry.inboxId?.let { row.put("inboxId", it) }
             row.put("attachmentReferences", JSONArray(references))
             row.put("replyImages", replyAttachmentsToJson(entry.replyAttachments, entry.answer))
         }
@@ -1368,7 +1403,8 @@ internal class DesktopStore(private val file: Path) {
             ?: reference?.let(::attachmentNameFromReference)
         val answer = row.getString("answer")
         return Entry(row.getString("question"), answer, status, reference, displayName,
-            replyAttachmentsFrom(row, answer), references, timestamp(row, "sentAt")?.takeIf { it > 0 })
+            replyAttachmentsFrom(row, answer), references, timestamp(row, "sentAt")?.takeIf { it > 0 },
+            row.optLong("inboxId").takeIf { it > 0 })
     }
 
     private fun attachmentReferencesFrom(row: JSONObject): List<String> {

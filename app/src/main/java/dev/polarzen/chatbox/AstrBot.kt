@@ -13,6 +13,8 @@ import java.nio.file.Path
 import java.util.UUID
 
 private const val MAX_REPLY_MEDIA_BYTES = 20 * 1024 * 1024
+private const val STREAM_TEXT_INTERVAL_NANOS = 50_000_000L
+private val privateReplyChains = setOf("reasoning", "tool_call", "tool_call_result", "agent_stats")
 
 private enum class ReplyMedia(val marker: String, val label: String, val mimePrefix: String) {
     IMAGE("[IMAGE]", "图片", "image/"),
@@ -420,11 +422,18 @@ internal fun readAstrBotReply(
     onEvent(AstrBotTransportEvent.StreamReady)
     var done = false
     var emittedFirstContent = false
-    var completedText = ""
-    var pendingText = ""
+    val text = StringBuilder()
+    var segmentStart = 0
+    var textChanged = false
+    var lastTextPublication: Long? = null
     var pendingMedia: ReplyMedia? = null
     var pendingCount = 0
-    fun replyOffset(): Int = completedText.length + pendingText.length
+    fun publishText() {
+        if (!textChanged) return
+        textChanged = false
+        onText(text.toString())
+        lastTextPublication = System.nanoTime()
+    }
     fun emitFirstContent() {
         if (!emittedFirstContent) {
             emittedFirstContent = true
@@ -434,8 +443,8 @@ internal fun readAstrBotReply(
     fun emitMedia(media: ReplyMedia, id: String?) {
         emitFirstContent()
         when (media) {
-            ReplyMedia.IMAGE -> onReplyImage(id, replyOffset())
-            ReplyMedia.AUDIO -> onReplyAudio(id, replyOffset())
+            ReplyMedia.IMAGE -> onReplyImage(id, text.length)
+            ReplyMedia.AUDIO -> onReplyAudio(id, text.length)
         }
     }
     fun flushMissing() {
@@ -446,35 +455,35 @@ internal fun readAstrBotReply(
         repeat(count) { emitMedia(media, null) }
     }
     fun readReplyFrames() = c.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
-        readSse(reader) { raw ->
+        readSse(reader, beforeWait = ::publishText) { raw ->
             val frame = JSONObject(raw)
             val type = frame.optString("type")
             val chain = frame.optString("chain_type")
-            val hiddenPlain = type == "plain" && chain in
-                setOf("reasoning", "tool_call", "tool_call_result", "agent_stats")
+            val hiddenPlain = type == "plain" && chain in privateReplyChains
+            // Deliver buffered text before any media, boundary or error callback.
+            if (type != "plain" || hiddenPlain) publishText()
             when (type) {
                 "plain" -> {
                     if (hiddenPlain) {
-                        completedText += pendingText
-                        pendingText = ""
+                        segmentStart = text.length
                     } else {
                         flushMissing()
                         val value = frame.opt("data") as? String ?: ""
-                        if (frame.optBoolean("streaming")) pendingText += value
-                        else {
-                            pendingText = value
-                            completedText += pendingText
-                            pendingText = ""
-                        }
-                        if ((completedText + pendingText).isNotEmpty()) emitFirstContent()
-                        onText(completedText + pendingText)
+                        val streaming = frame.optBoolean("streaming")
+                        if (!streaming) text.setLength(segmentStart)
+                        text.append(value)
+                        if (!streaming) segmentStart = text.length
+                        if (text.isNotEmpty()) emitFirstContent()
+                        textChanged = true
+                        val previous = lastTextPublication
+                        if (!streaming || previous == null ||
+                            System.nanoTime() - previous >= STREAM_TEXT_INTERVAL_NANOS) publishText()
                     }
                 }
                 "image", "record" -> {
                     val media = if (type == "image") ReplyMedia.IMAGE else ReplyMedia.AUDIO
                     val value = frame.opt("data") as? String ?: ""
-                    completedText += pendingText
-                    pendingText = ""
+                    segmentStart = text.length
                     // Consecutive image hints may be followed by a batch of saved images.
                     if (pendingMedia != media || media == ReplyMedia.AUDIO || !value.startsWith(media.marker)) {
                         flushMissing()
@@ -486,8 +495,7 @@ internal fun readAstrBotReply(
                     }
                 }
                 "attachment_saved" -> {
-                    completedText += pendingText
-                    pendingText = ""
+                    segmentStart = text.length
                     val data = frame.optJSONObject("data")
                     val media = when (data?.optString("type")) {
                         "image" -> ReplyMedia.IMAGE
@@ -506,8 +514,7 @@ internal fun readAstrBotReply(
                 }
                 "complete", "file", "video", "actionrow" -> {
                     flushMissing()
-                    completedText += pendingText
-                    pendingText = ""
+                    segmentStart = text.length
                 }
                 "error" -> error("AstrBot 报告对话失败，请在服务端检查配置。")
                 "end" -> {
@@ -521,11 +528,12 @@ internal fun readAstrBotReply(
     try {
         readReplyFrames()
     } catch (failure: Exception) {
+        runCatching { publishText() }.onFailure { failure.addSuppressed(it) }
         runCatching { flushMissing() }.onFailure { failure.addSuppressed(it) }
         throw failure
     }
     flushMissing()
-    onText(completedText + pendingText)
+    onText(text.toString())
     check(done) { "回复流意外中断，可能已在服务端执行。请勿直接重复发送。" }
     onEvent(AstrBotTransportEvent.Completed)
 }

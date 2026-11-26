@@ -19,7 +19,7 @@ import kotlinx.coroutines.launch
 private enum class ConnectionEdit { AddService, RenameService, RemoveService, AddKey, RenameKey, RemoveKey }
 
 @Composable
-internal fun AndroidConnectionSettings(connections: AndroidConnections, onClose: () -> Unit) {
+internal fun AndroidConnectionSettings(connections: AndroidConnections, inboxNotice: String, onClose: () -> Unit) {
     val scope = rememberCoroutineScope()
     var address by rememberSaveable { mutableStateOf(connections.base.ifEmpty { connections.services.firstOrNull()?.base.orEmpty() }) }
     val service = connections.services.find { it.base == address }
@@ -62,7 +62,10 @@ internal fun AndroidConnectionSettings(connections: AndroidConnections, onClose:
                     TextButton({ edit = ConnectionEdit.AddService }, enabled = pending == null) { Text("新增 HTTPS 服务") }
                     if (service != null) {
                         Text(service.base, style = MaterialTheme.typography.bodyMedium)
-                        if (connections.base == address) Text("当前档案 · ${connections.status}")
+                        if (connections.base == address) {
+                            Text("当前档案 · ${connections.status}")
+                            if (inboxNotice.isNotEmpty()) Text(inboxNotice, style = MaterialTheme.typography.bodySmall)
+                        }
                         ConnectionActions("管理服务", pending == null, {
                             edit = ConnectionEdit.RenameService
                         }, { edit = ConnectionEdit.RemoveService })

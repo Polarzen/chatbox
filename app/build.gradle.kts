@@ -11,8 +11,8 @@ android {
         testInstrumentationRunner = "dev.polarzen.chatbox.AndroidHistoryInstrumentation"
         minSdk = 26
         targetSdk = 35
-        versionCode = 25
-        versionName = "0.1.25"
+        versionCode = 26
+        versionName = "0.1.26"
     }
     buildFeatures { compose = true }
     compileOptions {

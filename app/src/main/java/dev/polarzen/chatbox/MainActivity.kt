@@ -388,7 +388,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                ChatPage.CONNECTIONS -> AndroidConnectionSettings(connections, closePage)
+                ChatPage.CONNECTIONS -> AndroidConnectionSettings(connections, app.inboxNotice, closePage)
                 ChatPage.THEME -> Box(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
                     AndroidThemeEditor(app.appearance, app.themes.issue, app::setAppearance, closePage)
                 }
@@ -454,7 +454,7 @@ class MainActivity : ComponentActivity() {
         }
         AndroidChatScreen(history, connections, shown, history.sessions(base), busy,
             hasLegacyRoom && !device.managesLegacyNative(base, session.id),
-            listOfNotNull(app.note(base, session.id), device.notice.takeIf { device.bound })
+            listOfNotNull(app.note(base, session.id), device.notice.takeIf { device.bound }, device.nativeInboxNotice(base, session.id))
                 .filter(String::isNotBlank).joinToString("\n"), jumpTurn,
             onJumpHandled = { jumpTurn = null },
             onSelect = { jumpTurn = null; history.select(base, it) },
@@ -504,7 +504,7 @@ class MainActivity : ComponentActivity() {
         val hasLegacyRoom = remember(native, session.id) { native != null && app.legacyStorage(session).hasState() }
         val readOnly = native != null && hasLegacyRoom && !device.managesLegacyNative(native, session.id)
         AndroidChatScreen(app.history, app.connections, session, listOf(session),
-            device.busy || (row.reason.isNotBlank() && !readOnly), readOnly, listOf(row.reason, delivery, device.notice).filter { it.isNotBlank() }.joinToString("\n"),
+            device.busy || (row.reason.isNotBlank() && !readOnly), readOnly, listOf(row.reason, delivery, device.notice, device.inboxNotice(row)).filter { it.isNotBlank() }.joinToString("\n"),
             null, onJumpHandled = {}, onSelect = {}, onCreate = ::requestNewChat,
             onRename = { _, _ -> message("请在会话所属设备中重命名。") },
             onDelete = { message("请在最近对话菜单中选择仅在本机隐藏。") },

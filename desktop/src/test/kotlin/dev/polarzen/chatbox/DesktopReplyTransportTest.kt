@@ -14,6 +14,58 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 class DesktopReplyTransportTest {
+    @Test fun bufferedTokensAreBatchedWithoutLosingTextOnParseFailure() {
+        val count = 1024
+        val frames = List(count) { frame("plain", "字", streaming = true) } + "{"
+        withChatServer(frames) { base, _ ->
+            val texts = mutableListOf<String>()
+            assertThrows(org.json.JSONException::class.java) {
+                sendToAstrBot(base, "fixture-key", "user", "session", "question",
+                    allowLoopbackHttp = true, onText = { texts += it })
+            }
+            assertEquals("字", texts.first())
+            assertEquals("字".repeat(count), texts.last())
+            assertTrue("buffered tokens should share a UI/storage update", texts.size < count / 2)
+        }
+    }
+
+    @Test fun pendingTextIsPublishedBeforeWaitingForTheRestOfAnIncompleteFrame() {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val release = CountDownLatch(1)
+        val latestText = CountDownLatch(1)
+        val failure = AtomicReference<Throwable?>()
+        try {
+            server.createContext("/api/v1/chat") { exchange ->
+                exchange.use {
+                    it.requestBody.readBytes()
+                    it.responseHeaders.add("Content-Type", "text/event-stream")
+                    it.sendResponseHeaders(200, 0)
+                    val burst = frame("plain", "a", true).toSse() + frame("plain", "b", true).toSse() + "data: "
+                    it.responseBody.write(burst.toByteArray())
+                    it.responseBody.flush()
+                    release.await(5, TimeUnit.SECONDS)
+                    it.responseBody.write("{\"type\":\"end\"}\n\n".toByteArray())
+                }
+            }
+            server.start()
+            val request = Thread {
+                try {
+                    sendToAstrBot("http://127.0.0.1:${server.address.port}", "fixture-key", "user", "session", "?",
+                        allowLoopbackHttp = true, onText = { if (it == "ab") latestText.countDown() })
+                } catch (e: Throwable) { failure.set(e) }
+            }
+            request.start()
+            assertTrue("last complete text must appear during the server pause", latestText.await(4, TimeUnit.SECONDS))
+            release.countDown()
+            request.join(5_000)
+            assertFalse(request.isAlive)
+            assertNull(failure.get())
+        } finally {
+            release.countDown()
+            server.stop(0)
+        }
+    }
+
     @Test fun contentRendersBeforeDelayedStreamCompletesAndHeadersAreDistinctMilestones() {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val firstFrameSent = CountDownLatch(1)

@@ -629,6 +629,8 @@ private fun ChatTimeline(
                     val relevantHit = bodyHit?.takeIf { it.turnId == turn.id && it.side == side }
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         if (user) GroupTime(turn.createdAt, session.turns.getOrNull(index / 2 - 1)?.createdAt)
+                        // Assistant-initiated messages have no authored side. Keep stable row indexes for search/jumps.
+                        if (user && turn.question.isEmpty() && turn.sent.isEmpty()) return@Column
                         val pin = preferences.sequenceAt(index / 2)?.takeIf { preferences.ready &&
                             turn.status == "已完成" && (if (user) turn.question else turn.answer).isNotBlank() }
                             ?.let { ContextPin(it, if (user) "user" else "assistant") }
