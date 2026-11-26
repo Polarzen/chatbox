@@ -26,9 +26,9 @@ else:
 # Explicit mobile operations from DEVICE_SYNC_PROTOCOL.md. Additions to service.py
 # never implicitly expand the gateway. In particular no owner operation appears here.
 PUBLIC_ROUTES = frozenset((method, "/v1/device/" + path) for method, paths in (
-    ("GET", "health me profiles sessions turns turn operation chat-preferences"),
+    ("GET", "health me profiles sessions turns turn operation chat-preferences theme"),
     ("POST", "preview join prove profile session import start send media-begin media-end chat-preferences "
-             "claim-context-reminder context-preview context-notice"),
+             "claim-context-reminder context-preview context-notice theme"),
 ) for path in paths.split())
 PROBE = "/v1/device/health"
 SCRIPT = Path(__file__).resolve()

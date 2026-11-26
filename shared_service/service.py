@@ -315,11 +315,11 @@ PROFILE_READ = {"/v1/profile/" + action for action in ("sessions", "turns", "tur
 PROFILE_WRITE = {"/v1/profile/" + action for action in
                  ("create", "invite", "join", "revoke", "status", "session", "import", "remove", "send")}
 DEVICE_READ = {"/v1/device/" + action for action in
-               ("health", "me", "profiles", "sessions", "turns", "turn", "operation", "devices", "chat-preferences")}
+               ("health", "me", "profiles", "sessions", "turns", "turn", "operation", "devices", "chat-preferences", "theme")}
 DEVICE_WRITE = {"/v1/device/" + action for action in
                 ("invite", "preview", "join", "endpoint", "prove", "revoke", "profile", "session", "import",
                  "start", "send", "remove", "media-begin", "media-end", "chat-preferences", "claim-context-reminder",
-                 "context-preview", "context-notice")}
+                 "context-preview", "context-notice", "theme")}
 READ_ROUTES = {"/v1/turn", "/v1/turns"} | PROFILE_READ | DEVICE_READ
 OWNER_ROUTES = {"/v1/invite", "/v1/cancel-invite", "/v1/revoke-guests"}
 WRITE_ROUTES = {"/v1/create", "/v1/join", "/v1/send"} | OWNER_ROUTES | PROFILE_WRITE | DEVICE_WRITE

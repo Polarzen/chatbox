@@ -5,6 +5,7 @@ on:
     paths:
       - 'desktop/**'
       - 'app/**'
+      - 'shared_service/**'
       - 'build.gradle.kts'
       - 'settings.gradle.kts'
       - 'gradle.properties'
@@ -16,6 +17,7 @@ on:
     paths:
       - 'desktop/**'
       - 'app/**'
+      - 'shared_service/**'
       - 'build.gradle.kts'
       - 'settings.gradle.kts'
       - 'gradle.properties'
@@ -149,6 +151,8 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+      - name: Test the shared device service
+        run: python3 -m unittest discover -s shared_service/tests
       - name: Test Android debug and release variants and assemble both APKs
         run: bash ./gradlew --no-daemon :app:testDebugUnitTest :app:testReleaseUnitTest :app:assembleDebug :app:assembleRelease
       - name: Verify release APK identity and launcher resources
