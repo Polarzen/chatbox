@@ -1,0 +1,97 @@
+name: Publish Chat Box 0.1.26
+on:
+  push:
+    branches: ['release/chat-box-0.1.26']
+    paths: ['.github/workflows/publish-0.1.26.yml', '.release/0.1.26/**']
+permissions:
+  actions: read
+  contents: write
+concurrency: publish-chatbox-0.1.26
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      SOURCE: 05be9b489ba5f8163570234980d94d5d59a084f1
+      TESTED_HEAD: e05734b19adb2f15401da9de1e988a3e712227a8
+      TAG: v0.1.26
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE }}
+          path: source
+          persist-credentials: false
+      - name: Confirm source and both successful verification runs
+        run: |
+          set -euo pipefail
+          repo="repos/$GH_REPO"
+          gh api "$repo/actions/runs/45786241250" | jq -e --arg sha "$TESTED_HEAD" '.conclusion=="success" and .head_sha==$sha and .event=="pull_request" and .head_repository.full_name=="Polarzen/chatbox"'
+          gh api "$repo/actions/runs/45787010159" | jq -e --arg sha "$SOURCE" '.conclusion=="success" and .head_sha==$sha and .event=="push" and .head_branch=="main"'
+          test "$(gh api "$repo/git/commits/$SOURCE" --jq .tree.sha)" = "$(gh api "$repo/git/commits/$TESTED_HEAD" --jq .tree.sha)"
+          gh api "$repo/git/matching-refs/tags/$TAG" | jq -e --arg ref "refs/tags/$TAG" --arg sha "$SOURCE" 'all(.[]; .ref!=$ref or .object.sha==$sha)'
+      - name: Recover the verified release assets
+        run: |
+          set -euo pipefail
+          mkdir input dist
+          repo="repos/$GH_REPO/actions/artifacts"
+          gh api "$repo/15100563103/zip" > input/android.zip
+          gh api "$repo/15101011349/zip" > input/windows.zip
+          gh api "$repo/15099859210/zip" > dist/Chatbox-AstrBot-4.29.4-Inbox.zip
+          sha256sum -c <<'CHECKSUMS'
+          998d9720aecb7a6510ce36aa4cb58cab2e553cbdad56685bb8fe56bc6e915e79  input/android.zip
+          06a07ce73daa099d16c85910d3e1f2e48e1d9ace53151e3167db29b1c0c3d48d  input/windows.zip
+          c6d3aebbcfc0a2790aeca8625b017ba5c6b365413a33803e8e5d61c6a3d40666  dist/Chatbox-AstrBot-4.29.4-Inbox.zip
+          7fd213d239eb784f8f0089e878a88e631681b0c6b387f510e1f702858602d057  .release/0.1.26/android-signature.zst
+          CHECKSUMS
+          unzip -p input/android.zip app-release-unsigned.apk > input/unsigned.apk
+          unzip -p input/windows.zip Chatbox-0.1.26.msi > dist/Chatbox-0.1.26.msi
+          zstd -q -d --patch-from=input/unsigned.apk .release/0.1.26/android-signature.zst -o dist/Chatbox-0.1.26.apk
+          sha256sum -c <<'CHECKSUMS'
+          4fe39d5fb46665c845243873024058a610acdad41c3a7ad35df6a67b2483ccd5  input/unsigned.apk
+          41903d64ffa74cdc5ab08e645336d208d8a28b04d5325a77f89d0082558cf74e  dist/Chatbox-0.1.26.apk
+          0a2ddedfae89c0fff5632a462375cb07a0b90dd1f33a6bdbd40b2883f92b9a09  dist/Chatbox-0.1.26.msi
+          CHECKSUMS
+          sdk="$ANDROID_HOME/build-tools/35.0.0"
+          "$sdk/zipalign" -c 4 dist/Chatbox-0.1.26.apk
+          "$sdk/apksigner" verify --verbose --print-certs dist/Chatbox-0.1.26.apk > input/cert.txt
+          grep -Fx 'Signer #1 certificate SHA-256 digest: 5977f586a953c6a5065e84772cde75426de4e951467a31dadaf354aaa56c1e6b' input/cert.txt
+          test "$(grep -c 'certificate SHA-256 digest:' input/cert.txt)" -eq 1
+          "$sdk/aapt2" dump badging dist/Chatbox-0.1.26.apk > input/badging
+          grep -F "package: name='dev.polarzen.chatbox' versionCode='26' versionName='0.1.26'" input/badging
+      - name: Prepare the uninstall package and download checksums
+        run: |
+          set -euo pipefail
+          cp source/docs/Chatbox-Install-Guide.zh-CN.md dist/
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+          src = Path("source")
+          files = ["desktop/uninstall/uninstall.cmd", "desktop/uninstall/Uninstall-ChatBox.ps1",
+                   "desktop/uninstall/Uninstall-ChatBoxData.ps1", "docs/WINDOWS_FULL_UNINSTALL.md"]
+          with zipfile.ZipFile("dist/Chatbox-Uninstall-0.1.26.zip", "w") as bundle:
+              for file in files:
+                  path = src / file
+                  info = zipfile.ZipInfo(path.name, date_time=(1980, 1, 1, 0, 0, 0))
+                  info.compress_type = zipfile.ZIP_DEFLATED
+                  info.external_attr = 0o100644 << 16
+                  bundle.writestr(info, path.read_bytes())
+          PY
+          (cd dist && sha256sum Chatbox-* > SHA256SUMS.txt)
+      - name: Upload draft, re-download every asset, and publish
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --json isDraft,targetCommitish > input/existing.json; then
+            jq -e --arg sha "$SOURCE" '.isDraft and .targetCommitish==$sha' input/existing.json
+          else
+            gh release create "$TAG" --target "$SOURCE" --draft --title 'Chat Box 0.1.26' --notes-file .release/0.1.26/notes.md
+          fi
+          gh release upload "$TAG" dist/* --clobber
+          gh release download "$TAG" --dir verify
+          diff -qr dist verify
+          (cd verify && sha256sum -c SHA256SUMS.txt)
+          gh release edit "$TAG" --draft=false --latest
