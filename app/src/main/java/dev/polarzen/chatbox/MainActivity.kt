@@ -471,7 +471,7 @@ class MainActivity : ComponentActivity() {
             onRetry = { turn -> send(MobileDraft(turn.question, turn.sent)) },
             onRetryMedia = { turn, asset -> app.retryMedia(base, session.id, turn, asset) },
             onSettings = { go(ChatPage.CONNECTIONS) },
-            onTheme = { go(ChatPage.THEME) },
+            onTheme = { go(ChatPage.THEME) }, onAppearance = { go(ChatPage.APPEARANCE) },
             onHeart = { heartOpen = true },
             onRecent = ::recent, onDeviceSettings = { go(ChatPage.DEVICE_SETTINGS) },
             wideRecent = { RecentPane { it.nativeBase == base && it.sid == session.id } },
@@ -514,7 +514,7 @@ class MainActivity : ComponentActivity() {
                 if (native != null) app.history.addAssets(native, session.id, assets)
             }, onSend = { if (device.send(heart.live)) requestNotifications(onFirstSend = true) },
             onRetry = { lifecycleScope.launch { device.refresh() } }, onRetryMedia = device::retryMedia,
-            onSettings = { go(ChatPage.DEVICE_SETTINGS) }, onTheme = { go(ChatPage.THEME) },
+            onSettings = { go(ChatPage.DEVICE_SETTINGS) }, onTheme = { go(ChatPage.THEME) }, onAppearance = { go(ChatPage.APPEARANCE) },
             onHeart = { heartOpen = true },
             onRecent = ::recent, onDeviceSettings = { go(ChatPage.DEVICE_SETTINGS) },
             readDraft = { device.chat?.draft?.text.orEmpty() }, draftEvent = device.draftEvent,

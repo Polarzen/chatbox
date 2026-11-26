@@ -84,7 +84,7 @@ internal fun AndroidChatScreen(
     onDraftText: (String) -> Unit, onRemoveAsset: (MobileAsset) -> Unit,
     onAddAssets: (List<MobileAsset>) -> Unit, onSend: () -> Unit, onRetry: (MobileTurn) -> Unit,
     onRetryMedia: (MobileTurn, MobileAsset) -> Unit,
-    onSettings: () -> Unit, onTheme: () -> Unit, onHeart: () -> Unit,
+    onSettings: () -> Unit, onTheme: () -> Unit, onAppearance: () -> Unit, onHeart: () -> Unit,
     onRecent: (() -> Unit)? = null,
     onDeviceSettings: (() -> Unit)? = null,
     readDraft: (() -> String)? = null,
@@ -231,7 +231,7 @@ internal fun AndroidChatScreen(
                                         localPanel = false
                                     } else (onRecent ?: openLocalHistory)()
                                 }, onSearch = ::openSearch, onName = { editName = true },
-                                onContext = { editContext = true }, onSettings = onSettings, onTheme = onTheme,
+                                onContext = { editContext = true }, onSettings = onSettings, onTheme = onTheme, onAppearance = onAppearance,
                                 onHeart = onHeart, onDeviceSettings = onDeviceSettings,
                                 onLocalHistory = openLocalHistory.takeIf { onRecent != null && deviceStatus == null },
                                 deviceStatus = deviceStatus)
@@ -393,7 +393,7 @@ private fun ContextReminderBar(label: String, onAdjust: () -> Unit, onNew: () ->
 private fun ChatHeader(
     connections: AndroidConnections, peerName: String, title: String, titleHit: MobileHistoryHit?,
     sidebarOpen: Boolean, onSidebar: () -> Unit, onSearch: () -> Unit, onSettings: () -> Unit,
-    onTheme: () -> Unit, onHeart: () -> Unit, onName: () -> Unit, onContext: () -> Unit,
+    onTheme: () -> Unit, onAppearance: () -> Unit, onHeart: () -> Unit, onName: () -> Unit, onContext: () -> Unit,
     onDeviceSettings: (() -> Unit)?, onLocalHistory: (() -> Unit)?, deviceStatus: String?,
 ) {
     var more by remember { mutableStateOf(false) }
@@ -416,7 +416,7 @@ private fun ChatHeader(
                     "修改对方名称" to onName, "上下文" to onContext, "搜索聊天记录" to onSearch, "会话详情" to { details = true },
                     ("连接设置" to onSettings).takeIf { deviceStatus == null },
                     onDeviceSettings?.let { "设备设置" to it }, onLocalHistory?.let { "本机历史" to it },
-                    "心率" to onHeart,
+                    "外观与通知" to onAppearance, "心率" to onHeart,
                 ).forEach { (label, action) ->
                     DropdownMenuItem(text = { Text(label) }, onClick = { more = false; action() })
                 }
