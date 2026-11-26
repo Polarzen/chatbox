@@ -49,7 +49,7 @@ if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
         from(toastDll) { into("win32-x86-64") }
     }
 }
-val windowsPackageVersion = "0.1.25"
+val windowsPackageVersion = "0.1.26"
 val uninstallSources = layout.projectDirectory.dir("uninstall")
 val uninstallFileNames = listOf("uninstall.cmd", "Uninstall-ChatBox.ps1", "Uninstall-ChatBoxData.ps1")
 val uninstallResourcesRoot = layout.buildDirectory.dir("generated/uninstall-resources")
