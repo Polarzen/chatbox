@@ -84,7 +84,7 @@ internal fun AndroidChatScreen(
     onDraftText: (String) -> Unit, onRemoveAsset: (MobileAsset) -> Unit,
     onAddAssets: (List<MobileAsset>) -> Unit, onSend: () -> Unit, onRetry: (MobileTurn) -> Unit,
     onRetryMedia: (MobileTurn, MobileAsset) -> Unit,
-    onSettings: () -> Unit, onAppearance: () -> Unit, onHeart: () -> Unit,
+    onSettings: () -> Unit, onTheme: () -> Unit, onAppearance: () -> Unit, onHeart: () -> Unit,
     onRecent: (() -> Unit)? = null,
     onDeviceSettings: (() -> Unit)? = null,
     readDraft: (() -> String)? = null,
@@ -231,13 +231,14 @@ internal fun AndroidChatScreen(
                                         localPanel = false
                                     } else (onRecent ?: openLocalHistory)()
                                 }, onSearch = ::openSearch, onName = { editName = true },
-                                onContext = { editContext = true }, onSettings = onSettings, onAppearance = onAppearance,
+                                onContext = { editContext = true }, onSettings = onSettings, onTheme = onTheme, onAppearance = onAppearance,
                                 onHeart = onHeart, onDeviceSettings = onDeviceSettings,
                                 onLocalHistory = openLocalHistory.takeIf { onRecent != null && deviceStatus == null },
                                 deviceStatus = deviceStatus)
                         }
                         HorizontalDivider()
-                        Box(Modifier.weight(1f)) {
+                        Box(Modifier.fillMaxWidth().weight(1f)) {
+                            AndroidThemeWallpaper(Modifier.matchParentSize())
                             readings.SaveableStateProvider(scopeId) {
                                 ChatTimeline(session, busy, readOnly, hit, jumpTurn, onJumpHandled,
                                     onHitShown = { selectedHit = null },
@@ -392,7 +393,7 @@ private fun ContextReminderBar(label: String, onAdjust: () -> Unit, onNew: () ->
 private fun ChatHeader(
     connections: AndroidConnections, peerName: String, title: String, titleHit: MobileHistoryHit?,
     sidebarOpen: Boolean, onSidebar: () -> Unit, onSearch: () -> Unit, onSettings: () -> Unit,
-    onAppearance: () -> Unit, onHeart: () -> Unit, onName: () -> Unit, onContext: () -> Unit,
+    onTheme: () -> Unit, onAppearance: () -> Unit, onHeart: () -> Unit, onName: () -> Unit, onContext: () -> Unit,
     onDeviceSettings: (() -> Unit)?, onLocalHistory: (() -> Unit)?, deviceStatus: String?,
 ) {
     var more by remember { mutableStateOf(false) }
@@ -407,6 +408,7 @@ private fun ChatHeader(
             if (titleHit != null) Text(mobileHighlightedText(titleHit.excerpt, titleHit.excerptStart, titleHit.query.length),
                 style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
+        IconButton(onClick = onTheme) { Icon(painterResource(R.drawable.chat_theme), "主题") }
         Box {
             IconButton(onClick = { more = true }) { Icon(painterResource(R.drawable.chat_more), "更多操作") }
             DropdownMenu(more, onDismissRequest = { more = false }) {
@@ -414,7 +416,7 @@ private fun ChatHeader(
                     "修改对方名称" to onName, "上下文" to onContext, "搜索聊天记录" to onSearch, "会话详情" to { details = true },
                     ("连接设置" to onSettings).takeIf { deviceStatus == null },
                     onDeviceSettings?.let { "设备设置" to it }, onLocalHistory?.let { "本机历史" to it },
-                    "窗口外观" to onAppearance, "心率" to onHeart,
+                    "外观与通知" to onAppearance, "心率" to onHeart,
                 ).forEach { (label, action) ->
                     DropdownMenuItem(text = { Text(label) }, onClick = { more = false; action() })
                 }
@@ -546,7 +548,10 @@ private fun ChatTimeline(
 ) {
     if (session.turns.isEmpty()) {
         Box(Modifier.fillMaxSize().clipToBounds(), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            val label = if (LocalChatTheme.current.wallpaper == null) Modifier else Modifier
+                .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(12.dp))
+                .padding(horizontal = 14.dp, vertical = 8.dp)
+            Column(label, horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("开始一段对话", style = MaterialTheme.typography.titleMedium)
                 Text("在下方输入消息。", style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -664,8 +669,12 @@ private fun GroupTime(now: Long, previous: Long?) {
             else -> ""
         }
     }
-    if (label.isNotEmpty()) Text(label, Modifier.padding(vertical = 8.dp),
-        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    if (label.isNotEmpty()) {
+        val contrast = if (LocalChatTheme.current.wallpaper == null) Modifier else Modifier
+            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp)).padding(horizontal = 6.dp)
+        Text(label, Modifier.padding(vertical = 8.dp).then(contrast),
+            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
 }
 
 @Composable

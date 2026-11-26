@@ -2,10 +2,7 @@ package dev.polarzen.chatbox
 
 import android.content.Context
 import android.net.Uri
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -29,13 +26,9 @@ internal class AndroidAppState private constructor(private val app: Context) {
     private val notes = mutableStateMapOf<Pair<String, String>, String>()
     private var startedActivities = 0
 
-    var dark by mutableStateOf(prefs.getBoolean("appearance.dark", false))
-        private set
-
-    fun useDark(value: Boolean) {
-        prefs.edit().putBoolean("appearance.dark", value).apply()
-        dark = value
-    }
+    val themes = SharedThemeState(app.filesDir.toPath(), ChatTheme(dark = prefs.getBoolean("appearance.dark", false)))
+    val appearance: ChatTheme get() = themes.theme
+    fun setAppearance(value: ChatTheme) = themes.applyTheme(value)
 
     var notificationPermissionAsked: Boolean
         get() = prefs.getBoolean("notification.permission.asked", false)

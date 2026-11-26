@@ -25,7 +25,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-internal enum class DesktopChatIcon { Chats, Search, Settings, More, Add, Pin, Close }
+internal enum class DesktopChatIcon { Chats, Search, Settings, Theme, More, Add, Pin, Close }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -67,6 +67,13 @@ internal fun ChatIconButton(
                     }
                     DesktopChatIcon.Search -> {
                         drawCircle(color, 6.5f*u, point(10,10), style = stroke); line(15,15,21,21)
+                    }
+                    DesktopChatIcon.Theme -> {
+                        drawCircle(color, 8*u, point(12,12), style = stroke)
+                        drawCircle(color, 1.6f*u, point(8,11))
+                        drawCircle(color, 1.6f*u, point(12,8))
+                        drawCircle(color, 1.6f*u, point(16,11))
+                        line(12,16,16,16)
                     }
                     DesktopChatIcon.Settings -> {
                         line(3,7,7,7); line(12,7,21,7); line(3,17,12,17); line(17,17,21,17)

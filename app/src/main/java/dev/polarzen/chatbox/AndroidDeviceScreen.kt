@@ -75,7 +75,7 @@ internal fun androidRecentRows(app: AndroidAppState): List<AndroidDeviceRow> {
 internal fun AndroidRecentScreen(app: AndroidAppState, onOpen: (AndroidDeviceRow) -> Unit,
                                 onCreate: () -> Unit, active: (AndroidDeviceRow) -> Boolean = { false },
                                 modifier: Modifier = Modifier.fillMaxSize().systemBarsPadding(),
-                                settings: () -> Unit) {
+                                theme: () -> Unit, settings: () -> Unit) {
     val device = app.device
     val rows by produceState<List<AndroidDeviceRow>?>(null, app) {
         snapshotFlow { androidRecentRows(app) }.flowOn(Dispatchers.IO).collect { value = it }
@@ -85,6 +85,7 @@ internal fun AndroidRecentScreen(app: AndroidAppState, onOpen: (AndroidDeviceRow
         Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("最近对话", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
             IconButton(onClick = onCreate) { Icon(Icons.Outlined.Add, "新建会话") }
+            IconButton(onClick = theme) { Icon(painterResource(R.drawable.chat_theme), "主题") }
             IconButton(onClick = settings) { Icon(painterResource(R.drawable.chat_settings), "设备设置") }
         }
         if (device.bound && !device.online) Text("离线 · 显示本机缓存",

@@ -26,6 +26,8 @@ internal data class DesktopDevicePending(val id: String, val question: String, v
 internal class DesktopDeviceMediaTarget(val address: String, val token: String, val username: String,
     val sid: String, val allowLoopbackHttp: Boolean)
 
+internal typealias DesktopThemeState = SharedThemeState
+
 private class DeviceHostFailure(val code: String) : Exception()
 internal data class DeviceActionFailure(val message: String, val hostCode: String?)
 internal data class HostStatus(val local: String, val gateway: String, val phone: String, val mode: String, val error: String)
@@ -40,6 +42,12 @@ internal class DesktopDeviceSync(
     private val runtime: (JSONObject) -> JSONObject = DesktopDeviceRuntime::call,
 ) {
     private val api = SharedDeviceTransport(allowLoopback = true)
+    var themeState: SharedThemeState? = null
+        set(value) {
+            val owner = store.deviceOwner()
+            value?.attach(owner?.first, owner?.second)
+            field = value
+        }
     private val routes = mutableMapOf<String, VerifiedRoute>()
     private var preferenceRevision by mutableStateOf(0L)
     private var issues by mutableStateOf<Map<String, String>>(emptyMap())
@@ -189,6 +197,7 @@ internal class DesktopDeviceSync(
         val b = DeviceBinding(address, result.getString("instance"), result.getString("device"), result.getString("token"), true)
         if (authorize) store.saveDeviceOwner(b.instance, b.device)
         check(store.deviceOwner() == (b.instance to b.device)) { "此服务实例与电脑保存的主人身份不一致。" }
+        themeState?.attach(b.instance, b.device)
         enabled = true
         if (phoneUrl != result.optString("phoneUrl")) invite = null
         phoneUrl = result.optString("phoneUrl")
@@ -379,6 +388,7 @@ internal class DesktopDeviceSync(
             if (recovered != 0) error("设备授权已被拒绝，已将 ${recovered} 条尚未派发的消息恢复为草稿。")
             throw e
         }.associateBy { it.profile }.toMutableMap()
+        val themeIssue = themeState?.synchronize(api, b).orEmpty()
         val byRemote = mutableMapOf<String, String>()
         val profileErrors = mutableMapOf<String, String>()
         val candidates = mutableListOf<DesktopDeviceUpstream>()
@@ -547,7 +557,7 @@ internal class DesktopDeviceSync(
         sessionIssues = errors
         devices = api.devices(b)
         val outstanding = store.profiles.sumOf { p -> store.sessions(p.id).sumOf { store.deviceSessionState(SessionKey(p.id, it.id)).pending } }
-        notice = (profileErrors.values + errors.values + listOf(pendingIssue).filter(String::isNotEmpty)).distinct().take(3).joinToString(" ").ifEmpty {
+        notice = (profileErrors.values + errors.values + listOf(pendingIssue, themeIssue).filter(String::isNotEmpty)).distinct().take(3).joinToString(" ").ifEmpty {
             if (outstanding > 0) "有 ${outstanding} 轮文字或媒体正在排队或核对。" else "已同步设备会话。"
         }
     }

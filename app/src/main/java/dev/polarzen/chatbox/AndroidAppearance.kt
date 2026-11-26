@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.selection.LocalTextSelectionColors
 import androidx.compose.foundation.text.selection.TextSelectionColors
@@ -17,16 +16,18 @@ import androidx.compose.material.darkColors
 import androidx.compose.material.lightColors
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
@@ -49,9 +50,36 @@ private val darkAppearance = darkColorScheme(
     surfaceContainer = Color(0xFF25222E), surfaceContainerLow = Color(0xFF25222E),
 )
 
+internal val LocalChatTheme = staticCompositionLocalOf { ChatTheme() }
+
+private fun androidThemeColors(theme: ChatTheme): androidx.compose.material3.ColorScheme {
+    val dark = theme.dark
+    val accent = theme.accent
+    val base = if (dark) darkAppearance else lightAppearance
+    if (accent == null) return base
+    val raw = Color(android.graphics.Color.parseColor(accent))
+    fun tint(value: Color, amount: Float) = lerp(value, raw, amount)
+    val surface = tint(if (dark) Color(0xff202025) else Color.White, .045f)
+    val canvas = tint(if (dark) Color(0xff18181b) else Color(0xfff9f9fa), .09f)
+    val ink = base.onSurface
+    val palette = chatThemeColors(theme)
+    val primary = palette.accent
+    val onPrimary = palette.onAccent
+    val container = palette.accentSurface
+    return base.copy(primary = primary, onPrimary = onPrimary, primaryContainer = container,
+        onPrimaryContainer = ink, secondary = primary, onSecondary = onPrimary,
+        secondaryContainer = container, onSecondaryContainer = ink, tertiary = primary, onTertiary = onPrimary,
+        tertiaryContainer = container, onTertiaryContainer = ink, surfaceTint = primary,
+        surface = surface, background = canvas, surfaceVariant = tint(surface, .12f),
+        surfaceContainer = canvas, surfaceContainerLowest = surface, surfaceContainerLow = surface,
+        surfaceContainerHigh = tint(surface, .09f), surfaceContainerHighest = tint(surface, .14f),
+        outlineVariant = tint(base.outlineVariant, .18f))
+}
+
 @Composable
-internal fun AndroidChatTheme(dark: Boolean, content: @Composable () -> Unit) {
-    val colors = if (dark) darkAppearance else lightAppearance
+internal fun AndroidChatTheme(theme: ChatTheme, content: @Composable () -> Unit) {
+    val dark = theme.dark
+    val colors = remember(dark, theme.accent) { androidThemeColors(theme) }
     val shared = if (dark) darkColors() else lightColors()
     SharedMaterialTheme(colors = shared.copy(
         primary = colors.primary, secondary = colors.primary,
@@ -60,33 +88,26 @@ internal fun AndroidChatTheme(dark: Boolean, content: @Composable () -> Unit) {
     )) {
         MaterialTheme(colorScheme = colors) {
             CompositionLocalProvider(
+                LocalChatTheme provides theme,
                 LocalTextSelectionColors provides TextSelectionColors(colors.primary,
-                    if (dark) Color(0xFF50456B) else Color(0xFFACC5FF)), content = content)
+                    if (theme.accent == null) { if (dark) Color(0xFF50456B) else Color(0xFFACC5FF) }
+                    else chatThemeColors(theme).selection), content = content)
         }
     }
 }
 
 @Composable
 internal fun AndroidAppearanceScreen(
-    dark: Boolean, onDark: (Boolean) -> Unit, notify: Boolean, onNotify: (Boolean) -> Unit,
+    openTheme: () -> Unit, notify: Boolean, onNotify: (Boolean) -> Unit,
     systemAllowed: Boolean, systemSettings: () -> Unit, onClose: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("窗口外观", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+            Text("外观与通知", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
             TextButton(onClick = onClose) { Text("返回") }
         }
-        Text("主题", style = MaterialTheme.typography.titleMedium)
-        listOf(false to "浅色", true to "深色").forEach { (value, label) ->
-            Row(Modifier.fillMaxWidth().selectable(dark == value, role = Role.RadioButton,
-                onClick = { onDark(value) }).padding(vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                RadioButton(selected = dark == value, onClick = null)
-                Text(label)
-            }
-        }
-        TextButton(onClick = { onDark(false) }) { Text("恢复默认外观") }
+        TextButton(onClick = openTheme) { Text("主题") }
         HorizontalDivider()
         Row(Modifier.fillMaxWidth().toggleable(notify, role = Role.Switch, onValueChange = onNotify)
             .padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {

@@ -37,6 +37,9 @@ import java.nio.file.StandardOpenOption
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 
 // The screen acknowledges hide and exit only after its draft has been flushed.
@@ -268,16 +271,22 @@ private fun runPrimaryWindow(
     val store = loaded.getOrNull()
     val keys = NamedKeys(dataDir, DesktopCredentials(dataDir.resolve("credentials")))
     val images = ReplyImageCache(dataDir.resolve("reply-images"))
-    val deviceSync = store?.let { DesktopDeviceSync(it, keys) }
+    val appearanceStore = DesktopAppearanceStore(dataDir)
+    val initialAppearance = appearanceStore.load()
+    val chatThemeState = DesktopThemeState(dataDir, ChatTheme(dark = initialAppearance.dark))
+    val deviceSync = store?.let { DesktopDeviceSync(it, keys).apply { themeState = chatThemeState } }
     val setupMarker = dataDir.resolve("device-setup-seen")
     val firstDeviceSetup = store?.profiles?.isEmpty() == true && !Files.exists(setupMarker)
-    val appearanceStore = DesktopAppearanceStore(dataDir)
     val settingsStore = DesktopShellSettingsStore(dataDir)
     application(exitProcessOnExit = false) {
         val visibility = remember { DesktopShellVisibility() }
         val modalCount = remember { mutableIntStateOf(0) }
         val historySearchOpen = remember { mutableStateOf(false) }
-        var appearance by remember { mutableStateOf(appearanceStore.load()) }
+        val scope = rememberCoroutineScope()
+        var localAppearance by remember { mutableStateOf(initialAppearance) }
+        val theme = chatThemeState.theme
+        val appearance = localAppearance.copy(dark = theme.dark)
+        var themeOpen by remember { mutableStateOf(false) }
         var settings by remember { mutableStateOf(settingsStore.load()) }
         var settingsOpen by remember { mutableStateOf(false) }
         var shellError by remember { mutableStateOf<String?>(if (activationAvailable) null else "无法启用窗口唤起服务，后台回复提醒不可用。") }
@@ -367,7 +376,7 @@ private fun runPrimaryWindow(
             }
             DesktopWindowEffects(window, appearance) { shellError = it }
             CompositionLocalProvider(LocalModalCount provides modalCount) {
-                DesktopTheme(appearance.dark) {
+                DesktopTheme(theme.dark, theme) {
                     Surface(Modifier.fillMaxSize()) {
                         if (store == null) Text(listOfNotNull(
                             "无法读取本地聊天历史。", (loaded.exceptionOrNull() as? DesktopHistoryCorruption)?.message,
@@ -377,6 +386,7 @@ private fun runPrimaryWindow(
                             store, keys, images, window, historySearchOpen,
                             deviceSync = deviceSync,
                             firstDeviceSetup = firstDeviceSetup,
+                            onOpenTheme = { themeOpen = true },
                             initialSidebarPinned = settings.recentPanelPinned,
                             onSidebarPinned = { pinned ->
                                 val updated = settings.copy(recentPanelPinned = pinned)
@@ -405,15 +415,25 @@ private fun runPrimaryWindow(
                             },
                         ) {
                             DesktopAppearanceControls(
-                                appearance, onPreview = { appearance = it },
+                                appearance, onPreview = { localAppearance = it },
                                 onCommit = { updated ->
-                                    appearance = updated
+                                    localAppearance = updated
                                     if (runCatching { appearanceStore.save(updated) }.isFailure) shellError = "无法保存窗口外观设置。"
+                                    if (updated.dark != theme.dark) scope.launch {
+                                        try {
+                                            withContext(Dispatchers.IO) {
+                                                synchronized(chatThemeState) {
+                                                    chatThemeState.applyTheme(chatThemeState.theme.copy(dark = updated.dark))
+                                                }
+                                            }
+                                        } catch (e: IOException) { shellError = "无法保存主题设置。" }
+                                    }
                                 },
                             )
                             ShellMenu(trayAvailable, { visibility.hide(tray.trayAvailable) }, { settingsOpen = true })
                         }
                     }
+                    if (themeOpen) DesktopThemeEditor(chatThemeState, window) { themeOpen = false }
                     if (settingsOpen) {
                         DesktopModalGuard()
                         DesktopShellSettingsDialog(settings, trayAvailable, hotkeys.registeredKey, onSave = { updated ->

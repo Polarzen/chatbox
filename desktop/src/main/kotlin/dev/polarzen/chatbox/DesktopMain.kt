@@ -154,6 +154,7 @@ internal fun DesktopScreen(
     onDeviceSetupSeen: () -> Unit = {},
     initialSidebarPinned: Boolean = false,
     onSidebarPinned: (Boolean) -> Unit = {},
+    onOpenTheme: (() -> Unit)? = null,
     appearanceActions: @Composable () -> Unit = {},
 ) {
     val replyAudioCache = remember(replyImageCache) { ReplyAudioCache(replyImageCache.directory.resolveSibling("reply-audio")) }
@@ -1023,6 +1024,7 @@ internal fun DesktopScreen(
             onOpenSearch = { searchOpen = true },
             partnerName = prefs.effectiveName,
             initialSidebarPinned = initialSidebarPinned, onSidebarPinned = onSidebarPinned,
+            onOpenTheme = onOpenTheme,
             settingsLabel = "设置 · " + if (deviceManaged) deviceSync.notice else if (connection.connected) "已连接" else "未连接",
             pinnedMessage = { index, role -> prefs.pins.isNotEmpty() && handle.sequenceAt(index)?.let { ContextPin(it, role) in prefs.pins } == true },
             onToggleMessage = if (!handle.ready) null else toggle@{ index, role ->

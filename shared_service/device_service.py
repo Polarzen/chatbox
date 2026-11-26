@@ -10,10 +10,10 @@ from urllib.parse import urlsplit
 
 if __package__:
     from . import service as core
-    from . import chat_preferences
+    from . import chat_preferences, device_theme
 else:
     import service as core
-    import chat_preferences
+    import chat_preferences, device_theme
 
 
 def migrate_device(db):
@@ -54,6 +54,7 @@ def migrate_device(db):
         db.execute(statement)
     if "unverified" not in {r[1] for r in db.execute("PRAGMA table_info(device_session_state)")}:
         db.execute("ALTER TABLE device_session_state ADD COLUMN unverified INTEGER NOT NULL DEFAULT 0")
+    device_theme.migrate(db)
     chat_preferences.migrate(db)
 
 
@@ -260,6 +261,8 @@ class DeviceApi:
                 core.fields(params, ())
                 return {"instance": db.execute("SELECT instance FROM config").fetchone()[0], "version": 1}
             device = authorize(db, token, owner=action == "devices")
+            if action == "theme":
+                return device_theme.read(db, params)
             if action == "chat-preferences":
                 core.fields(params, ("profile", "sid"))
                 target = {key: values[0] for key, values in params.items()}
@@ -363,6 +366,8 @@ class DeviceApi:
                 db.execute("DELETE FROM device_invite")
                 return 200, me(db, {"id": identifier, "owner": False})
             device = authorize(db, token, owner=action in ("invite", "endpoint", "revoke", "remove"))
+            if action == "theme":
+                return 200, device_theme.update(db, body)
             preference_fields = {"chat-preferences": ("expected", "changes"), "claim-context-reminder": ("threshold",),
                                  "context-notice": ("kind", "through", "active")}
             if action in preference_fields:

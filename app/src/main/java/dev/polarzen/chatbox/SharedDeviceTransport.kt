@@ -165,6 +165,25 @@ internal class SharedDeviceTransport(private val allowLoopback: Boolean) {
         return origin(r.getString("address"), loopback = false).also { require(it == candidate) }
     }
 
+    suspend fun theme(binding: DeviceBinding, since: Long? = null): SharedThemeSnapshot {
+        require(since == null || since >= 0)
+        val response = request(binding, if (since == null) "theme" else "theme?since=$since")
+        val revision = response.getLong("revision")
+        require(revision >= 0)
+        val changed = response.has("theme")
+        require(changed || revision == since)
+        val value = if (changed && !response.isNull("theme"))
+            ChatTheme.fromJson(response.getJSONObject("theme")) else null
+        return SharedThemeSnapshot(revision, value, changed)
+    }
+
+    suspend fun updateTheme(binding: DeviceBinding, expectedRevision: Long, theme: ChatTheme?): Long {
+        require(expectedRevision >= 0)
+        val body = JSONObject().put("expectedRevision", expectedRevision)
+            .put("theme", theme?.toJson() ?: JSONObject.NULL)
+        return request(binding, "theme", body).getLong("revision").also { require(it >= 0) }
+    }
+
     suspend fun devices(binding: DeviceBinding): List<ProfileDevice> {
         val rows = request(binding, "devices").getJSONArray("devices")
         return List(rows.length()) { i ->

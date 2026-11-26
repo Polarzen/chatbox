@@ -172,6 +172,7 @@ internal fun DesktopChatLayout(
     deletionScope: (String) -> String? = { null },
     partnerName: String = "助手", initialSidebarPinned: Boolean = false, onSidebarPinned: (Boolean) -> Unit = {},
     settingsLabel: String = "设置",
+    onOpenTheme: (() -> Unit)? = null,
     onOpenSearch: () -> Unit = {},
     settingsContent: @Composable (close: () -> Unit) -> Unit = {},
     reminderContent: @Composable () -> Unit = {},
@@ -210,6 +211,7 @@ internal fun DesktopChatLayout(
                     "sidebar-toggle", { sidebarOpen = !sidebarOpen }, selected = sidebarOpen)
                 ChatIconButton(DesktopChatIcon.Search, "搜索聊天记录 (Ctrl+K)", "history-search-open", onOpenSearch)
                 Spacer(Modifier.weight(1f))
+                onOpenTheme?.let { ChatIconButton(DesktopChatIcon.Theme, "主题", "rail-theme", it) }
                 ChatIconButton(DesktopChatIcon.Settings, settingsLabel, "rail-settings", { settingsOpen = true }, selected = settingsOpen)
             }
             Spacer(Modifier.fillMaxHeight().width(1.dp).background(desktopPalette.line))
@@ -700,6 +702,7 @@ private fun ConversationPane(
                 target = dragTarget,
             ),
     ) {
+      DesktopThemeBackground(LocalChatTheme.current)
       Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().height(54.dp).padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(partnerName, Modifier.weight(1f).testTag("partner-name"), color = desktopPalette.ink,

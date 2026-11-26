@@ -33,7 +33,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private enum class ChatPage { WELCOME, PAIR, RECENT, CHAT, DEVICE_CHAT, DEVICE_SETTINGS, CONNECTIONS, APPEARANCE }
+private enum class ChatPage { WELCOME, PAIR, RECENT, CHAT, DEVICE_CHAT, DEVICE_SETTINGS, CONNECTIONS, APPEARANCE, THEME }
 
 class MainActivity : ComponentActivity() {
     private lateinit var app: AndroidAppState
@@ -119,8 +119,9 @@ class MainActivity : ComponentActivity() {
             if (savedPage == null || receivedIntentWhileLoading) acceptIntent(intent)
         }
         setContent {
-            val dark = ready && app.dark
-            AndroidChatTheme(dark) {
+            val theme = if (ready) app.appearance else ChatTheme()
+            val dark = theme.dark
+            AndroidChatTheme(theme) {
                 SideEffect {
                     val bars = WindowCompat.getInsetsController(window, window.decorView)
                     bars.isAppearanceLightStatusBars = !dark
@@ -366,7 +367,7 @@ class MainActivity : ComponentActivity() {
                 ChatPage.WELCOME -> AndroidDeviceWelcome({ go(ChatPage.PAIR) }, { completeWelcome(); newNativeChat("") })
                 ChatPage.PAIR -> AndroidDevicePairing(device, app.pairingScope, closePage) { completeWelcome(); recent() }
                 ChatPage.RECENT -> screens.SaveableStateProvider("recent") {
-                    AndroidRecentScreen(app, ::openDevice, ::requestNewChat) { go(ChatPage.DEVICE_SETTINGS) }
+                    AndroidRecentScreen(app, ::openDevice, ::requestNewChat, theme = { go(ChatPage.THEME) }) { go(ChatPage.DEVICE_SETTINGS) }
                 }
                 ChatPage.DEVICE_SETTINGS -> AndroidDeviceSettings(device, app.pairingScope,
                     { go(ChatPage.PAIR) }, { go(ChatPage.CONNECTIONS) }, { go(ChatPage.APPEARANCE) }, closePage)
@@ -388,8 +389,11 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 ChatPage.CONNECTIONS -> AndroidConnectionSettings(connections, closePage)
+                ChatPage.THEME -> Box(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
+                    AndroidThemeEditor(app.appearance, app.themes.issue, app::setAppearance, closePage)
+                }
                 ChatPage.APPEARANCE -> Box(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
-                    AndroidAppearanceScreen(app.dark, app::useDark, app.delivery.notificationsEnabled, { wanted ->
+                    AndroidAppearanceScreen({ go(ChatPage.THEME) }, app.delivery.notificationsEnabled, { wanted ->
                         app.delivery.notificationsEnabled = wanted
                         if (wanted) requestNotifications(onFirstSend = false)
                     }, notificationsAllowed, {
@@ -427,7 +431,7 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable private fun RecentPane(active: (AndroidDeviceRow) -> Boolean) {
-        AndroidRecentScreen(app, ::openDevice, ::requestNewChat, active, Modifier.fillMaxSize()) {
+        AndroidRecentScreen(app, ::openDevice, ::requestNewChat, active, Modifier.fillMaxSize(), theme = { go(ChatPage.THEME) }) {
             go(ChatPage.DEVICE_SETTINGS)
         }
     }
@@ -467,7 +471,7 @@ class MainActivity : ComponentActivity() {
             onRetry = { turn -> send(MobileDraft(turn.question, turn.sent)) },
             onRetryMedia = { turn, asset -> app.retryMedia(base, session.id, turn, asset) },
             onSettings = { go(ChatPage.CONNECTIONS) },
-            onAppearance = { go(ChatPage.APPEARANCE) },
+            onTheme = { go(ChatPage.THEME) }, onAppearance = { go(ChatPage.APPEARANCE) },
             onHeart = { heartOpen = true },
             onRecent = ::recent, onDeviceSettings = { go(ChatPage.DEVICE_SETTINGS) },
             wideRecent = { RecentPane { it.nativeBase == base && it.sid == session.id } },
@@ -510,7 +514,7 @@ class MainActivity : ComponentActivity() {
                 if (native != null) app.history.addAssets(native, session.id, assets)
             }, onSend = { if (device.send(heart.live)) requestNotifications(onFirstSend = true) },
             onRetry = { lifecycleScope.launch { device.refresh() } }, onRetryMedia = device::retryMedia,
-            onSettings = { go(ChatPage.DEVICE_SETTINGS) }, onAppearance = { go(ChatPage.APPEARANCE) },
+            onSettings = { go(ChatPage.DEVICE_SETTINGS) }, onTheme = { go(ChatPage.THEME) }, onAppearance = { go(ChatPage.APPEARANCE) },
             onHeart = { heartOpen = true },
             onRecent = ::recent, onDeviceSettings = { go(ChatPage.DEVICE_SETTINGS) },
             readDraft = { device.chat?.draft?.text.orEmpty() }, draftEvent = device.draftEvent,

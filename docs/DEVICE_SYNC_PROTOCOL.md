@@ -12,6 +12,8 @@ Windows 和 Android 客户端通过设备配对建立跨端连接。服务实例
 | POST endpoint | Windows 主人；address，手机可达的 HTTPS 地址 | address |
 | POST prove | device, nonce，均为 UUID；无需传送凭据 | instance, device, address, proof。proof 是以 SHA-256(UTF-8(token)) 二进制摘要为 key 的 HMAC-SHA256 小写十六进制，明文为以换行连接的 chatbox-device-address-v1、instance、device、已登记 address、nonce，无末尾换行。验证绑定和目的地址后才向新地址发送凭据 |
 | GET devices / POST revoke | 限主人；revoke 传 device | devices 数组，各项 device,name；撤销返回空对象 |
+| GET theme | 可选 `since`，表示本机已缓存的主题修订号 | `revision`；主题有变化时附带 `theme`。初始为空。 |
+| POST theme | `expectedRevision` 和 `theme`。配对设备提交浅深模式、主题色、聊天背景图和虚化强度 | 返回修订号。并发改动按修订号核对，过期写入返回 409。 |
 | GET profiles | 无 | profiles 数组，各项 profile,sourceId,base,username,name,originDevice,upstream,available |
 | POST profile | sourceId,base,username,name；可选 upstream（Windows 本机已登记的路由 ID）、legacyToken（同实例原档案主人证明） | 同一档案对象。手机只能登记本安装的用户名和来源。未映射的来源保留可读记录，不携带既有密钥访问未知地址 |
 | GET sessions | offset,limit，可选 revision | sessions,revision,more。每项 profile,sid,title,activity,total,imported,reason,originDevice。按 activity 降序、profile 和 sid 排序；快照改变返回 409 |
@@ -24,6 +26,6 @@ Windows 和 Android 客户端通过设备配对建立跨端连接。服务实例
 | POST media-end | profile,sid,id,answer,status。原设备报告 `complete` 或 `unknown`，与预留使用相同编号 | profile,sid,turn。重复提交相同结果返回原轮，冲突结果返回 409 |
 | POST remove | 主人；profile,sid | 空对象；保留移除标记，拒绝旧快照重发。手机的「隐藏」仅改本机 |
 
-主人设置、签发邀请、管理上游、设置公网地址和管理设备只在电脑本机。手机网关按方法及路径允许 GET health/me/profiles/sessions/turns/turn/operation，POST preview/join/prove/profile/session/import/start/send/media-begin/media-end。媒体原件由原生发送与本机附件库处理；预留与文字共用同一房间的发送互斥。
+主人设置、签发邀请、管理上游、设置公网地址和管理设备只在电脑本机。手机网关按方法及路径允许 GET health/me/theme/profiles/sessions/turns/turn/operation，POST preview/join/prove/theme/profile/session/import/start/send/media-begin/media-end。媒体原件由原生发送与本机附件库处理；预留与文字共用同一房间的发送互斥。
 
 Windows 开启设备共享时通过本机命令登记主人和各上游。CLI 使用 `service.py --db <数据库> device-owner`，标准输入 JSON 包含 device,token。`device-upstream` 接收 sourceId,base,key，可选 launcherId。提供 `addAlias` 可增量登记主人确认的同实例 HTTPS 手机来源，提供 `aliases` 可替换手动集合，省略两者保留原有别名。回执包含 upstream。密钥通过本机管道进入受保护的本地存储。
